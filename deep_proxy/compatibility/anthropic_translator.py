@@ -1,0 +1,586 @@
+"""Anthropic Messages API ↔ OpenAI Chat Completions 翻译层。
+
+提供 in-process 翻译，不走内部 HTTP 调用：
+- claude_request_to_openai: Anthropic POST /v1/messages 请求体 → OpenAI /v1/chat/completions
+- openai_response_to_claude: OpenAI 非流式响应 → Anthropic Message 响应
+- openai_stream_to_claude: OpenAI SSE chunks → Anthropic SSE 事件序列
+
+支持范围：
+- text / image (data URL) / tool_use / tool_result content blocks
+- system 字段（string 或 text-block 数组）→ system message
+- tools / tool_choice 双向映射
+- stream（文本块；tool_use 流式作为单 block 在最后整体发出）
+- stop_reason 双向映射
+- usage 字段映射（input_tokens ↔ prompt_tokens、output_tokens ↔ completion_tokens）
+
+DeepSeek 不支持的字段（top_k、metadata 等）静默丢弃。
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Stop reason 映射
+# ---------------------------------------------------------------------------
+
+_OPENAI_TO_ANTHROPIC_STOP = {
+    "stop": "end_turn",
+    "length": "max_tokens",
+    "tool_calls": "tool_use",
+    "function_call": "tool_use",
+    "content_filter": "end_turn",
+}
+
+
+def _map_stop_reason(openai_finish: Optional[str]) -> str:
+    return _OPENAI_TO_ANTHROPIC_STOP.get(openai_finish, "end_turn")
+
+
+# ---------------------------------------------------------------------------
+# 请求翻译：Anthropic → OpenAI
+# ---------------------------------------------------------------------------
+
+
+def _flatten_text_blocks(value: Any) -> str:
+    """把 Anthropic 的 text-block 数组展平为单字符串。string 直接返回。"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: List[str] = []
+        for block in value:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        return "\n".join(parts)
+    return ""
+
+
+def _convert_user_content_blocks(
+    blocks: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """user 消息的 content 数组 → (本消息 OpenAI content 数组, 需追加为 tool 消息的列表)。
+
+    Anthropic 的 tool_result block 在 user 消息中出现，但 OpenAI 把它表示为
+    独立的 role=tool 消息——所以要拆出来，由调用方插入到主消息序列。
+    """
+    openai_parts: List[Dict[str, Any]] = []
+    tool_messages: List[Dict[str, Any]] = []
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        btype = b.get("type")
+        if btype == "text":
+            openai_parts.append({"type": "text", "text": str(b.get("text", ""))})
+        elif btype in ("image", "document", "search_result"):
+            # DeepSeek Anthropic 兼容不支持图像/文档/搜索结果，静默丢弃避免上游 400
+            continue
+        elif btype == "tool_result":
+            content = b.get("content")
+            if isinstance(content, list):
+                content = _flatten_text_blocks(content)
+            elif not isinstance(content, str):
+                content = json.dumps(content, ensure_ascii=False)
+            tool_messages.append({
+                "role": "tool",
+                "tool_call_id": b.get("tool_use_id", ""),
+                "content": content,
+            })
+        # 其他未知 block 类型静默跳过
+    return openai_parts, tool_messages
+
+
+def _convert_assistant_content_blocks(
+    blocks: List[Dict[str, Any]],
+) -> Tuple[str, List[Dict[str, Any]], str]:
+    """assistant 消息的 content 数组 → (text 内容字符串, tool_calls 数组, reasoning_content)。
+
+    Anthropic 历史 assistant 消息可能含 `thinking` block（extended thinking 回放），
+    转换为 DeepSeek 的 `reasoning_content`，以便 router 的 ReasoningCache 多轮补齐。
+    """
+    text_parts: List[str] = []
+    tool_calls: List[Dict[str, Any]] = []
+    thinking_parts: List[str] = []
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        btype = b.get("type")
+        if btype == "text":
+            text_parts.append(str(b.get("text", "")))
+        elif btype == "thinking":
+            thinking_parts.append(str(b.get("thinking", "")))
+        elif btype == "redacted_thinking":
+            # 不可见的加密 thinking — 用占位提示，避免空 reasoning_content
+            thinking_parts.append("[redacted]")
+        elif btype == "tool_use":
+            tool_calls.append({
+                "id": b.get("id", f"call_{uuid.uuid4().hex[:24]}"),
+                "type": "function",
+                "function": {
+                    "name": b.get("name", ""),
+                    "arguments": json.dumps(b.get("input") or {}, ensure_ascii=False),
+                },
+            })
+    return "\n".join(text_parts), tool_calls, "\n".join(thinking_parts)
+
+
+def _convert_messages(
+    anthropic_messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for m in anthropic_messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "user")
+        content = m.get("content", "")
+
+        if isinstance(content, str):
+            out.append({"role": role, "content": content})
+            continue
+
+        if not isinstance(content, list):
+            continue
+
+        if role == "user":
+            parts, tool_msgs = _convert_user_content_blocks(content)
+            # 经 _convert_user_content_blocks 过滤后 parts 仅含 text，
+            # 扁平化为单 string（DeepSeek 不支持多模态）。
+            if parts:
+                out.append({
+                    "role": "user",
+                    "content": "\n".join(p["text"] for p in parts),
+                })
+            out.extend(tool_msgs)
+        elif role == "assistant":
+            text, tool_calls, reasoning = _convert_assistant_content_blocks(content)
+            msg: Dict[str, Any] = {"role": "assistant", "content": text or None}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            if reasoning:
+                # DeepSeek V4 多轮 thinking 上下文：assistant 历史回传 reasoning_content
+                msg["reasoning_content"] = reasoning
+            out.append(msg)
+        else:
+            # 未知 role 按 user 处理（保险起见保留 string 化的内容）
+            out.append({"role": role, "content": _flatten_text_blocks(content)})
+    return out
+
+
+def _convert_tools(anthropic_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for t in anthropic_tools:
+        if not isinstance(t, dict):
+            continue
+        out.append({
+            "type": "function",
+            "function": {
+                "name": t.get("name", ""),
+                "description": t.get("description", ""),
+                "parameters": t.get("input_schema") or {"type": "object", "properties": {}},
+            },
+        })
+    return out
+
+
+def _convert_tool_choice(tc: Any) -> Any:
+    """Anthropic tool_choice → OpenAI tool_choice。"""
+    if not isinstance(tc, dict):
+        return tc
+    t = tc.get("type")
+    if t == "auto":
+        return "auto"
+    if t == "any":
+        return "required"
+    if t == "tool":
+        return {"type": "function", "function": {"name": tc.get("name", "")}}
+    if t == "none":
+        return "none"
+    return "auto"
+
+
+def _convert_anthropic_thinking(thinking: Any) -> Optional[Dict[str, Any]]:
+    """Anthropic thinking → DeepSeek V4 thinking。
+
+    - {"type": "enabled", "budget_tokens": N} → {"type": "enabled"}
+      （budget_tokens 是 Anthropic 概念，DeepSeek 通过 reasoning_effort 控制；
+      router 会在缺省时填入 reasoning_effort=max。）
+    - {"type": "disabled"} → 透传
+    - 其他形态：尽力透传 type 字段，丢弃未识别子键
+    """
+    if not isinstance(thinking, dict):
+        return None
+    t = thinking.get("type")
+    if t in ("enabled", "disabled"):
+        out: Dict[str, Any] = {"type": t}
+        # 允许显式透传 reasoning_effort（兼容混合客户端）
+        if "reasoning_effort" in thinking:
+            out["reasoning_effort"] = thinking["reasoning_effort"]
+        return out
+    return None
+
+
+def claude_request_to_openai(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Anthropic POST /v1/messages 请求体 → OpenAI /v1/chat/completions 请求体。
+
+    模型名透传（claude-* → deepseek-v4-flash 由 router.normalize_model_name 处理；
+    隐含 thinking=enabled 由 router.default_thinking_type 处理）。
+    Anthropic thinking 字段（若客户端显式提供）转 DeepSeek 格式（剥离 budget_tokens）。
+    """
+    out: Dict[str, Any] = {}
+
+    if "model" in body:
+        out["model"] = body["model"]
+
+    # system 字段 → 前置 system message
+    sys_value = body.get("system")
+    messages: List[Dict[str, Any]] = []
+    if sys_value:
+        sys_text = _flatten_text_blocks(sys_value)
+        if sys_text:
+            messages.append({"role": "system", "content": sys_text})
+    messages.extend(_convert_messages(body.get("messages") or []))
+    out["messages"] = messages
+
+    # 必填 / 直通参数
+    if "max_tokens" in body:
+        out["max_tokens"] = body["max_tokens"]
+    for k in ("temperature", "top_p", "stream"):
+        if k in body:
+            out[k] = body[k]
+
+    # stop_sequences → stop
+    stops = body.get("stop_sequences")
+    if stops:
+        out["stop"] = stops
+
+    # tools / tool_choice
+    if body.get("tools"):
+        out["tools"] = _convert_tools(body["tools"])
+    if "tool_choice" in body:
+        out["tool_choice"] = _convert_tool_choice(body["tool_choice"])
+
+    # thinking 字段格式转换（剥离 budget_tokens）；缺省由 router 按模型名注入默认值。
+    converted_thinking = _convert_anthropic_thinking(body.get("thinking"))
+    if converted_thinking is not None:
+        out["thinking"] = converted_thinking
+
+    # output_config.effort → thinking.reasoning_effort
+    # （DeepSeek 文档：output_config 部分支持，仅 effort 字段；其他子键忽略）
+    output_config = body.get("output_config")
+    if isinstance(output_config, dict) and "effort" in output_config:
+        thinking_obj = out.setdefault("thinking", {"type": "enabled"})
+        # 仅当客户端没在 thinking 中显式给出 reasoning_effort 时填入
+        thinking_obj.setdefault("reasoning_effort", output_config["effort"])
+
+    # 启用流式时同时请求 usage 统计（与 OpenAI 一致）
+    if out.get("stream"):
+        out.setdefault("stream_options", {})["include_usage"] = True
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 响应翻译：OpenAI → Anthropic（非流式）
+# ---------------------------------------------------------------------------
+
+
+def _openai_message_to_anthropic_content(
+    message: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """OpenAI assistant message → Anthropic content blocks。
+
+    DeepSeek 的 reasoning_content（如存在）翻译为 Anthropic thinking block，
+    放在 text/tool_use 之前（与 Anthropic 官方流顺序一致）。
+    """
+    blocks: List[Dict[str, Any]] = []
+    # reasoning_content → thinking block（在 text 之前）
+    reasoning = message.get("reasoning_content") or message.get("reasoning")
+    if isinstance(reasoning, str) and reasoning:
+        blocks.append({"type": "thinking", "thinking": reasoning})
+
+    text = message.get("content")
+    if isinstance(text, str) and text:
+        blocks.append({"type": "text", "text": text})
+    elif isinstance(text, list):
+        # 罕见：OpenAI assistant 返回多模态数组，提取 text 部分
+        for part in text:
+            if isinstance(part, dict) and part.get("type") == "text":
+                blocks.append({"type": "text", "text": str(part.get("text", ""))})
+
+    for tc in message.get("tool_calls") or []:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function") or {}
+        try:
+            input_obj = json.loads(fn.get("arguments") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            input_obj = {"_raw": fn.get("arguments")}
+        blocks.append({
+            "type": "tool_use",
+            "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
+            "name": fn.get("name", ""),
+            "input": input_obj,
+        })
+
+    if not blocks:
+        # Anthropic 规范要求 content 至少一个 block
+        blocks.append({"type": "text", "text": ""})
+    return blocks
+
+
+def openai_response_to_claude(
+    openai_response: Dict[str, Any],
+    *,
+    requested_model: str,
+) -> Dict[str, Any]:
+    """OpenAI 非流式响应 → Anthropic Message 响应。"""
+    choices = openai_response.get("choices") or []
+    choice = choices[0] if choices else {}
+    msg = choice.get("message") or {}
+    usage = openai_response.get("usage") or {}
+
+    content_blocks = _openai_message_to_anthropic_content(msg)
+    stop_reason = _map_stop_reason(choice.get("finish_reason"))
+
+    return {
+        "id": openai_response.get("id") or f"msg_{uuid.uuid4().hex[:24]}",
+        "type": "message",
+        "role": "assistant",
+        "model": requested_model or openai_response.get("model", ""),
+        "content": content_blocks,
+        "stop_reason": stop_reason,
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": int(usage.get("prompt_tokens") or 0),
+            "output_tokens": int(usage.get("completion_tokens") or 0),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# 流式翻译：OpenAI SSE → Anthropic SSE
+# ---------------------------------------------------------------------------
+
+
+def _sse_event(event_name: str, payload: Dict[str, Any]) -> str:
+    """格式化 Anthropic SSE 事件（带 event: 头）。"""
+    return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+async def openai_stream_to_claude(
+    openai_chunks: AsyncIterator[Dict[str, Any]],
+    *,
+    requested_model: str,
+) -> AsyncIterator[str]:
+    """把 OpenAI 风格的 chunk dict 流翻译为 Anthropic SSE 事件序列。
+
+    输入是业务层 dict 流（来自 router.iter_chat_chunks），不再含 SSE 协议字符串
+    （`data:` 前缀 / `[DONE]` 前哨等已被协议层剥离）。
+
+    生命周期事件：
+      message_start → content_block_start → (content_block_delta)* → content_block_stop
+                    → message_delta → message_stop
+
+    tool_use 流式策略：
+      OpenAI 把 tool_calls 拆分成多个 chunk 累加 arguments；这里在结束时整体发一个
+      tool_use content_block（start + 单条 input_json_delta + stop）。文本与 tool_use
+      混用时，先发文本块再发各 tool_use 块（顺序按 OpenAI tool_call index）。
+    """
+    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+    started = False
+    thinking_block_open = False
+    thinking_block_index = 0
+    text_block_open = False
+    text_block_index = 0
+    next_block_index = 0  # 下一个可用块索引
+    finish_reason: Optional[str] = None
+    usage_output = 0
+    accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
+
+    def _ensure_message_start() -> Optional[str]:
+        nonlocal started
+        if started:
+            return None
+        started = True
+        return _sse_event("message_start", {
+            "type": "message_start",
+            "message": {
+                "id": msg_id,
+                "type": "message",
+                "role": "assistant",
+                "model": requested_model,
+                "content": [],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            },
+        })
+
+    async for chunk in openai_chunks:
+        if not isinstance(chunk, dict):
+            continue
+
+        # 错误终止 dict（router 业务层格式：{"error": {...}}）
+        if "error" in chunk and "choices" not in chunk:
+            msg_start = _ensure_message_start()
+            if msg_start:
+                yield msg_start
+            yield _sse_event("error", {"type": "error", "error": chunk["error"]})
+            return
+
+        # usage 字段可能出现在尾包（choices 为空），也可能与 choices 同包。
+        u = chunk.get("usage") or {}
+        if u:
+            usage_output = int(u.get("completion_tokens") or usage_output)
+
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+
+        ch = choices[0]
+        delta = ch.get("delta") or {}
+
+        msg_start = _ensure_message_start()
+        if msg_start:
+            yield msg_start
+
+        # reasoning_content 增量 → Anthropic thinking_delta（在 text 之前）
+        reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning")
+        if isinstance(reasoning_delta, str) and reasoning_delta:
+            if not thinking_block_open:
+                thinking_block_index = next_block_index
+                next_block_index += 1
+                thinking_block_open = True
+                yield _sse_event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": thinking_block_index,
+                    "content_block": {"type": "thinking", "thinking": ""},
+                })
+            yield _sse_event("content_block_delta", {
+                "type": "content_block_delta",
+                "index": thinking_block_index,
+                "delta": {"type": "thinking_delta", "thinking": reasoning_delta},
+            })
+
+        # 文本增量
+        text_delta = delta.get("content")
+        if isinstance(text_delta, str) and text_delta:
+            # text 出现意味着 thinking 阶段结束，先关闭 thinking 块
+            if thinking_block_open:
+                yield _sse_event("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": thinking_block_index,
+                })
+                thinking_block_open = False
+            if not text_block_open:
+                text_block_index = next_block_index
+                next_block_index += 1
+                text_block_open = True
+                yield _sse_event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": text_block_index,
+                    "content_block": {"type": "text", "text": ""},
+                })
+            yield _sse_event("content_block_delta", {
+                "type": "content_block_delta",
+                "index": text_block_index,
+                "delta": {"type": "text_delta", "text": text_delta},
+            })
+
+        # tool_calls 增量累加（不立即 emit，等结束统一发）
+        for tc in delta.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            idx = tc.get("index", 0)
+            slot = accumulated_tool_calls.setdefault(idx, {
+                "id": "",
+                "name": "",
+                "arguments": "",
+            })
+            if tc.get("id"):
+                slot["id"] = tc["id"]
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                slot["name"] = fn["name"]
+            if fn.get("arguments"):
+                slot["arguments"] += fn["arguments"]
+
+        if ch.get("finish_reason"):
+            finish_reason = ch["finish_reason"]
+
+    # 关闭未关闭的 thinking 块（极端：流里只有 reasoning 没 text/tool_use）
+    if thinking_block_open:
+        yield _sse_event("content_block_stop", {
+            "type": "content_block_stop",
+            "index": thinking_block_index,
+        })
+        thinking_block_open = False
+
+    # 关闭文本块
+    if text_block_open:
+        yield _sse_event("content_block_stop", {
+            "type": "content_block_stop",
+            "index": text_block_index,
+        })
+
+    # 发出累加的 tool_use 块（按 OpenAI 原始 index 顺序）
+    if accumulated_tool_calls:
+        # 兜底：流里完全没出现文本但要有 message_start
+        msg_start = _ensure_message_start()
+        if msg_start:
+            yield msg_start
+        for orig_idx in sorted(accumulated_tool_calls.keys()):
+            slot = accumulated_tool_calls[orig_idx]
+            block_index = next_block_index
+            next_block_index += 1
+            try:
+                input_obj = json.loads(slot["arguments"] or "{}")
+            except json.JSONDecodeError:
+                input_obj = {"_raw": slot["arguments"]}
+            yield _sse_event("content_block_start", {
+                "type": "content_block_start",
+                "index": block_index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": slot["id"] or f"toolu_{uuid.uuid4().hex[:24]}",
+                    "name": slot["name"],
+                    "input": {},
+                },
+            })
+            yield _sse_event("content_block_delta", {
+                "type": "content_block_delta",
+                "index": block_index,
+                "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": json.dumps(input_obj, ensure_ascii=False),
+                },
+            })
+            yield _sse_event("content_block_stop", {
+                "type": "content_block_stop",
+                "index": block_index,
+            })
+
+    # 极端情况：流是空的——也要 emit 一个最小有效消息
+    if not started:
+        yield _ensure_message_start() or ""
+        yield _sse_event("content_block_start", {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        })
+        yield _sse_event("content_block_stop", {
+            "type": "content_block_stop",
+            "index": 0,
+        })
+
+    yield _sse_event("message_delta", {
+        "type": "message_delta",
+        "delta": {
+            "stop_reason": _map_stop_reason(finish_reason),
+            "stop_sequence": None,
+        },
+        "usage": {"output_tokens": usage_output},
+    })
+    yield _sse_event("message_stop", {"type": "message_stop"})

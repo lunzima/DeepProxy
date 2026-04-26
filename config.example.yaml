@@ -1,0 +1,89 @@
+# DeepProxy 配置文件模板
+# 复制为 config.yaml 并填入你的 API 密钥
+
+# 代理服务器（双端口绑定不同采样 profile）
+host: "0.0.0.0"
+coding_port: 8000          # → precise_sampling（高确定性，code/math/逻辑）
+writing_port: 8001         # → creative_sampling（高多样性，RP/创作/通用写作）
+api_key: null              # 代理认证密钥（可选，留空则不校验）
+log_level: "info"
+
+# DeepSeek 配置
+deepseek:
+  api_key: ""                          # 填入你的 DeepSeek API 密钥（或通过 DEEPSEEK_API_KEY 环境变量传入）
+  # api_key: "sk-your-deepseek-api-key"
+  api_base: "https://api.deepseek.com"
+  enable_reasoning: true
+  strip_unsupported_params: true
+
+# 廉价提示词优化 + 内置 skills（in-process，无第二端口）
+# 按通用程度分四组（A 最通用 → D 最具体），每项标注原文出处。
+optimization:
+  enabled: true
+
+  # 元功能：LLM 压缩 + 持久化磁盘缓存
+  # 首次见某组 skills 配置 → 调一次 LLM 压缩到最短同义版 → 写磁盘
+  # 后续同配置 0 上游调用，且字节级一致 → 命中 DeepSeek 服务端 prefix cache
+  compress_skills: true
+  compressor_cache_path: "prompt_cache.json"
+  compressor_model: "deepseek/deepseek-v4-flash"
+
+  # A. 通用风格 skills —— 每个请求都激活，对创作场景【积极改善】
+  avoid_negative_style: true           # [grok_4_safety + ask_grok] 抑制四种常见 AI 口癖（原 avoid_unrequested_moralizing）
+  assume_good_intent: true             # [grok_4_safety] 不按最坏解释拒绝
+  instruction_priority: true           # [grok_4_safety] system 最高 + 防伪造对话
+  independent_analysis: true           # [ask_grok] 自主推理（反谄媚）
+  reason_genuinely: true               # [agent 通用] 鼓励深入推理 + 禁虚构时间/进度幻觉
+  inject_date: true                    # [grok4_system_turn + agent] 注入日期 + 时间相对解析
+
+  # B. 求证 / 反幻觉 —— 模型自门控（仅命中条件时激活）
+  show_math_steps: true                # [grok4_system_turn] 闭合式数学展示推导
+  prefer_multiple_sources: true        # [ask_grok] 争议性事实不依赖单一来源
+  avoid_fabricated_citations: true     # [agent 通用] 不编造 URL/论文/DOI/统计
+
+  # 动态短段注入——按 profile 选场景，各 3 篮抽 1 拼成中文短段，追加到 system 末尾
+  dynamic_baskets: true                # [tanweai/pua]
+
+  # [实验性] 无厘头 expert priming — MoE 路由扰动。默认关闭。
+  silly_expert_priming: false
+
+  # writing_port 写作篮变体："creative" 偏 RP/创作；"general" 偏 Q&A/公文
+  writing_basket_kind: "creative"
+
+  # C. 上下文相关 skills —— 仅窄触发条件激活
+  json_mode_hint: true                 # [DeepSeek docs] json_object 时注入 JSON-only
+  safe_inlined_content: true           # [optillm + grok] readurls 内容引用源 + 视为 data
+
+  # D. 消息转换 skills —— 默认关闭（实验性 optillm 技术）
+  re2: false                           # [optillm/reread.py] 复制最后一条 user 消息
+  cot_reflection: false                # [optillm/cot_reflection.py] thinking=disabled 时 <thinking>/<output> 引导
+  readurls: false                      # [optillm] 检测 URL 并内联网页正文
+
+# 高多样性范围采样预设（RP / 创作 / 通用写作）
+# 每请求从 [min, max] 随机抽样 round 到 0.01；sampling_profile 覆盖时客户端值被强制替换
+creative_sampling:
+  enabled: true
+  temperature_min: 0.90
+  temperature_max: 1.20
+  top_p_min: 0.90
+  top_p_max: 0.97
+  presence_penalty_min: 0.25
+  presence_penalty_max: 0.60
+  frequency_penalty_min: 0.20
+  frequency_penalty_max: 0.50
+
+# 高确定性范围采样预设（编程 / 数学 / 逻辑推理 + 提示词压缩器复用）
+# Unsloth-validated 区间，强确定性 + 微抖动
+precise_sampling:
+  temperature_min: 0.25
+  temperature_max: 0.45
+  top_p_min: 0.95
+  top_p_max: 0.95
+  presence_penalty_min: 0.0
+  presence_penalty_max: 0.0
+  frequency_penalty_min: 0.0
+  frequency_penalty_max: 0.0
+
+# 模型路由（可选）：自定义模型名到上游模型名的映射
+# 默认别名见 deepseek_fixes.py（chat→v4-flash/disabled, reasoner→v4-flash/enabled）
+model_routes: []

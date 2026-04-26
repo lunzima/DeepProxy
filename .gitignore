@@ -1,0 +1,30 @@
+# === 密钥/配置泄漏 ===
+config.yaml
+
+# === 环境变量文件 ===
+.env
+.env.*
+
+# === IDE / 编辑器本地状态 ===
+.claude/
+.qwen/
+.vscode/
+.idea/
+
+# === Python 构建输出 ===
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# === 测试缓存 ===
+.pytest_cache/
+
+# === 生成缓存（可重建） ===
+prompt_cache.json
+
+# === OS 元数据 ===
+.DS_Store
+Thumbs.db
