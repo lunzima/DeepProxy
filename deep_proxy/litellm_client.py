@@ -23,6 +23,7 @@ from litellm.exceptions import RateLimitError, ServiceUnavailableError, APIError
 
 from .compatibility.reasoning_handler import (
     StreamingReasoningAccumulator,
+    process_streaming_delta,
     recover_reasoning_content,
 )
 from .compatibility.error_mapper import map_litellm_error
@@ -236,7 +237,6 @@ async def iter_litellm_chunks(
                 for choice in chunk_dict.get("choices", []):
                     delta = choice.get("delta", {})
                     if delta:
-                        from .compatibility.reasoning_handler import process_streaming_delta
                         process_streaming_delta(delta)
 
             if _accumulator is not None:

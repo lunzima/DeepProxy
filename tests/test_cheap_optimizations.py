@@ -136,9 +136,11 @@ class TestExtractCotOutput:
         assert extract_cot_output("Direct answer without tags.") == "Direct answer without tags."
         assert extract_cot_output("") == ""
 
-    def test_empty_output_falls_back_to_full(self):
+    def test_empty_output_strips_tags(self):
         text = "<thinking>x</thinking><output></output>"
-        assert extract_cot_output(text) == text
+        assert extract_cot_output(text) == ""
+        text2 = "<thinking>step 1</thinking><reflection>oops</reflection><output>  </output>"
+        assert extract_cot_output(text2) == ""
 
 
 class TestSkillJsonMode:

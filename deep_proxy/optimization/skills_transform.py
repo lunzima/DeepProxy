@@ -42,6 +42,9 @@ def _apply_re2(messages: List[Dict[str, Any]]) -> None:
 # ── CoT Reflection ──────────────────────────────────────────────────────
 
 _OUTPUT_TAG_RE = re.compile(r"<output>(.*?)(?:</output>|$)", re.DOTALL)
+# 剥离 thinking/reflection 区块及其内部文本 + 标签残余
+_COT_BLOCK_RE = re.compile(r"<(thinking|reflection)>.*?</\1>\s*", re.DOTALL)
+_COT_TAG_RE = re.compile(r"</?(?:thinking|reflection|output)>", re.IGNORECASE)
 
 
 def _apply_cot_reflection(messages: List[Dict[str, Any]]) -> None:
@@ -62,6 +65,8 @@ def extract_cot_output(content: str) -> str:
     """从含 `<output>` 标签的模型回复里提取最终答案。
 
     无标签时原样返回（fail-open，避免吞掉模型未遵循指令时的有效内容）。
+    `<output>` 标签为空或纯空白时，剥离 thinking/reflection/output 标签
+    而非直接返回带标签的原文（避免内部推理泄漏）。
     """
     if not content or "<output>" not in content:
         return content
@@ -69,7 +74,12 @@ def extract_cot_output(content: str) -> str:
     if not match:
         return content
     extracted = match.group(1).strip()
-    return extracted or content
+    if extracted:
+        return extracted
+    # 空输出：剥离 thinking/reflection 区块，清理标签残余
+    stripped = _COT_BLOCK_RE.sub("", content)
+    stripped = _COT_TAG_RE.sub("", stripped).strip()
+    return stripped or ""
 
 
 # ── readurls ─────────────────────────────────────────────────────────────

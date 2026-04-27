@@ -158,16 +158,7 @@ class DeepProxyRouter:
         if self.config.deepseek.strip_unsupported_params:
             body = strip_unsupported_params(body)
 
-        # 4. V4 多轮：用服务端缓存（按对话前缀）补齐 reasoning_content；
-        #    补不齐则注入 dummy 占位（保持 thinking=enabled，保留本轮推理能力）
-        if is_v4_model(model):
-            messages = body.get("messages", [])
-            if messages:
-                body = ensure_reasoning_content_persistence(
-                    messages, body, cache=self._reasoning_cache,
-                )
-
-        # 5. 清理空 stream_options
+        # 4. 清理空 stream_options
         body = sanitize_stream_options(body)
 
         # 6. 廉价提示词优化 + 内置 skills（in-process，0 额外上游调用）
@@ -232,6 +223,15 @@ class DeepProxyRouter:
                 messages = body.get("messages")
                 if isinstance(messages, list) and messages:
                     _prepend_silly_to_system(messages, priming)
+
+        # 9. V4 多轮 reasoning 自愈：在全部消息修改之后执行，确保
+        #    缓存键与 remember_response 存储时的对话前缀一致。
+        if is_v4_model(model):
+            messages = body.get("messages", [])
+            if messages:
+                body = ensure_reasoning_content_persistence(
+                    messages, body, cache=self._reasoning_cache,
+                )
 
         logger.debug(
             "准备请求: model=%s, stream=%s, params_keys=%s",
