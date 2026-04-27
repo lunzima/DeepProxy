@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from deep_proxy.router import _retry_async, _is_retryable_litellm
+from deep_proxy.utils import retry_async as _retry_async
+from deep_proxy.litellm_client import _is_retryable_litellm
 from litellm.exceptions import RateLimitError, APIError
 
 

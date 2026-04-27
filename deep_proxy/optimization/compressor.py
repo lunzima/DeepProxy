@@ -22,7 +22,19 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 # 缓存版本：变更压缩 prompt / 目标模型 / 输出协议时 +1，强制重压缩
-CACHE_VERSION = 1
+_CACHE_VERSION = 1
+
+_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n(.*?)\n```$", re.DOTALL)
+
+
+def _strip_wrapping(text: str) -> str:
+    """剥掉模型偶尔加的代码栅栏 / 前后引号。"""
+    m = _FENCE_RE.match(text)
+    if m:
+        return m.group(1).strip()
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        return text[1:-1].strip()
+    return text
 
 # 压缩 meta-prompt（中文）
 # 设计参考：
@@ -122,10 +134,10 @@ class SystemPromptCompressor:
             data = json.loads(self._cache_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 return
-            if data.get("version") != CACHE_VERSION:
+            if data.get("version") != _CACHE_VERSION:
                 logger.info(
                     "压缩缓存版本不匹配（磁盘=%s, 当前=%s），忽略旧缓存",
-                    data.get("version"), CACHE_VERSION,
+                    data.get("version"), _CACHE_VERSION,
                 )
                 return
             entries = data.get("entries", {})
@@ -141,7 +153,7 @@ class SystemPromptCompressor:
         try:
             self._cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._cache_path.with_suffix(self._cache_path.suffix + ".tmp")
-            payload = {"version": CACHE_VERSION, "entries": dict(self._mem)}
+            payload = {"version": _CACHE_VERSION, "entries": dict(self._mem)}
             tmp.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -155,7 +167,7 @@ class SystemPromptCompressor:
     @staticmethod
     def _key(text: str, model: str) -> str:
         h = hashlib.sha256()
-        h.update(f"v{CACHE_VERSION}|{model}|".encode("utf-8"))
+        h.update(f"v{_CACHE_VERSION}|{model}|".encode("utf-8"))
         h.update(text.encode("utf-8"))
         return h.hexdigest()
 
@@ -332,16 +344,3 @@ class SystemPromptCompressor:
         logger.debug("compress LLM done: %d -> %d chars (finish=%s)",
                      len(text), len(out), finish_reason)
         return out
-
-
-_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n(.*?)\n```$", re.DOTALL)
-
-
-def _strip_wrapping(text: str) -> str:
-    """剥掉模型偶尔加的代码栅栏 / 前后引号。"""
-    m = _FENCE_RE.match(text)
-    if m:
-        return m.group(1).strip()
-    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
-        return text[1:-1].strip()
-    return text

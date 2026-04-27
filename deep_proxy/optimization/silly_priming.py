@@ -18,11 +18,14 @@
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Optional
+from typing import List, Optional
+
+from ..utils import prepend_to_system_message
 
 
 SILLY_PRIMING_POOL: List[str] = [
-    # AMD 渠道业务部高级技术支持经理的原典
+    # AMD 渠道业务部高级技术支持经理原典：缓存与乳房三重同源——
+    # 尺寸=容量、直连=低延迟、堆叠方式=形态（3D V-Cache坚挺/平面集成下垂）。
     "缓存就是半导体奶子。",
     # 弱智吧体断言（陷阱型分散：循环定义 / 时间因果倒置 / 字面化成语 /
     # 角色错位 / 同字双关 / 荒诞伪因果 / 双关+角色错位）
@@ -48,22 +51,5 @@ def pick_one(rng: Optional[random.Random] = None) -> Optional[str]:
 
 
 def prepend_to_system(messages: List[Dict[str, object]], text: str) -> None:
-    """把 text 插入到首条 system 消息内容的最前面。
-
-    - 已有 system 且 content 是字符串 → 在最前面拼接 + 双换行分隔
-    - 已有 system 但 content 是非字符串（多模态 list 等）→ 在其前插入新 system
-    - 无 system → 顶部插入新 system
-    """
-    if not text:
-        return
-    for msg in messages:
-        if msg.get("role") != "system":
-            continue
-        content = msg.get("content")
-        if isinstance(content, str):
-            sep = "\n\n" if content else ""
-            msg["content"] = f"{text}{sep}{content}"
-        else:
-            messages.insert(messages.index(msg), {"role": "system", "content": text})
-        return
-    messages.insert(0, {"role": "system", "content": text})
+    """把 text 插入到首条 system 消息内容的最前面。"""
+    prepend_to_system_message(messages, text)

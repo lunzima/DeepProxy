@@ -15,7 +15,7 @@ from litellm.exceptions import (
 
 
 # DeepSeek 官方文档已知的错误码对照
-DEEPSEEK_ERROR_MAP: Dict[int, tuple[int, str]] = {
+_DEEPSEEK_ERROR_MAP: Dict[int, tuple[int, str]] = {
     400: (400, "invalid_request_error"),
     401: (401, "authentication_error"),
     402: (402, "invalid_request_error"),       # 余额不足
@@ -26,7 +26,7 @@ DEEPSEEK_ERROR_MAP: Dict[int, tuple[int, str]] = {
 }
 
 # DeepSeek 始终不支持的 OpenAI 参数
-UNSUPPORTED_OPENAI_PARAMS = {
+_UNSUPPORTED_OPENAI_PARAMS = {
     "functions",  # 旧版 OpenAI functions API；DeepSeek 仅支持 tools
     "user",       # DeepSeek 不接受
 }
@@ -49,7 +49,7 @@ def map_litellm_error(exc: Exception) -> HTTPException:
         message = "无法连接到 DeepSeek API，请检查网络或 API 地址"
     elif isinstance(exc, APIError):
         status_code = exc.status_code or 500
-        error_type = DEEPSEEK_ERROR_MAP.get(status_code, (500, "api_error"))[1]
+        error_type = _DEEPSEEK_ERROR_MAP.get(status_code, (500, "api_error"))[1]
 
     return HTTPException(
         status_code=status_code,
@@ -70,6 +70,6 @@ def strip_unsupported_params(body: dict) -> dict:
     依据官方文档：V4 全面支持 temperature/top_p/presence_penalty/frequency_penalty
     /response_format/tools/tool_choice/stream_options，无 thinking 模式相关 strip 需求。
     """
-    return {k: v for k, v in body.items() if k not in UNSUPPORTED_OPENAI_PARAMS}
+    return {k: v for k, v in body.items() if k not in _UNSUPPORTED_OPENAI_PARAMS}
 
 

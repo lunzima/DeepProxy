@@ -19,15 +19,17 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Optional
 
+from ..utils import append_to_system_message
+
 # 三个篮子的固定拼接顺序
-BASKET_ORDER = ("methodology", "best_practices", "moderate_encouragement")
+_BASKET_ORDER = ("methodology", "best_practices", "moderate_encouragement")
 
 
 # ---------------------------------------------------------------------------
 # Coding 套（precise_sampling / coding_port，已定稿）
 # ---------------------------------------------------------------------------
 
-CODING_BASKETS: Dict[str, List[str]] = {
+_CODING_BASKETS: Dict[str, List[str]] = {
     # 方法论：思维方式 / 顺序 / 取证策略；信号词：复现 / 取证 / 路径 / 切换 / 读 / 比较
     "methodology": [
         "设计接口与数据结构之前，先把使用场景与约束条件写在显式的位置。",
@@ -77,7 +79,7 @@ CODING_BASKETS: Dict[str, List[str]] = {
 # 两个变体共享同一组 creative_sampling 采样参数；切换不影响端口数量与采样行为。
 # ---------------------------------------------------------------------------
 
-CREATIVE_BASKETS: Dict[str, List[str]] = {
+_CREATIVE_BASKETS: Dict[str, List[str]] = {
     "methodology": [
         "写作前先确定核心叙述视角与重心，让文本的注意力始终聚焦在主线之上。",
         "切换视角或语态时，通过共同事件、相似主题或对位关系自然过渡。",
@@ -111,7 +113,7 @@ CREATIVE_BASKETS: Dict[str, List[str]] = {
 }
 
 
-GENERAL_BASKETS: Dict[str, List[str]] = {
+_GENERAL_BASKETS: Dict[str, List[str]] = {
     # 方法论：读者导向 / 论点优先 / 结构清晰 / 信息分层
     "methodology": [
         "写作前先确定读者对象与主旨，让文本的展开始终服务于他们的关切。",
@@ -148,17 +150,13 @@ GENERAL_BASKETS: Dict[str, List[str]] = {
 }
 
 
-# 向后兼容别名：早期把 writing 篮当作单一集合时使用 WRITING_BASKETS
-# （如外部测试 / 文档引用），保持别名指向 creative 变体
-WRITING_BASKETS = CREATIVE_BASKETS
-
 _WRITING_VARIANTS: Dict[str, Dict[str, List[str]]] = {
-    "creative": CREATIVE_BASKETS,
-    "general": GENERAL_BASKETS,
+    "creative": _CREATIVE_BASKETS,
+    "general": _GENERAL_BASKETS,
 }
 
 _SCENARIOS: Dict[str, Dict[str, List[str]]] = {
-    "coding": CODING_BASKETS,
+    "coding": _CODING_BASKETS,
 }
 
 
@@ -168,7 +166,7 @@ def assemble_paragraph(
     writing_kind: str = "creative",
     rng: Optional[random.Random] = None,
 ) -> str:
-    """从指定场景的三个篮子各抽 1 句，按 BASKET_ORDER 固定顺序拼成一段。
+    """从指定场景的三个篮子各抽 1 句，按 _BASKET_ORDER 固定顺序拼成一段。
 
     Args:
         scenario: "coding" 或 "writing"；其它值返回 ""。
@@ -182,14 +180,14 @@ def assemble_paragraph(
     - 正常 → 三句直接拼接（句末已含中文句号）
     """
     if scenario == "writing":
-        baskets = _WRITING_VARIANTS.get(writing_kind, CREATIVE_BASKETS)
+        baskets = _WRITING_VARIANTS.get(writing_kind, _CREATIVE_BASKETS)
     else:
         baskets = _SCENARIOS.get(scenario)
     if baskets is None:
         return ""
     pick = rng.choice if rng is not None else random.choice
     parts: List[str] = []
-    for key in BASKET_ORDER:
+    for key in _BASKET_ORDER:
         candidates = baskets.get(key) or []
         if not candidates:
             return ""
@@ -217,22 +215,5 @@ def scenario_from_profile(profile: object) -> Optional[str]:
 
 
 def append_to_system(messages: List[Dict[str, object]], paragraph: str) -> None:
-    """把 paragraph 追加到首条 system 消息末尾（content 是字符串时）。
-
-    - 已有 system 且 content 是字符串 → 末尾换行追加
-    - 已有 system 但 content 是非字符串（多模态 list 等）→ 在其前插入一条新 system
-    - 无 system → 顶部插入一条新 system
-    """
-    if not paragraph:
-        return
-    for msg in messages:
-        if msg.get("role") != "system":
-            continue
-        content = msg.get("content")
-        if isinstance(content, str):
-            sep = "" if content.endswith("\n") or not content else "\n\n"
-            msg["content"] = f"{content}{sep}{paragraph}"
-        else:
-            messages.insert(messages.index(msg), {"role": "system", "content": paragraph})
-        return
-    messages.insert(0, {"role": "system", "content": paragraph})
+    """把 paragraph 追加到首条 system 消息末尾。"""
+    append_to_system_message(messages, paragraph)

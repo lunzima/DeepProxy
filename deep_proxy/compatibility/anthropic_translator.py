@@ -22,6 +22,8 @@ import json
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
+from ..utils import format_sse_event as _sse_event
+
 
 # ---------------------------------------------------------------------------
 # Stop reason 映射
@@ -364,9 +366,220 @@ def openai_response_to_claude(
 # ---------------------------------------------------------------------------
 
 
-def _sse_event(event_name: str, payload: Dict[str, Any]) -> str:
-    """格式化 Anthropic SSE 事件（带 event: 头）。"""
-    return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+class _AnthropicStreamBuilder:
+    """OpenAI chunk 流 → Anthropic SSE 事件的状态机。
+
+    提取 openai_stream_to_claude 的 10 个 nonlocal 可变变量为实例属性，
+    将状态转换逻辑封装为 on_chunk / on_finish 方法，
+    使状态机可独立实例化测试。
+
+    生命周期事件：
+      message_start → content_block_start → (content_block_delta)*
+                     → content_block_stop → message_delta → message_stop
+    """
+
+    def __init__(self, requested_model: str) -> None:
+        self._requested_model = requested_model
+        self._msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+
+        # 状态变量（原 nonlocal）
+        self._started: bool = False
+        self._thinking_open: bool = False
+        self._thinking_idx: int = 0
+        self._text_open: bool = False
+        self._text_idx: int = 0
+        self._next_idx: int = 0
+        self._finish_reason: Optional[str] = None
+        self._usage_output: int = 0
+        self._tool_calls: Dict[int, Dict[str, Any]] = {}
+
+    def _ensure_message_start(self) -> Optional[str]:
+        """emit message_start（仅一次）。"""
+        if self._started:
+            return None
+        self._started = True
+        return _sse_event("message_start", {
+            "type": "message_start",
+            "message": {
+                "id": self._msg_id,
+                "type": "message",
+                "role": "assistant",
+                "model": self._requested_model,
+                "content": [],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            },
+        })
+
+    def on_chunk(self, chunk: Dict[str, Any]) -> List[str]:
+        """处理一个 chunk，返回 0..N 条 SSE 事件字符串。"""
+        events: List[str] = []
+
+        # 错误终止包
+        if "error" in chunk and "choices" not in chunk:
+            msg_start = self._ensure_message_start()
+            if msg_start:
+                events.append(msg_start)
+            events.append(_sse_event("error", {"type": "error", "error": chunk["error"]}))
+            return events
+
+        # usage 尾包 / 同包 usage
+        u = chunk.get("usage") or {}
+        if u:
+            self._usage_output = int(u.get("completion_tokens") or self._usage_output)
+
+        choices = chunk.get("choices") or []
+        if not choices:
+            return events
+
+        ch = choices[0]
+        delta = ch.get("delta") or {}
+
+        msg_start = self._ensure_message_start()
+        if msg_start:
+            events.append(msg_start)
+
+        # reasoning_content → thinking_delta（在 text 之前）
+        reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning")
+        if isinstance(reasoning_delta, str) and reasoning_delta:
+            if not self._thinking_open:
+                self._thinking_idx = self._next_idx
+                self._next_idx += 1
+                self._thinking_open = True
+                events.append(_sse_event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": self._thinking_idx,
+                    "content_block": {"type": "thinking", "thinking": ""},
+                }))
+            events.append(_sse_event("content_block_delta", {
+                "type": "content_block_delta",
+                "index": self._thinking_idx,
+                "delta": {"type": "thinking_delta", "thinking": reasoning_delta},
+            }))
+
+        # text delta（自动关闭 thinking 块）
+        text_delta = delta.get("content")
+        if isinstance(text_delta, str) and text_delta:
+            if self._thinking_open:
+                events.append(_sse_event("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": self._thinking_idx,
+                }))
+                self._thinking_open = False
+            if not self._text_open:
+                self._text_idx = self._next_idx
+                self._next_idx += 1
+                self._text_open = True
+                events.append(_sse_event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": self._text_idx,
+                    "content_block": {"type": "text", "text": ""},
+                }))
+            events.append(_sse_event("content_block_delta", {
+                "type": "content_block_delta",
+                "index": self._text_idx,
+                "delta": {"type": "text_delta", "text": text_delta},
+            }))
+
+        # tool_calls 增量累加（不立即 emit）
+        for tc in delta.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            idx = tc.get("index", 0)
+            slot = self._tool_calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+            if tc.get("id"):
+                slot["id"] = tc["id"]
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                slot["name"] = fn["name"]
+            if fn.get("arguments"):
+                slot["arguments"] += fn["arguments"]
+
+        if ch.get("finish_reason"):
+            self._finish_reason = ch["finish_reason"]
+
+        return events
+
+    def on_finish(self) -> List[str]:
+        """流结束，返回所有终末事件（关闭块 + tool_use 发出 + message_delta/stop）。"""
+        events: List[str] = []
+
+        # 关闭未关闭的 thinking 块
+        if self._thinking_open:
+            events.append(_sse_event("content_block_stop", {
+                "type": "content_block_stop",
+                "index": self._thinking_idx,
+            }))
+            self._thinking_open = False
+
+        # 关闭文本块
+        if self._text_open:
+            events.append(_sse_event("content_block_stop", {
+                "type": "content_block_stop",
+                "index": self._text_idx,
+            }))
+
+        # 发出累加的 tool_use 块（按原始 index 排序）
+        if self._tool_calls:
+            msg_start = self._ensure_message_start()
+            if msg_start:
+                events.append(msg_start)
+            for orig_idx in sorted(self._tool_calls.keys()):
+                slot = self._tool_calls[orig_idx]
+                block_idx = self._next_idx
+                self._next_idx += 1
+                try:
+                    input_obj = json.loads(slot["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    input_obj = {"_raw": slot["arguments"]}
+                events.append(_sse_event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": block_idx,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": slot["id"] or f"toolu_{uuid.uuid4().hex[:24]}",
+                        "name": slot["name"],
+                        "input": {},
+                    },
+                }))
+                events.append(_sse_event("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": block_idx,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": json.dumps(input_obj, ensure_ascii=False),
+                    },
+                }))
+                events.append(_sse_event("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": block_idx,
+                }))
+
+        # 空流兜底：emit 一个最小有效消息
+        if not self._started:
+            events.append(self._ensure_message_start() or "")
+            events.append(_sse_event("content_block_start", {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            }))
+            events.append(_sse_event("content_block_stop", {
+                "type": "content_block_stop",
+                "index": 0,
+            }))
+
+        events.append(_sse_event("message_delta", {
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": _map_stop_reason(self._finish_reason),
+                "stop_sequence": None,
+            },
+            "usage": {"output_tokens": self._usage_output},
+        }))
+        events.append(_sse_event("message_stop", {"type": "message_stop"}))
+
+        return events
 
 
 async def openai_stream_to_claude(
@@ -377,210 +590,17 @@ async def openai_stream_to_claude(
     """把 OpenAI 风格的 chunk dict 流翻译为 Anthropic SSE 事件序列。
 
     输入是业务层 dict 流（来自 router.iter_chat_chunks），不再含 SSE 协议字符串
-    （`data:` 前缀 / `[DONE]` 前哨等已被协议层剥离）。
-
-    生命周期事件：
-      message_start → content_block_start → (content_block_delta)* → content_block_stop
-                    → message_delta → message_stop
-
-    tool_use 流式策略：
-      OpenAI 把 tool_calls 拆分成多个 chunk 累加 arguments；这里在结束时整体发一个
-      tool_use content_block（start + 单条 input_json_delta + stop）。文本与 tool_use
-      混用时，先发文本块再发各 tool_use 块（顺序按 OpenAI tool_call index）。
+    （`data:` 前缀 / `[DONE]` 前哨等已被协议层剥离）。状态机委托给 _AnthropicStreamBuilder。
     """
-    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
-    started = False
-    thinking_block_open = False
-    thinking_block_index = 0
-    text_block_open = False
-    text_block_index = 0
-    next_block_index = 0  # 下一个可用块索引
-    finish_reason: Optional[str] = None
-    usage_output = 0
-    accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
-
-    def _ensure_message_start() -> Optional[str]:
-        nonlocal started
-        if started:
-            return None
-        started = True
-        return _sse_event("message_start", {
-            "type": "message_start",
-            "message": {
-                "id": msg_id,
-                "type": "message",
-                "role": "assistant",
-                "model": requested_model,
-                "content": [],
-                "stop_reason": None,
-                "stop_sequence": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
-            },
-        })
-
+    builder = _AnthropicStreamBuilder(requested_model)
     async for chunk in openai_chunks:
         if not isinstance(chunk, dict):
             continue
-
-        # 错误终止 dict（router 业务层格式：{"error": {...}}）
+        events = builder.on_chunk(chunk)
+        for ev in events:
+            yield ev
+        # error 包后立即终止
         if "error" in chunk and "choices" not in chunk:
-            msg_start = _ensure_message_start()
-            if msg_start:
-                yield msg_start
-            yield _sse_event("error", {"type": "error", "error": chunk["error"]})
             return
-
-        # usage 字段可能出现在尾包（choices 为空），也可能与 choices 同包。
-        u = chunk.get("usage") or {}
-        if u:
-            usage_output = int(u.get("completion_tokens") or usage_output)
-
-        choices = chunk.get("choices") or []
-        if not choices:
-            continue
-
-        ch = choices[0]
-        delta = ch.get("delta") or {}
-
-        msg_start = _ensure_message_start()
-        if msg_start:
-            yield msg_start
-
-        # reasoning_content 增量 → Anthropic thinking_delta（在 text 之前）
-        reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning")
-        if isinstance(reasoning_delta, str) and reasoning_delta:
-            if not thinking_block_open:
-                thinking_block_index = next_block_index
-                next_block_index += 1
-                thinking_block_open = True
-                yield _sse_event("content_block_start", {
-                    "type": "content_block_start",
-                    "index": thinking_block_index,
-                    "content_block": {"type": "thinking", "thinking": ""},
-                })
-            yield _sse_event("content_block_delta", {
-                "type": "content_block_delta",
-                "index": thinking_block_index,
-                "delta": {"type": "thinking_delta", "thinking": reasoning_delta},
-            })
-
-        # 文本增量
-        text_delta = delta.get("content")
-        if isinstance(text_delta, str) and text_delta:
-            # text 出现意味着 thinking 阶段结束，先关闭 thinking 块
-            if thinking_block_open:
-                yield _sse_event("content_block_stop", {
-                    "type": "content_block_stop",
-                    "index": thinking_block_index,
-                })
-                thinking_block_open = False
-            if not text_block_open:
-                text_block_index = next_block_index
-                next_block_index += 1
-                text_block_open = True
-                yield _sse_event("content_block_start", {
-                    "type": "content_block_start",
-                    "index": text_block_index,
-                    "content_block": {"type": "text", "text": ""},
-                })
-            yield _sse_event("content_block_delta", {
-                "type": "content_block_delta",
-                "index": text_block_index,
-                "delta": {"type": "text_delta", "text": text_delta},
-            })
-
-        # tool_calls 增量累加（不立即 emit，等结束统一发）
-        for tc in delta.get("tool_calls") or []:
-            if not isinstance(tc, dict):
-                continue
-            idx = tc.get("index", 0)
-            slot = accumulated_tool_calls.setdefault(idx, {
-                "id": "",
-                "name": "",
-                "arguments": "",
-            })
-            if tc.get("id"):
-                slot["id"] = tc["id"]
-            fn = tc.get("function") or {}
-            if fn.get("name"):
-                slot["name"] = fn["name"]
-            if fn.get("arguments"):
-                slot["arguments"] += fn["arguments"]
-
-        if ch.get("finish_reason"):
-            finish_reason = ch["finish_reason"]
-
-    # 关闭未关闭的 thinking 块（极端：流里只有 reasoning 没 text/tool_use）
-    if thinking_block_open:
-        yield _sse_event("content_block_stop", {
-            "type": "content_block_stop",
-            "index": thinking_block_index,
-        })
-        thinking_block_open = False
-
-    # 关闭文本块
-    if text_block_open:
-        yield _sse_event("content_block_stop", {
-            "type": "content_block_stop",
-            "index": text_block_index,
-        })
-
-    # 发出累加的 tool_use 块（按 OpenAI 原始 index 顺序）
-    if accumulated_tool_calls:
-        # 兜底：流里完全没出现文本但要有 message_start
-        msg_start = _ensure_message_start()
-        if msg_start:
-            yield msg_start
-        for orig_idx in sorted(accumulated_tool_calls.keys()):
-            slot = accumulated_tool_calls[orig_idx]
-            block_index = next_block_index
-            next_block_index += 1
-            try:
-                input_obj = json.loads(slot["arguments"] or "{}")
-            except json.JSONDecodeError:
-                input_obj = {"_raw": slot["arguments"]}
-            yield _sse_event("content_block_start", {
-                "type": "content_block_start",
-                "index": block_index,
-                "content_block": {
-                    "type": "tool_use",
-                    "id": slot["id"] or f"toolu_{uuid.uuid4().hex[:24]}",
-                    "name": slot["name"],
-                    "input": {},
-                },
-            })
-            yield _sse_event("content_block_delta", {
-                "type": "content_block_delta",
-                "index": block_index,
-                "delta": {
-                    "type": "input_json_delta",
-                    "partial_json": json.dumps(input_obj, ensure_ascii=False),
-                },
-            })
-            yield _sse_event("content_block_stop", {
-                "type": "content_block_stop",
-                "index": block_index,
-            })
-
-    # 极端情况：流是空的——也要 emit 一个最小有效消息
-    if not started:
-        yield _ensure_message_start() or ""
-        yield _sse_event("content_block_start", {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""},
-        })
-        yield _sse_event("content_block_stop", {
-            "type": "content_block_stop",
-            "index": 0,
-        })
-
-    yield _sse_event("message_delta", {
-        "type": "message_delta",
-        "delta": {
-            "stop_reason": _map_stop_reason(finish_reason),
-            "stop_sequence": None,
-        },
-        "usage": {"output_tokens": usage_output},
-    })
-    yield _sse_event("message_stop", {"type": "message_stop"})
+    for ev in builder.on_finish():
+        yield ev

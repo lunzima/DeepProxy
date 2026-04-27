@@ -12,10 +12,10 @@ from deep_proxy.config import (
     ProxyConfig,
 )
 from deep_proxy.optimization.dynamic_baskets import (
-    BASKET_ORDER,
-    CODING_BASKETS,
-    CREATIVE_BASKETS,
-    GENERAL_BASKETS,
+    _BASKET_ORDER as BASKET_ORDER,
+    _CODING_BASKETS as CODING_BASKETS,
+    _CREATIVE_BASKETS as CREATIVE_BASKETS,
+    _GENERAL_BASKETS as GENERAL_BASKETS,
     append_to_system,
     assemble_paragraph,
     scenario_from_profile,
@@ -63,12 +63,12 @@ class TestAssemblePara:
     def test_empty_basket_returns_empty(self):
         # 容错路径：篮为空 → 整段返回 ""（避免半段注入）
         from deep_proxy.optimization import dynamic_baskets as db
-        original = db.CREATIVE_BASKETS["methodology"]
+        original = db._CREATIVE_BASKETS["methodology"]
         try:
-            db.CREATIVE_BASKETS["methodology"] = []
+            db._CREATIVE_BASKETS["methodology"] = []
             assert assemble_paragraph("writing", writing_kind="creative") == ""
         finally:
-            db.CREATIVE_BASKETS["methodology"] = original
+            db._CREATIVE_BASKETS["methodology"] = original
 
 
 class TestScenarioFromProfile:

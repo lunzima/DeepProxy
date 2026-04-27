@@ -36,7 +36,7 @@ class TestSampleInRange:
     """共享 helper：仅测退化分支（in-range 已被 creative_sampling 集成测覆盖）。"""
 
     def test_degenerate_returns_lo(self):
-        from deep_proxy.optimization import sample_in_range
+        from deep_proxy.utils import sample_in_range
         assert sample_in_range(0.95, 0.95) == 0.95
         # hi < lo 也退化为 lo（防御）
         assert sample_in_range(0.7, 0.3) == 0.7

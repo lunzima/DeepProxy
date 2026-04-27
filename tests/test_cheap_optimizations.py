@@ -5,10 +5,10 @@ import httpx
 import pytest
 
 from deep_proxy.optimization import (
-    _COT_SYSTEM_PROMPT,
     apply_cheap_optimizations,
     extract_cot_output,
 )
+from deep_proxy.optimization.skills_general import _COT_SYSTEM_PROMPT
 
 
 def _make_body(messages, **extra):
@@ -250,7 +250,6 @@ class TestReadUrls:
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             b = _make_body([{"role": "user", "content": "Look at https://example.com/page"}])
-            await _apply(b, readurls=True, http_client=client) if False else None
             # 用关键字传 http_client
             await apply_cheap_optimizations(
                 b, cot_reflection=False, re2=False, readurls=True,
@@ -376,7 +375,7 @@ class TestReadUrls:
 
     async def test_max_urls_per_message_capped(self):
         # 超过 _READURLS_MAX_PER_MSG（=6）时仅前若干个被抓取
-        from deep_proxy.optimization import _READURLS_MAX_PER_MSG
+        from deep_proxy.optimization.skills_transform import _READURLS_MAX_PER_MSG
 
         def handler(request: httpx.Request) -> httpx.Response:
             host = request.url.host

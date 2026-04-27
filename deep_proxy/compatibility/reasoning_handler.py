@@ -22,6 +22,8 @@ import logging
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
+from ..utils import merge_tool_call_deltas
+
 logger = logging.getLogger(__name__)
 
 
@@ -273,7 +275,7 @@ class StreamingReasoningAccumulator:
             if isinstance(tcs, list):
                 if slot["tool_calls"] is None:
                     slot["tool_calls"] = []
-                slot["tool_calls"] = _merge_tool_call_deltas(slot["tool_calls"], tcs)
+                slot["tool_calls"] = merge_tool_call_deltas(slot["tool_calls"], tcs)
 
     def flush_to_cache(self, cache: ReasoningCache) -> None:
         for slot in self._slots.values():
@@ -283,26 +285,6 @@ class StreamingReasoningAccumulator:
                 slot.get("tool_calls"),
                 slot.get("reasoning_content"),
             )
-
-
-def _merge_tool_call_deltas(
-    existing: List[Dict[str, Any]], deltas: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """OpenAI 流式 tool_calls 按 index 增量累加。"""
-    by_idx: Dict[int, Dict[str, Any]] = {tc.get("index", i): tc for i, tc in enumerate(existing)}
-    for d in deltas:
-        idx = d.get("index", 0)
-        cur = by_idx.setdefault(idx, {"index": idx, "type": "function", "function": {"name": "", "arguments": ""}})
-        if d.get("id"):
-            cur["id"] = d["id"]
-        if d.get("type"):
-            cur["type"] = d["type"]
-        fn = d.get("function") or {}
-        if fn.get("name"):
-            cur["function"]["name"] = fn["name"]
-        if isinstance(fn.get("arguments"), str):
-            cur["function"]["arguments"] = (cur["function"].get("arguments") or "") + fn["arguments"]
-    return [by_idx[k] for k in sorted(by_idx.keys())]
 
 
 # ---------------------------------------------------------------------------

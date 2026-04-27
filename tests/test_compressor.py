@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from deep_proxy.optimization.compressor import (
-    CACHE_VERSION,
+    _CACHE_VERSION,
     SystemPromptCompressor,
 )
 
@@ -96,7 +96,7 @@ class TestCompressorCaching:
         cache_file = tmp_path / "cache.json"
         assert cache_file.exists()
         data = json.loads(cache_file.read_text(encoding="utf-8"))
-        assert data["version"] == CACHE_VERSION
+        assert data["version"] == _CACHE_VERSION
         assert len(data["entries"]) == 1
         assert "PERSISTED" in next(iter(data["entries"].values()))
 
@@ -126,7 +126,7 @@ class TestCompressorCaching:
     async def test_cache_version_mismatch_ignored(self, tmp_path):
         cache_file = tmp_path / "cache.json"
         cache_file.write_text(
-            json.dumps({"version": CACHE_VERSION + 999, "entries": {"x": "OLD"}}),
+            json.dumps({"version": _CACHE_VERSION + 999, "entries": {"x": "OLD"}}),
             encoding="utf-8",
         )
         c = _make_compressor(tmp_path)

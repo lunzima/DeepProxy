@@ -19,8 +19,9 @@
 ### 架构概览
 
 ```
-客户端 (OpenAI SDK) ──→ DeepProxy (:8000 / :8001)
-  ├─ [兼容层] 参数过滤 / 老模型别名 / reasoning / 错误映射
+客户端 (OpenAI SDK / Anthropic SDK) ──→ DeepProxy (:8000 / :8001)
+  ├─ [兼容层] 参数过滤 / 老模型别名 / reasoning / 错误映射 / Anthropic↔OpenAI 翻译
+  ├─ [模型层] OpenRouter 风格 /v1/models（真实定价 / 上下文长度 / 仿冒别名）
   ├─ [优化层] In-process 提示词 skills（0 额外 LLM 调用）
   └─ [路由层] LiteLLM ──→ DeepSeek API (api.deepseek.com)
 ```
@@ -83,7 +84,7 @@ optimization:
   enabled: true
   compress_skills: true          # LLM 压缩 + 磁盘缓存
   dynamic_baskets: true          # 场景化中文短段注入
-  silly_expert_priming: true     # 无厘头 expert priming
+  silly_expert_priming: false    # [实验性] 无厘头 expert priming，默认关闭
   writing_basket_kind: creative  # 或 general
 
 # 采样预设（范围抽样，每请求随机）
@@ -95,6 +96,8 @@ precise_sampling:    # code/math/逻辑
   top_p: [0.95, 0.95]
 ```
 
+详细配置见 [`config.example.yaml`](config.example.yaml)（模板）或 `config.py`（含每个字段的中文注释）。
+
 ## Project Structure
 
 ```
@@ -105,13 +108,23 @@ D:\deepproxy\
 │   ├── main.py                # FastAPI 应用与端点
 │   ├── router.py              # 核心路由器（请求/响应生命周期）
 │   ├── config.py              # Pydantic 配置模型
+│   ├── litellm_client.py      # LiteLLM 调用封装（流式/非流式）
+│   ├── models_list.py         # OpenRouter 风格 /v1/models 构建器
+│   ├── deepseek_models.py     # 真实模型列表 + 仿冒别名映射
+│   ├── deepseek_pricing.py    # USD / CNY 定价数据
+│   ├── clone_models.py        # 仿冒模型条目生成
+│   ├── utils.py               # 共享工具函数（8 个）
 │   ├── compatibility/
+│   │   ├── __init__.py
 │   │   ├── deepseek_fixes.py      # 模型名规范化/别名映射/stream_options
 │   │   ├── reasoning_handler.py   # reasoning_content 处理 + 缓存
-│   │   └── error_mapper.py        # 参数过滤 + 错误映射
+│   │   ├── error_mapper.py        # 参数过滤 + 错误映射
+│   │   └── anthropic_translator.py # Anthropic Messages API ↔ OpenAI 翻译层
 │   └── optimization/
-│       ├── __init__.py            # 廉价 skills（CoT/RE2/readurls/风格提示词）
+│       ├── __init__.py            # 编排入口（apply_cheap_optimizations）
 │       ├── compressor.py          # LLM-based system prompt 压缩器
+│       ├── skills_general.py      # 文本常量 + 辅助函数（A/B/C 组 skills）
+│       ├── skills_transform.py    # 消息转换 skills（D 组：RE2/CoT/readurls）
 │       ├── dynamic_baskets.py     # 场景化中文短段注入
 │       └── silly_priming.py       # 无厘头 expert priming
 ├── tests/
@@ -129,13 +142,17 @@ D:\deepproxy\
 │   ├── test_param_filtering.py    # 参数过滤测试
 │   ├── test_deepseek_fixes.py     # DeepSeek 兼容修复测试
 │   ├── test_retry.py              # 重试逻辑测试
+│   ├── test_anthropic_endpoint.py # Anthropic 端点测试
+│   ├── test_streaming_done.py     # 流式结束标记测试
 │   └── integration/               # 集成测试（需真实 API key）
 ├── config.yaml                    # 默认配置文件
+├── config.example.yaml            # 配置模板
 ├── prompt_cache.json              # 提示词压缩磁盘缓存
 ├── requirements.txt               # Python 依赖
 ├── pytest.ini                     # pytest 配置
 ├── start.bat                      # Windows 启动脚本
-└── QWEN.md                        # This file
+├── QWEN.md                        # This file
+└── CLAUDE.md                      # QWEN.md 的硬链接
 ```
 
 ## Request Pipeline（顺序重要）
@@ -201,7 +218,7 @@ D:\deepproxy\
 ### 关键约束
 1. **不使用 `tools`/`tool_choice` 时**才能启用 skills 优化
 2. **CoT Reflection** 仅在非流式且 `thinking.type=disabled` 时启用（流式跨 chunk 难剥离；V4 自带 CoT 时叠加无益）
-3. **FIM 端点** (`/v1/completions`) 已下线——需要 FIM 的客户端直连 DeepSeek `/beta/completions`
+3. **FIM 端点** (`/v1/completions`) 已下线——DeepSeek 官方 FIM 端点不支持 reasoning，需 FIM 的客户端直连 DeepSeek `/beta/completions`
 4. **Plaintext API key** 在 `config.yaml` 中是故意行为（单用户玩具项目），不视为泄漏
 5. **LiteLLM 的 deepseek provider** 必须以 kwarg 传递 `api_key`/`api_base`（忽略全局 `litellm.api_base`）
 
@@ -214,7 +231,7 @@ D:\deepproxy\
 | 1 | **Reasoning_content 保留 + 多轮回传** | ✅ 已完成 | `reasoning_handler.py` | `process_reasoning_response` 不 pop + 加 `reasoning` 别名；`ReasoningCache` (对话前缀签名)；`ensure_reasoning_content_persistence` (缓存补齐 → 补不齐则注入 dummy 占位并保持 thinking=enabled)；`recover_reasoning_content` (LiteLLM `model_dump` 兜底)；`StreamingReasoningAccumulator` (流式累加→写缓存) |
 | 2 | **统一流式/非流式路径 + 错误 SSE** | ✅ 已完成 | `router.py` | 双路径共用 `prepare_request` → LiteLLM SDK (`acompletion` / `acompletion stream`)；共享 `_to_litellm_api_base`；流式错误映射为 JSON SSE + `[DONE]` |
 | 3 | **动态参数过滤 + V4 模型 alias** | ✅ 已完成 | `deepseek_fixes.py` + `error_mapper.py` | `normalize_model_name`: V4 原生不加 `deepseek/` 前缀；`DEFAULT_V4_ALIASES`: chat/reasoner→v4-flash；`LEGACY_ALIAS_THINKING`: 隐式注入 thinking.type；`strip_unsupported_params`: 仅移除 `functions`/`user` |
-| 4 | **FIM 走 LiteLLM** | ✅ 已处理（下线） | 用户决策 | FIM 端点已下线，说明见下方"已移除功能"。LiteLLM `atext_completion` 对 deepseek 路由无效（prompt→messages→chat 转换），直连 DeepSeek `/beta/completions` |
+| 4 | **FIM 走 LiteLLM** | ✅ 已处理（下线） | DeepSeek 官方 FIM 端点不支持 reasoning | FIM 端点已下线，说明见下方"已移除功能"。LiteLLM `atext_completion` 对 deepseek 路由无效（prompt→messages→chat 转换），直连 DeepSeek `/beta/completions` |
 
 ### 已排除的过时问题（不再需要处理）
 
@@ -236,8 +253,4 @@ D:\deepproxy\
 
 ## What Not to Reintroduce（已移除的功能）
 
-- FIM endpoint (`/v1/completions`) — 用户决定移除；LiteLLM `atext_completion` 对 deepseek 不起作用
-- Optillm HTTP bridge (`optimization/optillm_bridge.py`) — 已移除；廉价 techniques 内嵌 in-process
-- 限制风格的 skills（`respond_in_user_language`/`concise_style`/`mark_uncertainty`/`prefer_fenced_code`）— 破坏创作/RP
-- Ollama 模拟端点（`/api/tags` 等）— 调试期产物
-- 根诊断页面、请求日志中间件 — 调试期过度工程
+- FIM endpoint (`/v1/completions`) — DeepSeek 官方 FIM 端点不支持 reasoning；LiteLLM `atext_completion` 对 deepseek 不起作用

@@ -9,8 +9,9 @@
 ## 架构
 
 ```
-客户端 (OpenAI SDK) → DeepProxy (:8000 / :8001)
-  ├─ [兼容层] 参数过滤 / 老模型别名 / reasoning / 错误映射
+客户端 (OpenAI SDK / Anthropic SDK) → DeepProxy (:8000 / :8001)
+  ├─ [兼容层] 参数过滤 / 老模型别名 / reasoning / 错误映射 / Anthropic↔OpenAI 翻译
+  ├─ [模型层] OpenRouter 风格 /v1/models（真实定价 / 上下文长度 / 仿冒别名）
   ├─ [优化层] 内建 skills（A/B/C/D 四组，0 额外 LLM 调用）
   │            + LLM 压缩（首次调一次，结果磁盘缓存复用）
   │            + 动态短段注入（场景化 PUA-substance 提示词）
@@ -26,7 +27,9 @@
 | **Reasoning 处理** | 保留 `reasoning_content`，多轮缓存自愈；模型剥离时从原始对象兜底恢复 |
 | **错误映射** | 将 DeepSeek/LiteLLM 错误转换为标准 OpenAI 格式；429/5xx 指数退避重试 |
 | **提示词优化** | 内建 15+ 廉价 skills（通用风格 / 反幻觉 / 上下文 / 消息转换），全 in-process，0 额外 LLM 调用 |
-| **模型路由** | 自定义模型名到实际模型的映射 |
+| **Anthropic 兼容** | 将 Anthropic Messages API 请求转换为 OpenAI 格式路由到 DeepSeek，支持流式和非流式 |
+| **模型列表** | OpenRouter 风格 `/v1/models`，含真实 USD 定价、上下文长度、仿冒别名映射 |
+| **克隆模型** | 将 pro/opus/codex 等仿冒模型别名映射到对应的 DeepSeek 实际模型 |
 
 ## 快速开始
 
@@ -99,48 +102,38 @@ curl http://localhost:8000/health
 
 ## 配置说明
 
-编辑 `config.yaml` 或环境变量：
+复制配置模板并编辑：
+
+```bash
+cp config.example.yaml config.yaml
+# 编辑 config.yaml，设置 deepseek.api_key
+```
+
+完整配置项见 [`config.example.yaml`](config.example.yaml)。关键结构：
 
 ```yaml
-# 代理服务器（双端口绑定不同采样 profile）
+# 双端口绑定不同采样 profile
 host: "0.0.0.0"
-coding_port: 8000          # → precise_sampling（高确定性，code/math/逻辑）
-writing_port: 8001         # → creative_sampling（高多样性，RP/创作/通用写作）
-api_key: null              # 代理认证密钥（可选）
-log_level: "info"
+coding_port: 8000          # → precise_sampling
+writing_port: 8001         # → creative_sampling
 
-# DeepSeek 配置
 deepseek:
-  api_key: "${DEEPSEEK_API_KEY}"      # 推荐使用环境变量
+  api_key: ""                          # 填入你的 DeepSeek API 密钥
   api_base: "https://api.deepseek.com"
-  enable_reasoning: true               # 处理 reasoning_content
-  strip_unsupported_params: true       # 过滤 functions/user
-  expose_legacy_models: false          # /v1/models 是否暴露老别名 deepseek-chat/reasoner
-  max_retries: 0                       # 上游 429/5xx 重试次数
-  retry_backoff_base: 0.5             # 重试指数退避基数（秒）
 
-# 提示词优化（默认启用，全 in-process，0 额外 LLM 调用）
 optimization:
   enabled: true
   compress_skills: true                # LLM 压缩 + 磁盘缓存
   dynamic_baskets: true                # 场景化中文短段注入
-  silly_expert_priming: false          # [实验性] 无厘头 expert priming（MoE router 扰动）
-  writing_basket_kind: "creative"      # creative / general
-  # ... 更多 skills 开关见 config.yaml
+  # ... 完整 skills 开关见 config.example.yaml
 
-# 高多样性采样预设（writing_port 使用）
 creative_sampling:
-  enabled: true
   temperature_min: 0.90
   temperature_max: 1.20
   top_p_min: 0.90
   top_p_max: 0.97
-  presence_penalty_min: 0.25
-  presence_penalty_max: 0.60
-  frequency_penalty_min: 0.20
-  frequency_penalty_max: 0.50
+  # presence_penalty / frequency_penalty 略
 
-# 高确定性采样预设（coding_port 使用 + 提示词压缩器复用）
 precise_sampling:
   temperature_min: 0.25
   temperature_max: 0.45
@@ -171,10 +164,11 @@ precise_sampling:
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/v1/chat/completions` | POST | 聊天补全 (OpenAI 完全兼容) |
-| `/v1/models` | GET | 列出可用模型 |
+| `/v1/messages` | POST | Anthropic Messages API 兼容（请求被转换为 OpenAI 格式后路由到 DeepSeek） |
+| `/v1/models` | GET | 列出可用模型（OpenRouter 风格，含定价/上下文长度/仿冒别名） |
 | `/health` | GET | 健康检查 |
 
-> 注：FIM (`/v1/completions`) 已下线，需要 FIM 的客户端请直连 DeepSeek `/beta/completions`。
+> 注：FIM (`/v1/completions`) 已下线——DeepSeek 官方 FIM 端点不支持 reasoning，需 FIM 的客户端请直连 DeepSeek `/beta/completions`。
 
 ## 提示词优化（Skills Pipeline）
 
@@ -217,17 +211,26 @@ deep_proxy/
 │   ├── server.py                # 启动入口（双端口绑定）
 │   ├── router.py                # 核心路由器（请求/响应生命周期）
 │   ├── config.py                # Pydantic 配置模型
+│   ├── litellm_client.py        # LiteLLM 调用封装（流式/非流式）
+│   ├── models_list.py           # OpenRouter 风格 /v1/models 构建器
+│   ├── deepseek_models.py       # 真实模型列表 + 仿冒别名映射
+│   ├── deepseek_pricing.py      # USD / CNY 定价数据
+│   ├── clone_models.py          # 仿冒模型条目生成
+│   ├── utils.py                 # 共享工具函数（8 个）
 │   ├── compatibility/
+│   │   ├── __init__.py
 │   │   ├── deepseek_fixes.py    # 模型名规范化 / 别名映射 / stream_options 清理
 │   │   ├── reasoning_handler.py # reasoning_content 处理 + 服务端缓存
 │   │   ├── error_mapper.py      # 参数过滤 + 错误码映射
 │   │   └── anthropic_translator.py # Anthropic Messages API ↔ OpenAI 翻译层
 │   └── optimization/
-│       ├── __init__.py          # 廉价 skills（风格提示词/消息转换/URL 内联）
+│       ├── __init__.py          # 编排入口（apply_cheap_optimizations）
 │       ├── compressor.py        # LLM-based system prompt 压缩器
+│       ├── skills_general.py    # 文本常量 + 辅助函数（A/B/C 组 skills）
+│       ├── skills_transform.py  # 消息转换 skills（D 组：RE2/CoT/readurls）
 │       ├── dynamic_baskets.py   # 场景化中文短段注入
 │       └── silly_priming.py     # 无厘头 expert priming
-├── tests/                       # pytest 套件
+├── tests/                       # pytest 套件（197 项测试）
 │   ├── conftest.py              # 共享 fixtures
 │   ├── test_router_pipeline.py  # 核心管道测试
 │   ├── test_reasoning_handler.py
@@ -242,13 +245,17 @@ deep_proxy/
 │   ├── test_param_filtering.py
 │   ├── test_deepseek_fixes.py
 │   ├── test_retry.py
+│   ├── test_anthropic_endpoint.py
+│   ├── test_streaming_done.py
 │   └── integration/             # 集成测试（需真实 API key）
 ├── config.yaml                  # 默认配置文件
+├── config.example.yaml          # 配置模板
 ├── prompt_cache.json            # 提示词压缩磁盘缓存
 ├── requirements.txt             # Python 依赖
 ├── pytest.ini                   # pytest 配置
 ├── start.bat                    # Windows 启动脚本
-└── QWEN.md                      # 项目上下文指南（替代 CLAUDE.md）
+├── QWEN.md                      # 开发上下文指南
+└── CLAUDE.md                    # QWEN.md 的硬链接
 ```
 
 ## 开发

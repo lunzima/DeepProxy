@@ -4,7 +4,8 @@ from __future__ import annotations
 import pytest
 
 from deep_proxy.config import DeepSeekConfig, ProxyConfig
-from deep_proxy.router import DeepProxyRouter, _ensure_string_content
+from deep_proxy.router import DeepProxyRouter
+from deep_proxy.litellm_client import _ensure_string_content
 
 
 class TestPrepareRequestChat:
