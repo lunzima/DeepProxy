@@ -117,25 +117,20 @@ def main():
     # -----------------------------------------------------------------------
     # 注册 deepseek-v4-pro / deepseek-v4-flash 到 LiteLLM 计价表
     # 消除 "This model isn't mapped yet" 错误警告
-    # 价格来自 deepseek_pricing.py（$0.14/$0.28 flash, $0.435/$0.87 pro, per M tokens）
+    # 价格来自 deepseek_pricing.py，统一数据源
     # -----------------------------------------------------------------------
-    _DEEPSEEK_PRICING: dict = {
-        "max_tokens": 384_000,
-        "max_input_tokens": 1_000_000,
-        "max_output_tokens": 384_000,
-        "litellm_provider": "deepseek",
-        "mode": "chat",
-    }
-    litellm.model_cost.setdefault("deepseek-v4-flash", {
-        **_DEEPSEEK_PRICING,
-        "input_cost_per_token": 0.00000014,   # $0.14/M 输入
-        "output_cost_per_token": 0.00000028,  # $0.28/M 输出
-    })
-    litellm.model_cost.setdefault("deepseek-v4-pro", {
-        **_DEEPSEEK_PRICING,
-        "input_cost_per_token": 0.000000435,  # $0.435/M 输入
-        "output_cost_per_token": 0.00000087,  # $0.87/M 输出
-    })
+    from .deepseek_pricing import _DEEPSEEK_PRICING as _DP, _V4_CONTEXT_WINDOW, _V4_MAX_OUTPUT
+
+    for _model_name, _p in _DP.items():
+        litellm.model_cost.setdefault(_model_name, {
+            "max_tokens": _V4_MAX_OUTPUT,
+            "max_input_tokens": _V4_CONTEXT_WINDOW,
+            "max_output_tokens": _V4_MAX_OUTPUT,
+            "litellm_provider": "deepseek",
+            "mode": "chat",
+            "input_cost_per_token": _p["prompt"] / 1_000_000,
+            "output_cost_per_token": _p["completion"] / 1_000_000,
+        })
 
     asyncio.run(_serve_both(
         host=config.host,
