@@ -18,6 +18,7 @@ import httpx
 from .clone_models import CLONE_MODELS
 from .deepseek_models import DEEPSEEK_MODELS, V4_MODELS, V4_MODELS_1M
 from .deepseek_pricing import _V4_CONTEXT_WINDOW, _V4_MAX_OUTPUT, model_pricing
+from .litellm_client import _to_litellm_api_base
 from .utils import strip_api_version
 
 logger = logging.getLogger(__name__)
@@ -78,8 +79,8 @@ async def fetch_upstream_models(
     if not api_key:
         return []
 
-    base = strip_api_version(api_base)
-    url = f"{base}/v1/models"
+    base = _to_litellm_api_base(api_base)
+    url = f"{base}/models"
 
     try:
         resp = await http_client.get(

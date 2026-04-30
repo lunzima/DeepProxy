@@ -38,6 +38,7 @@ _RETRYABLE_HTTP = {429, 500, 502, 503, 504}
 # LiteLLM/DeepSeek 在 message / delta 里会注入这些非标准 OpenAI 字段，
 # 严格 Zod 校验（Vercel AI SDK / Cherry Studio）会因此报"类型验证错误"。
 _NON_STANDARD_SLOT_FIELDS = ("provider_specific_fields", "audio")
+_NON_STANDARD_TOP_FIELDS = ("provider_specific_fields", "citations", "service_tier")
 # 这些字段如果是 null 必须省略（OpenAI schema 要求"省略 OR 正常类型"，不接受 null）
 _NULL_TO_OMIT_SLOT_FIELDS = ("tool_calls", "function_call", "role", "content")
 
@@ -116,7 +117,7 @@ def _clean_response_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return payload
     # 顶层非标准字段一律去掉
-    for k in ("provider_specific_fields", "citations", "service_tier"):
+    for k in _NON_STANDARD_TOP_FIELDS:
         payload.pop(k, None)
     for choice in payload.get("choices") or []:
         if not isinstance(choice, dict):
@@ -138,18 +139,28 @@ def _clean_response_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# LiteLLM 调用（入口）
+# LiteLLM 调用入口
 # ---------------------------------------------------------------------------
 
 
-async def call_litellm(config: ProxyConfig, body: Dict[str, Any]) -> Dict[str, Any]:
-    """非流式 LiteLLM 调用 + 重试 + 响应清理。"""
-    import litellm
-
+def _strip_sentinels(body: Dict[str, Any]) -> Dict[str, Any]:
+    """复制 body 并移除内部 _deepproxy_* sentinel 字段，不修改原 body。"""
     call_body = dict(body)
-    # 移除内部 sentinel 字段（_deepproxy_*），不能泄漏给 LiteLLM
     for k in [k for k in call_body if k.startswith("_deepproxy_")]:
         call_body.pop(k)
+    return call_body
+
+
+def _assemble_litellm_body(
+    body: Dict[str, Any],
+    config: ProxyConfig,
+    *,
+    stream: bool = False,
+) -> Dict[str, Any]:
+    """从业务 body 组装 LiteLLM 调用参数（共享于流式/非流式路径）。"""
+    call_body = _strip_sentinels(body)
+    if stream:
+        call_body["stream"] = True
     call_body["messages"] = _ensure_string_content(call_body.get("messages", []))
     call_body["model"] = _to_litellm_model(call_body.get("model", ""))
     # 注：必须以 kwarg 形式传递 api_base —— LiteLLM 的 deepseek provider
@@ -159,6 +170,19 @@ async def call_litellm(config: ProxyConfig, body: Dict[str, Any]) -> Dict[str, A
         call_body["api_key"] = config.deepseek.api_key
     if config.deepseek.api_base:
         call_body["api_base"] = _to_litellm_api_base(config.deepseek.api_base)
+    return call_body
+
+
+def _build_error_dict(e: Exception) -> dict:
+    """将异常映射为 OpenAI 风格错误 dict。"""
+    return map_litellm_error(e).detail.get("error", {"message": str(e)})
+
+
+async def call_litellm(config: ProxyConfig, body: Dict[str, Any]) -> Dict[str, Any]:
+    """非流式 LiteLLM 调用 + 重试 + 响应清理。"""
+    import litellm
+
+    call_body = _assemble_litellm_body(body, config)
 
     async def _do() -> Any:
         response = await litellm.acompletion(**call_body)
@@ -198,17 +222,7 @@ async def iter_litellm_chunks(
     """
     import litellm
 
-    call_body = dict(body)
-    # 移除内部 sentinel 字段（_deepproxy_*），不能泄漏给 LiteLLM
-    for k in [k for k in call_body if k.startswith("_deepproxy_")]:
-        call_body.pop(k)
-    call_body["stream"] = True
-    call_body["messages"] = _ensure_string_content(call_body.get("messages", []))
-    call_body["model"] = _to_litellm_model(call_body.get("model", ""))
-    if config.deepseek.api_key:
-        call_body["api_key"] = config.deepseek.api_key
-    if config.deepseek.api_base:
-        call_body["api_base"] = _to_litellm_api_base(config.deepseek.api_base)
+    call_body = _assemble_litellm_body(body, config, stream=True)
 
     # 连接建立期可重试（尚未开始向客户端 yield 任何 chunk）
     async def _open() -> Any:
@@ -224,7 +238,7 @@ async def iter_litellm_chunks(
         )
     except Exception as e:
         logger.error("LiteLLM 流式请求失败（连接建立期）: %s", str(e))
-        yield {"error": map_litellm_error(e).detail.get("error", {"message": str(e)})}
+        yield {"error": _build_error_dict(e)}
         return
 
     enable_reasoning = config.deepseek.enable_reasoning
@@ -246,5 +260,5 @@ async def iter_litellm_chunks(
             yield chunk_dict
     except Exception as e:
         logger.error("LiteLLM 流式请求中途异常: %s", str(e))
-        yield {"error": map_litellm_error(e).detail.get("error", {"message": str(e)})}
+        yield {"error": _build_error_dict(e)}
         return

@@ -18,6 +18,7 @@ import httpx
 
 from .compatibility.deepseek_fixes import (
     default_thinking_type,
+    is_thinking_disabled,
     is_v4_model,
     normalize_model_name,
     sanitize_stream_options,
@@ -45,6 +46,7 @@ from .optimization.dynamic_baskets import (
 from .optimization.flash_upgrade import (
     DailyUpgradeThrottle,
     UpgradeTracker,
+    _count_user_messages,
     _flatten_messages,
     compute_complexity_score,
     extra_body_requests_upgrade,
@@ -144,7 +146,7 @@ class DeepProxyRouter:
         if is_v4_model(model):
             thinking = body.get("thinking")
             explicitly_disabled = (
-                isinstance(thinking, dict) and thinking.get("type") == "disabled"
+                is_thinking_disabled(thinking)
             )
             if not explicitly_disabled:
                 if not isinstance(thinking, dict):
@@ -174,6 +176,7 @@ class DeepProxyRouter:
             body.setdefault("frequency_penalty",
                             sample_in_range(rp.frequency_penalty_min, rp.frequency_penalty_max))
         else:
+            # 无 profile 时的安全回退：0.6 介于 precise (0.25-0.45) 与 creative (0.90-1.20) 之间
             body.setdefault("temperature", 0.6)
             body.setdefault("top_p", 0.95)
 
@@ -318,7 +321,7 @@ class DeepProxyRouter:
             router_score = self._upgrade_router.score(messages, body=body)
             if router_score >= cfg.router_threshold:
                 user_text = _flatten_messages(messages, user_only=True)
-                user_msg_count = sum(1 for m in messages if m.get("role") == "user")
+                user_msg_count = _count_user_messages(messages)
                 logger.info(
                     "Router 升格: score=%.3f >= threshold=%.2f "
                     "(heuristic=%.1f/10, user_msgs=%d, user_chars=%d)",

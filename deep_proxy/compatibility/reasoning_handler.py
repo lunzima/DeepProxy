@@ -23,6 +23,7 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 from ..utils import merge_tool_call_deltas
+from .deepseek_fixes import is_thinking_disabled
 
 logger = logging.getLogger(__name__)
 
@@ -348,9 +349,7 @@ def ensure_reasoning_content_persistence(
         cache.backfill(messages)
 
     thinking = body.get("thinking")
-    explicitly_disabled = (
-        isinstance(thinking, dict) and thinking.get("type") == "disabled"
-    )
+    explicitly_disabled = is_thinking_disabled(thinking)
     if explicitly_disabled:
         return body
 

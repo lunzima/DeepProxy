@@ -14,6 +14,7 @@ import logging
 from typing import Any, Dict, List
 
 from ..utils import find_system_message, append_to_system_message
+from ..compatibility.deepseek_fixes import is_thinking_disabled
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +171,7 @@ _COT_SYSTEM_PROMPT = """你是一个使用带反思的思维链（Chain of Thoug
 def _cot_eligible(body: Dict[str, Any]) -> bool:
     if body.get("stream"):
         return False
-    thinking = body.get("thinking")
-    return isinstance(thinking, dict) and thinking.get("type") == "disabled"
+    return is_thinking_disabled(body.get("thinking"))
 
 
 def _is_json_mode(body: Dict[str, Any]) -> bool:

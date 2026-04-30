@@ -111,3 +111,8 @@ def sanitize_stream_options(body: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(stream_options, dict) and not stream_options:
         body.pop("stream_options", None)
     return body
+
+
+def is_thinking_disabled(thinking: Any) -> bool:
+    """检查 thinking 对象是否显式 disabled。"""
+    return isinstance(thinking, dict) and thinking.get("type") == "disabled"

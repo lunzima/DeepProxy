@@ -44,6 +44,11 @@ def _last_user_text(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
+def _count_user_messages(messages: List[Dict[str, Any]]) -> int:
+    """统计 user 消息数量。"""
+    return sum(1 for m in messages if m.get("role") == "user")
+
+
 def _last_user_hash(messages: List[Dict[str, Any]]) -> str:
     """最后一条 user 消息的短哈希（检测重复消息用）。"""
     text = _last_user_text(messages)
@@ -325,7 +330,7 @@ def compute_complexity_score(
     # 全量文本 → token 估算 + 上下文膨胀分母
     total_text = _flatten_messages(messages)
     estimated_tokens = len(total_text) / 1.8  # 混排 CJK+English
-    user_turns = sum(1 for m in messages if m.get("role") == "user")
+    user_turns = _count_user_messages(messages)
 
     # user-only 文本 → 内容信号（关键词、代码块、数学符号）
     # system 消息（如 QWEN.md 项目文档）中出现的技术词描述的是项目而非用户请求。
