@@ -26,15 +26,28 @@ from typing import Any, Dict, List, Tuple
 # ======================================================================
 
 
-def _last_user_hash(messages: List[Dict[str, Any]]) -> str:
-    """最后一条 user 消息的短哈希（用于检测重复）。"""
+def _last_user_text(messages: List[Dict[str, Any]]) -> str:
+    """提取最后一条 user 消息的纯文本内容。"""
     for m in reversed(messages):
         if m.get("role") != "user":
             continue
         c = m.get("content", "")
-        text = c if isinstance(c, str) else str(c)
-        return hashlib.md5(text.encode()).hexdigest()[:8]
-    return "empty"
+        if isinstance(c, str):
+            return c
+        if isinstance(c, list):
+            parts = [
+                b.get("text", "")
+                for b in c
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            return "\n".join(parts)
+    return ""
+
+
+def _last_user_hash(messages: List[Dict[str, Any]]) -> str:
+    """最后一条 user 消息的短哈希（检测重复消息用）。"""
+    text = _last_user_text(messages)
+    return hashlib.md5(text.encode()).hexdigest()[:8] if text else "empty"
 
 
 class DailyUpgradeThrottle:

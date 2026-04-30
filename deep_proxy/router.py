@@ -22,6 +22,7 @@ from .compatibility.deepseek_fixes import (
     normalize_model_name,
     sanitize_stream_options,
 )
+from .deepseek_models import V4_FLASH, V4_PRO
 from .compatibility.error_mapper import (
     strip_unsupported_params,
 )
@@ -133,7 +134,7 @@ class DeepProxyRouter:
         #     在全部后续处理之前改写 model，让 thinking/sampling/skills 走 Pro 路径。
         if (
             self.config.flash_upgrade.enabled
-            and model == "deepseek-v4-flash"
+            and model == V4_FLASH
         ):
             self._maybe_upgrade(body)
             model = body.get("model", "")
@@ -291,16 +292,16 @@ class DeepProxyRouter:
 
         # ── Step 1: Sentinel / extra_body 强制升格 ──
         if has_upgrade_sentinel(messages) or extra_body_requests_upgrade(body):
-            logger.info("Sentinel 强制升格 → deepseek-v4-pro")
-            body["model"] = "deepseek-v4-pro"
+            logger.info("Sentinel 强制升格 → %s", V4_PRO)
+            body["model"] = V4_PRO
             self._upgrade_tracker.set_remaining(messages, cfg.persist_turns)
             return
 
         # ── Step 2: 对话已处于升格状态（Layer 3 持久化） ──
         if self._upgrade_tracker.is_upgraded(messages):
             remaining = self._upgrade_tracker.remaining(messages)
-            logger.info("持久升格命中 → deepseek-v4-pro（剩余 %d 轮）", remaining)
-            body["model"] = "deepseek-v4-pro"
+            logger.info("持久升格命中 → %s（剩余 %d 轮）", V4_PRO, remaining)
+            body["model"] = V4_PRO
             return
 
         # ── Step 3: 启发式快速路径（Layer 1） ──
@@ -327,8 +328,8 @@ class DeepProxyRouter:
                 did_upgrade = True
             else:
                 logger.info(
-                    "保留 Flash: score=%.3f < threshold=%.2f (heuristic=%.1f/10) → deepseek-v4-flash",
-                    router_score, cfg.router_threshold, heuristic_score,
+                    "保留 Flash: score=%.3f < threshold=%.2f (heuristic=%.1f/10) → %s",
+                    router_score, cfg.router_threshold, heuristic_score, V4_FLASH,
                 )
 
         # ── Step 5: 防重复刷屏（Layer 2） ──
@@ -345,7 +346,7 @@ class DeepProxyRouter:
             self._upgrade_throttle.should_throttle(messages, False)
 
         if did_upgrade:
-            body["model"] = "deepseek-v4-pro"
+            body["model"] = V4_PRO
             self._upgrade_tracker.set_remaining(messages, cfg.persist_turns)
 
     def process_response(self, response: Dict[str, Any]) -> Dict[str, Any]:

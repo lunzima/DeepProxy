@@ -14,35 +14,9 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
-from .flash_upgrade import _flatten_messages, compute_complexity_score
+from .flash_upgrade import _flatten_messages, _last_user_text, compute_complexity_score
 
 logger = logging.getLogger(__name__)
-
-# ======================================================================
-# 工具函数
-# ======================================================================
-
-
-def _last_user_content(messages: List[Dict[str, Any]]) -> str:
-    """提取最后一条 user 消息的纯文本内容。
-
-    Coding Agent 常将系统上下文（QWEN.md / memory）注入为前几条 user 消息，
-    仅取最后一条可隔离真正的用户问题。
-    """
-    for m in reversed(messages):
-        if m.get("role") != "user":
-            continue
-        c = m.get("content", "")
-        if isinstance(c, str):
-            return c
-        if isinstance(c, list):
-            parts = [
-                b.get("text", "")
-                for b in c
-                if isinstance(b, dict) and b.get("type") == "text"
-            ]
-            return "\n".join(parts)
-    return ""
 
 
 # ======================================================================
@@ -106,12 +80,11 @@ class RuleUpgradeRouter(UpgradeRouter):
         self._scale = base_scale
 
     def score(self, messages: List[Dict[str, Any]], **kwargs) -> float:
-        # 强制升格信号 → 直接 1.0
-        from .flash_upgrade import has_upgrade_sentinel
+        # Sentinel / extra_body 强制升格信号（即使 _maybe_upgrade 已在前置检查，
+        # 独立调用时仍需保留以保证 public API 完整性）
+        from .flash_upgrade import has_upgrade_sentinel, extra_body_requests_upgrade
         if has_upgrade_sentinel(messages):
             return 1.0
-
-        from .flash_upgrade import extra_body_requests_upgrade
         if kwargs.get("body") and extra_body_requests_upgrade(kwargs["body"]):
             return 1.0
 
@@ -185,7 +158,7 @@ class BertUpgradeRouter(UpgradeRouter):
 
         # 仅用最后一条 user 消息评分，避免 Coding Agent 注入的巨量
         # 系统上下文（QWEN.md / memory 等）被误判为复杂请求。
-        last_user = _last_user_content(messages)
+        last_user = _last_user_text(messages)
         text = last_user if last_user else _flatten_messages(messages, user_only=True)
         try:
             import torch

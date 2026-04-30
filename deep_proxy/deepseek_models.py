@@ -21,16 +21,20 @@ DEEPSEEK_MODELS = {
     },
 }
 
+# ── V4 系列模型常量（单一数据源，避免各处硬编码字符串） ────
+V4_FLASH = "deepseek-v4-flash"
+V4_PRO = "deepseek-v4-pro"
+
 # ── V4 系列模型（2026-04 发布） ────────────────────────────
 V4_MODELS = {
-    "deepseek-v4-flash": {
-        "id": "deepseek-v4-flash",
+    V4_FLASH: {
+        "id": V4_FLASH,
         "object": "model",
         "created": 1745443200,
         "owned_by": "deepseek",
     },
-    "deepseek-v4-pro": {
-        "id": "deepseek-v4-pro",
+    V4_PRO: {
+        "id": V4_PRO,
         "object": "model",
         "created": 1745443201,
         "owned_by": "deepseek",
@@ -39,15 +43,15 @@ V4_MODELS = {
 
 # ── [1m] 后缀：1M 上下文窗口模型 ID（从 V4_MODELS 派生） ──
 V4_MODELS_1M = {
-    "deepseek-v4-flash[1m]": {
-        key: (value.replace("deepseek-v4-flash", "deepseek-v4-flash[1m]")
+    f"{V4_FLASH}[1m]": {
+        key: (value.replace(V4_FLASH, f"{V4_FLASH}[1m]")
               if key == "id" else value)
-        for key, value in V4_MODELS["deepseek-v4-flash"].items()
+        for key, value in V4_MODELS[V4_FLASH].items()
     },
-    "deepseek-v4-pro[1m]": {
-        key: (value.replace("deepseek-v4-pro", "deepseek-v4-pro[1m]")
+    f"{V4_PRO}[1m]": {
+        key: (value.replace(V4_PRO, f"{V4_PRO}[1m]")
               if key == "id" else value)
-        for key, value in V4_MODELS["deepseek-v4-pro"].items()
+        for key, value in V4_MODELS[V4_PRO].items()
     },
 }
 
@@ -55,11 +59,11 @@ V4_MODELS_1M = {
 # deepseek-chat     → deepseek-v4-flash + thinking=disabled
 # deepseek-reasoner → deepseek-v4-flash + thinking=enabled
 DEFAULT_V4_ALIASES = {
-    "deepseek-chat": "deepseek-v4-flash",
-    "deepseek-reasoner": "deepseek-v4-flash",
+    "deepseek-chat": V4_FLASH,
+    "deepseek-reasoner": V4_FLASH,
     # [1m] 后缀变体
-    "deepseek-v4-flash[1m]": "deepseek-v4-flash",
-    "deepseek-v4-pro[1m]": "deepseek-v4-pro",
+    f"{V4_FLASH}[1m]": V4_FLASH,
+    f"{V4_PRO}[1m]": V4_PRO,
 }
 
 # ── 别名隐含的 thinking.type ──────────────────────────────
