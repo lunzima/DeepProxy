@@ -3,14 +3,11 @@
 暴露兼容 OpenAI API + Anthropic Messages API 格式的端点，将请求路由到 DeepSeek 官方 API。
 
 统一请求管道：
-  /v1/chat/completions → router.prepare_request（含廉价提示词优化）
+  /v1/chat/completions → router.prepare_request（含廉价提示词优化 + Flash→Pro 升格）
                        → LiteLLM
                        → 后处理
   /v1/messages → claude_request_to_openai → router.prepare_request → LiteLLM
               → openai_response_to_claude / openai_stream_to_claude
-
-注：FIM (`/v1/completions`) 已下线；不再启动 Optillm 第二端口，廉价优化
-（CoT / RE2）已内嵌在 prepare_request 中。
 """
 
 from __future__ import annotations
@@ -30,12 +27,20 @@ logger = logging.getLogger("deep_proxy")
 
 config: ProxyConfig | None = None
 router: DeepProxyRouter | None = None
+_lifespan_done: bool = False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理。"""
-    global config, router
+    global config, router, _lifespan_done
+
+    # 双端口共享同一个 app 实例，两个 uvicorn Server 各触发一次 lifespan。
+    # 仅首次执行初始化，避免 BERT 模型等重量资源重复加载。
+    if _lifespan_done:
+        yield
+        return
+    _lifespan_done = True
 
     import os
     from pathlib import Path

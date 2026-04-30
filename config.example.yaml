@@ -87,3 +87,13 @@ precise_sampling:
 # 模型路由（可选）：自定义模型名到上游模型名的映射
 # 默认别名见 deepseek_fixes.py（chat→v4-flash/disabled, reasoner→v4-flash/enabled）
 model_routes: []
+
+# Flash→Pro 选择性升格（默认启用，四层架构）
+# 若未安装 torch/transformers，路由器自动降级到纯规则模式，不影响服务。
+flash_upgrade:
+  enabled: true                         # 启用升格机制
+  router_type: bert                     # bert（需 torch+transformers）/ rule（始终可用）
+  bert_checkpoint: "router_model"       # 本地 LoRA 微调模型路径（或 HF model ID）
+  router_threshold: 0.60                # BERT score >= 此值 → 升格 Pro（偏保守）
+  heuristic_threshold: 7.5              # 启发式 score >= 此值 → 直接升格（跳过 BERT）
+  persist_turns: 2                      # 升格后保持 Pro 额外 N 轮

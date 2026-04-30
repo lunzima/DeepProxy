@@ -14,6 +14,7 @@
 | **Pydantic v2** | 配置模型 / 数据校验 |
 | **httpx** | 异步 HTTP 客户端（上游 models 拉取 + readurls） |
 | **BeautifulSoup4 + lxml** | 网页正文抓取（readurls skill） |
+| **torch + transformers + peft** | BERT 路由器（中文 RoBERTa-small + LoRA） |
 | **pytest** | 测试框架（asyncio_mode=auto，无需 `@pytest.mark.asyncio`） |
 
 ### 架构概览
@@ -22,6 +23,7 @@
 客户端 (OpenAI SDK / Anthropic SDK) ──→ DeepProxy (:8000 / :8001)
   ├─ [兼容层] 参数过滤 / 老模型别名 / reasoning / 错误映射 / Anthropic↔OpenAI 翻译
   ├─ [模型层] OpenRouter 风格 /v1/models（真实定价 / 上下文长度 / 仿冒别名）
+  ├─ [升格层] Flash→Pro 选择路由器（BERT 二分类 + 启发式快速路径）
   ├─ [优化层] In-process 提示词 skills（0 额外 LLM 调用）
   └─ [路由层] LiteLLM ──→ DeepSeek API (api.deepseek.com)
 ```
@@ -94,6 +96,15 @@ creative_sampling:   # RP/创作/通用写作
 precise_sampling:    # code/math/逻辑
   temperature: [0.25, 0.45]
   top_p: [0.95, 0.95]
+
+# Flash→Pro 选择性升格（默认启用，四层架构）
+flash_upgrade:
+  enabled: true
+  router_type: bert                       # BertUpgradeRouter（中文 RoBERTa-small + LoRA）
+  bert_checkpoint: "router_model"         # 微调后的二分类模型
+  router_threshold: 0.60                  # BERT score >= 此值 → 升格 Pro
+  heuristic_threshold: 7.5                # 启发式 score >= 此值 → 直接升格（跳过 BERT）
+  persist_turns: 2                        # 升格后保持 Pro 额外 N 轮
 ```
 
 详细配置见 [`config.example.yaml`](config.example.yaml)（模板）或 `config.py`（含每个字段的中文注释）。
@@ -126,7 +137,17 @@ D:\deepproxy\
 │       ├── skills_general.py      # 文本常量 + 辅助函数（A/B/C 组 skills）
 │       ├── skills_transform.py    # 消息转换 skills（D 组：RE2/CoT/readurls）
 │       ├── dynamic_baskets.py     # 场景化中文短段注入
-│       └── silly_priming.py       # 无厘头 expert priming
+│       ├── silly_priming.py       # 无厘头 expert priming
+│       ├── flash_upgrade.py       # Flash→Pro 升格编排（四层架构）
+│       └── upgrade_router.py      # BertUpgradeRouter（二分类 + 启发式）
+├── router_model/              # 微调后的 BERT 路由器（中文 RoBERTa-small + LoRA）
+│   ├── config.json
+│   ├── model.safetensors
+│   ├── tokenizer.json
+│   └── tokenizer_config.json
+├── datasets/
+│   ├── router_train_cn.jsonl   # 训练集（375K, 自动标注）
+│   └── router_test_cn.jsonl    # 测试集（201 条，手动标注）
 ├── tests/
 │   ├── conftest.py                # 共享 fixtures（cfg, router）
 │   ├── test_router_pipeline.py    # 核心管道测试
@@ -145,14 +166,20 @@ D:\deepproxy\
 │   ├── test_anthropic_endpoint.py # Anthropic 端点测试
 │   ├── test_streaming_done.py     # 流式结束标记测试
 │   └── integration/               # 集成测试（需真实 API key）
-├── config.yaml                    # 默认配置文件
-├── config.example.yaml            # 配置模板
-├── prompt_cache.json              # 提示词压缩磁盘缓存
-├── requirements.txt               # Python 依赖
-├── pytest.ini                     # pytest 配置
-├── start.bat                      # Windows 启动脚本
-├── QWEN.md                        # This file
-└── CLAUDE.md                      # QWEN.md 的硬链接
+├── tools/
+│   └── train_bert_router.py      # BERT 路由器训练脚本（LoRA fine-tune）
+├── scripts/                   # 工具脚本（.gitignore 排除）
+├── config.yaml                # 默认配置文件
+├── config.example.yaml        # 配置模板
+├── .gitignore
+├── prompt_cache.json          # 提示词压缩磁盘缓存
+├── requirements.txt           # Python 依赖
+├── pytest.ini                 # pytest 配置
+├── start.bat                  # Windows 启动脚本
+├── QWEN.md                    # This file
+├── CLAUDE.md                  # QWEN.md 的硬链接
+├── README.md
+└── LICENSE
 ```
 
 ## Request Pipeline（顺序重要）

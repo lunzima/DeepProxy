@@ -219,6 +219,56 @@ class OptimizationConfig(BaseModel):
     )
 
 
+class FlashUpgradeConfig(BaseModel):
+    """Flash→Pro 选择性升格（默认启用，四层架构）。
+
+    四层架构（全部在 prepare_request 中 upfront 完成，零流式侵入）：
+      Layer 0: Router 决策（轻量 BERT classifier fallback 到规则）
+      Layer 1: 启发式预检（零成本快速路径，高确信度直接升格）
+      Layer 2: Router 执行（改写 body["model"]）
+      Layer 3: 对话级持久化（UpgradeTracker 保持 Pro N 轮）
+
+    设计对标 RouteLLM 的 proxy-level upfront routing + threshold-based 决策。
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="启用 Flash→Pro 选择性升格（默认启用）",
+    )
+    router_type: str = Field(
+        default="bert",
+        description="路由决策器类型："
+                    "bert（中文 RoBERTa-small + LoRA，需 torch+transformers）/ "
+                    "rule（规则/启发式，始终可用，bert 加载失败时自动降级）",
+    )
+    bert_checkpoint: str = Field(
+        default="router_model",
+        description="BERT 模型 checkpoint（HF model ID 或本地路径，"
+                    "仅 router_type=bert 时生效）。默认 'router_model'（本地 LoRA 微调模型）。",
+    )
+    heuristic_threshold: float = Field(
+        default=7.5, ge=0.0, le=10.0,
+        description="Layer 1 启发式直接升格阈值。复杂度评分 >= 此值时跳过 Router 直接升格。"
+                    "7.5 = 高确信度才走快速路径，防止误触发。",
+    )
+    router_threshold: float = Field(
+        default=0.60, ge=0.0, le=1.0,
+        description="Layer 0 Router 升格阈值，与 RouteLLM threshold 语义一致："
+                    "score >= threshold → Pro。0.60 = 偏保守（V4-flash 处理多数任务已足够好）。"
+                    "越低升格越激进（0.0 = 全升），越高越保守（1.0 = 几乎不升）。",
+    )
+    persist_turns: int = Field(
+        default=2, ge=1, le=10,
+        description="升格后保持 Pro 的额外轮次数",
+    )
+
+    # 未来校准参考
+    target_upgrade_rate: float = Field(
+        default=0.15, ge=0.0, le=1.0,
+        description="目标升格率（用于 RouteLLM 风格阈值校准）",
+    )
+
+
 class CreativeSamplingConfig(BaseModel):
     """高多样性采样预设（适用 RP / 创意写作 / 通用写作 / 日常聊天）。
 
@@ -319,6 +369,7 @@ class ProxyConfig(BaseModel):
 
     deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
     optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
+    flash_upgrade: FlashUpgradeConfig = Field(default_factory=FlashUpgradeConfig)
     creative_sampling: CreativeSamplingConfig = Field(default_factory=CreativeSamplingConfig)
     precise_sampling: PreciseSamplingConfig = Field(default_factory=PreciseSamplingConfig)
     model_routes: List[ModelRoute] = Field(default_factory=list)

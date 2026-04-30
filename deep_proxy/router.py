@@ -41,6 +41,15 @@ from .optimization.dynamic_baskets import (
     assemble_paragraph as _assemble_basket_paragraph,
     scenario_from_profile as _scenario_from_profile,
 )
+from .optimization.flash_upgrade import (
+    DailyUpgradeThrottle,
+    UpgradeTracker,
+    _flatten_messages,
+    compute_complexity_score,
+    extra_body_requests_upgrade,
+    has_upgrade_sentinel,
+)
+from .optimization.upgrade_router import create_router
 from .optimization.silly_priming import (
     pick_one as _pick_silly_priming,
     prepend_to_system as _prepend_silly_to_system,
@@ -57,6 +66,10 @@ class DeepProxyRouter:
         # 服务端缓存上一轮 reasoning_content；下一轮请求若客户端没回传则补齐
         self._reasoning_cache = ReasoningCache(max_size=1024)
         self._http_client: Optional[httpx.AsyncClient] = None
+        # Flash→Pro 升格跟踪器 + 路由决策器 + 防重复刷屏
+        self._upgrade_tracker = UpgradeTracker()
+        self._upgrade_router = self._build_upgrade_router()
+        self._upgrade_throttle = DailyUpgradeThrottle()
         # LLM-based system prompt 压缩器（持久化磁盘缓存）
         # 复用 PreciseSamplingConfig 的采样预设：高确定性 + 微抖动，最适合
         # 同义改写类任务（确定性是主要诉求，微随机仅供并行重试）
@@ -115,6 +128,15 @@ class DeepProxyRouter:
         model_routes = [r.model_dump() for r in self.config.model_routes]
         body["model"] = normalize_model_name(raw_model, model_routes)
         model = body.get("model", "")
+
+        # 0c. Flash→Pro 选择性升格路由（仅 v4-flash + 启用时）
+        #     在全部后续处理之前改写 model，让 thinking/sampling/skills 走 Pro 路径。
+        if (
+            self.config.flash_upgrade.enabled
+            and model == "deepseek-v4-flash"
+        ):
+            self._maybe_upgrade(body)
+            model = body.get("model", "")
 
         # 1. 默认 reasoning_effort=max 注入（仅当未显式 disabled 且未指定）。
         #    官方文档：reasoning_effort 是 thinking 对象的子字段，不是顶层参数。
@@ -240,6 +262,91 @@ class DeepProxyRouter:
             list(body.keys()),
         )
         return body
+
+    # ------------------------------------------------------------------
+    # Flash→Pro 升格路由（Layer 0–3）
+    # ------------------------------------------------------------------
+
+    def _build_upgrade_router(self):
+        """初始化升格决策器（Layer 0）。"""
+        cfg = self.config.flash_upgrade
+        if cfg.router_type == "bert" and cfg.bert_checkpoint:
+            return create_router("bert", checkpoint_path=cfg.bert_checkpoint)
+        return create_router("rule")
+
+    def _maybe_upgrade(
+        self,
+        body: Dict[str, Any],
+    ) -> None:
+        """Flash→Pro 升格路由主逻辑（Layer 0–3，全部 upfront）。
+
+        决策顺序（短路）：
+          1. Sentinel 强制升格（最高优先级）
+          2. 对话已升格（Layer 3 持久化）
+          3. 启发式快速路径（Layer 1）
+          4. Router 决策（Layer 0）
+        """
+        cfg = self.config.flash_upgrade
+        messages = body.get("messages", [])
+
+        # ── Step 1: Sentinel / extra_body 强制升格 ──
+        if has_upgrade_sentinel(messages) or extra_body_requests_upgrade(body):
+            logger.info("Sentinel 强制升格 → deepseek-v4-pro")
+            body["model"] = "deepseek-v4-pro"
+            self._upgrade_tracker.set_remaining(messages, cfg.persist_turns)
+            return
+
+        # ── Step 2: 对话已处于升格状态（Layer 3 持久化） ──
+        if self._upgrade_tracker.is_upgraded(messages):
+            remaining = self._upgrade_tracker.remaining(messages)
+            logger.info("持久升格命中 → deepseek-v4-pro（剩余 %d 轮）", remaining)
+            body["model"] = "deepseek-v4-pro"
+            return
+
+        # ── Step 3: 启发式快速路径（Layer 1） ──
+        heuristic_score = compute_complexity_score(messages)
+        did_upgrade = False
+        if heuristic_score >= cfg.heuristic_threshold:
+            did_upgrade = True
+            logger.info("启发式升格: score=%s >= threshold=%s",
+                        heuristic_score, cfg.heuristic_threshold)
+
+        # ── Step 4: Router 决策（Layer 0） ──
+        # 注：v4-flash 处理简单编码任务效果已极好，不再对 coding_port 做阈值优惠。
+        if not did_upgrade:
+            router_score = self._upgrade_router.score(messages, body=body)
+            if router_score >= cfg.router_threshold:
+                user_text = _flatten_messages(messages, user_only=True)
+                user_msg_count = sum(1 for m in messages if m.get("role") == "user")
+                logger.info(
+                    "Router 升格: score=%.3f >= threshold=%.2f "
+                    "(heuristic=%.1f/10, user_msgs=%d, user_chars=%d)",
+                    router_score, cfg.router_threshold,
+                    heuristic_score, user_msg_count, len(user_text),
+                )
+                did_upgrade = True
+            else:
+                logger.info(
+                    "保留 Flash: score=%.3f < threshold=%.2f (heuristic=%.1f/10) → deepseek-v4-flash",
+                    router_score, cfg.router_threshold, heuristic_score,
+                )
+
+        # ── Step 5: 防重复刷屏（Layer 2） ──
+        # Coding Agent 场景下同一复杂消息可能重复多次；连续 N 次相同
+        # user 消息触发升格后，强制回退到 Flash 并冷却，避免浪费。
+        if did_upgrade:
+            if self._upgrade_throttle.should_throttle(messages, True):
+                did_upgrade = False
+                logger.info(
+                    "升格限流: 连续 %d 次触发 → 强制 Flash（冷却 %d 轮）",
+                    self._upgrade_throttle._max, self._upgrade_throttle._cooldown,
+                )
+        else:
+            self._upgrade_throttle.should_throttle(messages, False)
+
+        if did_upgrade:
+            body["model"] = "deepseek-v4-pro"
+            self._upgrade_tracker.set_remaining(messages, cfg.persist_turns)
 
     def process_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         if self.config.deepseek.enable_reasoning:

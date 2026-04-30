@@ -12,6 +12,7 @@
 客户端 (OpenAI SDK / Anthropic SDK) → DeepProxy (:8000 / :8001)
   ├─ [兼容层] 参数过滤 / 老模型别名 / reasoning / 错误映射 / Anthropic↔OpenAI 翻译
   ├─ [模型层] OpenRouter 风格 /v1/models（真实定价 / 上下文长度 / 仿冒别名）
+  ├─ [升格层] Flash→Pro 选择路由器（BERT 二分类 + 启发式快速路径）
   ├─ [优化层] 内建 skills（A/B/C/D 四组，0 额外 LLM 调用）
   │            + LLM 压缩（首次调一次，结果磁盘缓存复用）
   │            + 动态短段注入（场景化 PUA-substance 提示词）
@@ -27,6 +28,7 @@
 | **Reasoning 处理** | 保留 `reasoning_content`，多轮缓存自愈；模型剥离时从原始对象兜底恢复 |
 | **错误映射** | 将 DeepSeek/LiteLLM 错误转换为标准 OpenAI 格式；429/5xx 指数退避重试 |
 | **提示词优化** | 内建 15+ 廉价 skills（通用风格 / 反幻觉 / 上下文 / 消息转换），全 in-process，0 额外 LLM 调用 |
+| **Flash→Pro 升格** | 四层路由器自动评估请求复杂度，高复杂度请求升格到 Pro（BERT 二分类 + 启发式快速路径） |
 | **Anthropic 兼容** | 将 Anthropic Messages API 请求转换为 OpenAI 格式路由到 DeepSeek，支持流式和非流式 |
 | **模型列表** | OpenRouter 风格 `/v1/models`，含真实 USD 定价、上下文长度、仿冒别名映射 |
 | **克隆模型** | 将 pro/opus/codex 等仿冒模型别名映射到对应的 DeepSeek 实际模型 |
@@ -203,7 +205,7 @@ precise_sampling:
 
 ## 项目结构
 
-```
+``` 
 deep_proxy/
 ├── deep_proxy/
 │   ├── __init__.py              # 包标识（__version__ = "0.1.0"）
@@ -229,28 +231,15 @@ deep_proxy/
 │       ├── skills_general.py    # 文本常量 + 辅助函数（A/B/C 组 skills）
 │       ├── skills_transform.py  # 消息转换 skills（D 组：RE2/CoT/readurls）
 │       ├── dynamic_baskets.py   # 场景化中文短段注入
-│       └── silly_priming.py     # 无厘头 expert priming
+│       ├── silly_priming.py     # 无厘头 expert priming
+│       ├── flash_upgrade.py     # Flash→Pro 升格编排（四层架构）
+│       └── upgrade_router.py    # BertUpgradeRouter（二分类 + 启发式）
+├── router_model/                # 微调后的 BERT 路由器（中文 RoBERTa-small + LoRA）
+├── datasets/                    # 训练/测试数据
+├── tools/                       # 开发工具（训练脚本等）
 ├── tests/                       # pytest 套件（197 项测试）
-│   ├── conftest.py              # 共享 fixtures
-│   ├── test_router_pipeline.py  # 核心管道测试
-│   ├── test_reasoning_handler.py
-│   ├── test_cheap_optimizations.py
-│   ├── test_compressor.py
-│   ├── test_creative_sampling.py
-│   ├── test_precise_sampling.py
-│   ├── test_dual_port_profiles.py
-│   ├── test_dynamic_baskets.py
-│   ├── test_silly_priming.py
-│   ├── test_list_models.py
-│   ├── test_param_filtering.py
-│   ├── test_deepseek_fixes.py
-│   ├── test_retry.py
-│   ├── test_anthropic_endpoint.py
-│   ├── test_streaming_done.py
-│   └── integration/             # 集成测试（需真实 API key）
 ├── config.yaml                  # 默认配置文件
 ├── config.example.yaml          # 配置模板
-├── prompt_cache.json            # 提示词压缩磁盘缓存
 ├── requirements.txt             # Python 依赖
 ├── pytest.ini                   # pytest 配置
 ├── start.bat                    # Windows 启动脚本
