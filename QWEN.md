@@ -274,7 +274,7 @@ D:\deepproxy\
 - `thinking.reasoning_effort` 是 `thinking` 的子字段，非顶层参数
 - `thinking.type` 服务端默认 `enabled`，代理不强制 `disabled`
 - V4 支持 temperature/top_p/presence_penalty/frequency_penalty/response_format/tools/tool_choice/stream_options.include_usage
-- DeepSeek 上游 `/v1/models` 返回条目缺 `created` 字段——`_normalize_model_entry` 注入默认值
+- DeepSeek 上游 `/v1/models` 返回条目缺 `created` 字段——`normalize_model_entry` 注入默认值
 - `deepseek-coder` 不存在，仅 `deepseek-v4-flash` 和 `deepseek-v4-pro`
 - 上下文长度：1M tokens，输出最大 384K tokens
 

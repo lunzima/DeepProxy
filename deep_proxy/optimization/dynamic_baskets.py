@@ -19,8 +19,6 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Optional
 
-from ..utils import append_to_system_message
-
 # 三个篮子的固定拼接顺序
 _BASKET_ORDER = ("methodology", "best_practices", "moderate_encouragement")
 
@@ -212,8 +210,3 @@ def scenario_from_profile(profile: object) -> Optional[str]:
     if isinstance(profile, CreativeSamplingConfig):
         return "writing"
     return None
-
-
-def append_to_system(messages: List[Dict[str, object]], paragraph: str) -> None:
-    """把 paragraph 追加到首条 system 消息末尾。"""
-    append_to_system_message(messages, paragraph)

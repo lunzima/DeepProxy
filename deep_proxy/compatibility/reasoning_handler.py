@@ -16,14 +16,14 @@ assistant 的 `reasoning_content`，否则返回 HTTP 400。
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
-from ..utils import merge_tool_call_deltas
-from .deepseek_fixes import is_thinking_disabled
+from ..optimization.flash_upgrade import conversation_fingerprint
+from ..utils import hash_payload, merge_tool_call_deltas
+from .deepseek_fixes import ensure_thinking_dict, is_thinking_disabled
 
 logger = logging.getLogger(__name__)
 
@@ -144,21 +144,25 @@ def _signature(
     prefix_messages: List[Dict[str, Any]],
     content: Any,
     tool_calls: Any,
+    fingerprint: str,
 ) -> str:
-    """缓存键：(对话前缀, 当前 assistant content + normalized_tool_calls)。
+    """缓存键：(对话指纹, 对话前缀, 当前 assistant content + normalized_tool_calls)。
+
+    fingerprint 为必需参数，由调用方通过 conversation_fingerprint() 计算传入，
+    确保不同对话的缓存键互不碰撞。
 
     保证：
     - 同一对话同一轮（无论 reasoning_content 是否被客户端丢失）→ 同一 key
-    - 不同对话前缀 → 不同 key
+    - 不同对话指纹 / 不同前缀 → 不同 key
     - tool_call.id 变化不影响匹配
     """
     payload = {
         "prefix": _serialize_prefix(prefix_messages),
         "content": _normalize_content(content),
         "tool_calls": _normalize_tool_calls(tool_calls),
+        "fp": fingerprint,
     }
-    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+    return hash_payload(payload)
 
 
 class ReasoningCache:
@@ -182,10 +186,11 @@ class ReasoningCache:
         content: Any,
         tool_calls: Any,
         reasoning_content: Optional[str],
+        fingerprint: str,
     ) -> None:
         if not isinstance(reasoning_content, str) or not reasoning_content:
             return
-        key = _signature(prefix_messages, content, tool_calls)
+        key = _signature(prefix_messages, content, tool_calls, fingerprint=fingerprint)
         if key in self._cache:
             self._cache.move_to_end(key)
         self._cache[key] = reasoning_content
@@ -197,8 +202,9 @@ class ReasoningCache:
         prefix_messages: List[Dict[str, Any]],
         content: Any,
         tool_calls: Any,
+        fingerprint: str,
     ) -> Optional[str]:
-        key = _signature(prefix_messages, content, tool_calls)
+        key = _signature(prefix_messages, content, tool_calls, fingerprint=fingerprint)
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key]
@@ -213,6 +219,7 @@ class ReasoningCache:
 
         前缀就是该请求的 messages（模型生成本轮 assistant 时看到的完整上下文）。
         """
+        fp = conversation_fingerprint(request_messages)
         for choice in response.get("choices", []):
             msg = choice.get("message")
             if not isinstance(msg, dict):
@@ -222,6 +229,7 @@ class ReasoningCache:
                 msg.get("content"),
                 msg.get("tool_calls"),
                 msg.get("reasoning_content"),
+                fingerprint=fp,
             )
 
     def backfill(self, messages: List[Dict[str, Any]]) -> int:
@@ -230,13 +238,14 @@ class ReasoningCache:
         每条 assistant 消息查询时使用它之前的 messages 作为前缀，
         从而精确匹配"该对话、该轮"产出的 reasoning_content。
         """
+        fp = conversation_fingerprint(messages)
         n = 0
         for i, msg in enumerate(messages):
             if msg.get("role") != "assistant":
                 continue
             if msg.get("reasoning_content"):
                 continue
-            rc = self.lookup(messages[:i], msg.get("content"), msg.get("tool_calls"))
+            rc = self.lookup(messages[:i], msg.get("content"), msg.get("tool_calls"), fingerprint=fp)
             if rc:
                 msg["reasoning_content"] = rc
                 n += 1
@@ -279,12 +288,14 @@ class StreamingReasoningAccumulator:
                 slot["tool_calls"] = merge_tool_call_deltas(slot["tool_calls"], tcs)
 
     def flush_to_cache(self, cache: ReasoningCache) -> None:
+        fp = conversation_fingerprint(self._prefix)
         for slot in self._slots.values():
             cache.remember(
                 self._prefix,
                 slot.get("content"),
                 slot.get("tool_calls"),
                 slot.get("reasoning_content"),
+                fingerprint=fp,
             )
 
 
@@ -354,10 +365,7 @@ def ensure_reasoning_content_persistence(
         return body
 
     # 没显式禁用 → 显式启用 thinking 模式，确保 DeepSeek 接受 reasoning_content
-    if not isinstance(thinking, dict):
-        thinking = {}
-        body["thinking"] = thinking
-    thinking.setdefault("type", "enabled")
+    ensure_thinking_dict(body).setdefault("type", "enabled")
 
     # 缓存补不齐 → 注入 dummy 而非降级 thinking
     n = _inject_dummy_for_missing(messages)

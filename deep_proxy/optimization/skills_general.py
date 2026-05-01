@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from ..utils import find_system_message, append_to_system_message
 from ..compatibility.deepseek_fixes import is_thinking_disabled
 
 logger = logging.getLogger(__name__)
@@ -179,8 +178,10 @@ def _is_json_mode(body: Dict[str, Any]) -> bool:
     return isinstance(rf, dict) and rf.get("type") == "json_object"
 
 
+_READURLS_MARKER = "[Content from "
+
+
 def _has_inlined_content(messages: List[Dict[str, Any]]) -> bool:
-    _READURLS_MARKER = "[Content from "
     for msg in messages:
         if msg.get("role") != "user":
             continue
@@ -188,11 +189,6 @@ def _has_inlined_content(messages: List[Dict[str, Any]]) -> bool:
         if isinstance(content, str) and _READURLS_MARKER in content:
             return True
     return False
-
-
-def _append_date_to_system(messages: List[Dict[str, Any]], date_line: str) -> None:
-    """把日期行追加到首条 system 消息末尾（幂等）。"""
-    append_to_system_message(messages, date_line, dedup=True)
 
 
 def _date_skill_line() -> str:
@@ -211,6 +207,3 @@ def _date_skill_line() -> str:
     )
 
 
-def _extract_system(messages: List[Dict[str, Any]]) -> tuple:
-    """返回 (首条 system 的 index, content 文本, 是否可压缩)。"""
-    return find_system_message(messages)

@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib as _hashlib
 import json
 import logging
 import random
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Dict, List, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -222,3 +223,64 @@ def prepend_to_system_message(
             messages.insert(messages.index(msg), {"role": "system", "content": text})
         return
     messages.insert(0, {"role": "system", "content": text})
+
+
+# ---------------------------------------------------------------------------
+# 内容提取
+# ---------------------------------------------------------------------------
+
+
+def get_text_from_content(content: Any) -> str:
+    """从消息 content 字段提取纯文本字符串。
+
+    OpenAI content 字段可以是：
+    - 纯字符串 → 原样返回
+    - list[dict]（多模态块数组）→ 提取 type=="text" 的块，换行拼接
+    - 其他 → ""
+
+    适用于 user / assistant / system 消息的 content 字段。
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        return "\n".join(parts)
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# hashlib 工具
+# ---------------------------------------------------------------------------
+
+
+def hash_str(text: str, *, prefix: str = "", algo: str = "sha256") -> str:
+    """对字符串取哈希（默认 SHA-256 hexdigest）。"""
+    h = _hashlib.new(algo)
+    if prefix:
+        h.update(prefix.encode("utf-8"))
+    h.update(text.encode("utf-8"))
+    return h.hexdigest()
+
+
+def hash_payload(payload: dict, *, prefix: str = "", algo: str = "sha256") -> str:
+    """对可 JSON 序列化的 payload 取哈希（默认 SHA-256）。
+
+    JSON 序列化时按 key 排序以确保稳定。
+    """
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    h = _hashlib.new(algo)
+    if prefix:
+        h.update(prefix.encode("utf-8"))
+    h.update(raw)
+    return h.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# 流式协议常量
+# ---------------------------------------------------------------------------
+
+SSE_DONE = "data: [DONE]\n\n"
+"""OpenAI SSE 协议流结束标记。"""

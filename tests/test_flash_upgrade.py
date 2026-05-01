@@ -161,13 +161,6 @@ class TestUpgradeTracker:
         assert tracker.is_upgraded(conv_a) is True
         assert tracker.is_upgraded(conv_b) is False
 
-    def test_evict_expired(self):
-        tracker = UpgradeTracker()
-        msgs = [{"role": "user", "content": "hi"}]
-        tracker.set_remaining(msgs, 0)  # 0 → 立即过期
-        assert tracker.evict_expired() == 1
-        assert tracker.active_count == 0
-
 
 # ======================================================================
 # compute_complexity_score
@@ -176,16 +169,16 @@ class TestUpgradeTracker:
 
 class TestComputeComplexityScore:
     def test_empty(self):
-        assert compute_complexity_score([]) == 0.0
+        assert compute_complexity_score([]).score == 0.0
 
     def test_simple_question_scores_low(self):
         msgs = [{"role": "user", "content": "法国的首都是什么？"}]
-        score = compute_complexity_score(msgs)
+        score = compute_complexity_score(msgs).score
         assert 0.0 <= score < 2.0  # 简单问题，启发式评分低
 
     def test_code_block_scores_higher(self):
         msgs = [{"role": "user", "content": "```\nprint('hello')\n```"}]
-        score = compute_complexity_score(msgs)
+        score = compute_complexity_score(msgs).score
         # 代码块维度 +0.5，应有非零分
         assert score > 0.1
 
@@ -198,26 +191,26 @@ class TestComputeComplexityScore:
             {"role": "assistant", "content": "好的，添加可重入逻辑"},
             {"role": "user", "content": "还需要考虑高并发场景下的一致性"},
         ]
-        score = compute_complexity_score(msgs)
+        score = compute_complexity_score(msgs).score
         assert score >= 1.5  # 多轮 + 架构/分布式/一致性关键词
 
     def test_math_symbol_contributes(self):
         msgs = [{"role": "user", "content": "证明 ∑ 1/n² = π²/6"}]
-        score = compute_complexity_score(msgs)
+        score = compute_complexity_score(msgs).score
         assert score >= 0.5  # "证明" 0.3 + max(∑ *0.5, 1*0.5) = 0.8
 
     def test_keyword_density(self):
         msgs = [{"role": "user", "content":
             "证明这个定理。推导过程需要严格证明。"
             "涉及复杂度分析和分布式系统架构。"}]
-        score = compute_complexity_score(msgs)
+        score = compute_complexity_score(msgs).score
         assert score >= 1.0  # 关键词命中
 
     def test_very_long_context(self):
         """8000+ tokens 的上下文得高分。"""
         long_text = "Hello world. " * 5000
         msgs = [{"role": "user", "content": long_text}]
-        score = compute_complexity_score(msgs)
+        score = compute_complexity_score(msgs).score
         assert score >= 2.0  # token 量加分
 
     def test_context_inflation_discounts_token_and_code(self):
@@ -235,7 +228,7 @@ class TestComputeComplexityScore:
             {"role": "assistant", "content": "OK."},
             {"role": "user", "content": "帮我看看这段代码"},  # 最后一条很短 (< 1% 总量)
         ]
-        score = compute_complexity_score(msgs)
+        score = compute_complexity_score(msgs).score
 
         # 无膨胀反事实：同样的代码内容 + 用户主动长提问（无折扣）
         msgs_no_inflation = [
@@ -244,7 +237,7 @@ class TestComputeComplexityScore:
                 f"file2:\n```python\n{big_file}\n```\n"
                 "请分析这两个文件中的架构设计问题，并进行全面的代码审查。论证系统的一致性。"},
         ]
-        score_no = compute_complexity_score(msgs_no_inflation)
+        score_no = compute_complexity_score(msgs_no_inflation).score
 
         # 膨胀场景 token/代码块折扣 70%，应显著低于无膨胀场景
         assert score < score_no, f"膨胀分数 {score} 应低于无膨胀 {score_no}"
@@ -260,7 +253,7 @@ class TestComputeComplexityScore:
             {"role": "user", "content": long_question},
         ]
         # user_fraction ≈ len(long_question) / (len(short_prefix) + len(long_question)) >> 0.15
-        score = compute_complexity_score(msgs)
+        score = compute_complexity_score(msgs).score
 
         # 不应触发折扣：关键词如 "分析" "分布式" "架构" "一致性" "论证" 全部有效
         assert score >= 1.0, f"长提问未膨胀场景应保持有效分数，得 {score}"

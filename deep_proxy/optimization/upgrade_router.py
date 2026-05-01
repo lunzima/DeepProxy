@@ -89,7 +89,7 @@ class RuleUpgradeRouter(UpgradeRouter):
             return 1.0
 
         heuristic = compute_complexity_score(messages)
-        return round(min(heuristic * self._scale, 1.0), 4)
+        return round(min(heuristic.score * self._scale, 1.0), 4)
 
 
 # ======================================================================

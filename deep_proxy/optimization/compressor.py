@@ -11,13 +11,15 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import re
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional
+
+from ..deepseek_models import V4_FLASH
+from ..utils import hash_str
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +101,7 @@ class SystemPromptCompressor:
         cache_path: Path,
         api_key: str,
         api_base: str,
-        model: str = "deepseek/deepseek-v4-flash",
+        model: str = f"deepseek/{V4_FLASH}",
         max_memory: int = 256,
         sampling: Optional[Any] = None,
     ):
@@ -166,10 +168,7 @@ class SystemPromptCompressor:
 
     @staticmethod
     def _key(text: str, model: str) -> str:
-        h = hashlib.sha256()
-        h.update(f"v{_CACHE_VERSION}|{model}|".encode("utf-8"))
-        h.update(text.encode("utf-8"))
-        return h.hexdigest()
+        return hash_str(text, prefix=f"v{_CACHE_VERSION}|{model}|")
 
     async def compress(self, text: str) -> str:
         """非阻塞压缩入口。
@@ -279,7 +278,7 @@ class SystemPromptCompressor:
             "thinking": {"type": "disabled", "reasoning_effort": "minimal"},
         }
         if self._sampling is not None:
-            from . import sample_in_range
+            from ..utils import sample_in_range
             s = self._sampling
             kwargs["temperature"] = sample_in_range(s.temperature_min, s.temperature_max)
             kwargs["top_p"] = sample_in_range(s.top_p_min, s.top_p_max)

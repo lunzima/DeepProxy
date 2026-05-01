@@ -15,10 +15,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 from typing import Any, Dict, List, Tuple
+
+from ..utils import get_text_from_content, hash_str
 
 
 # ======================================================================
@@ -31,16 +32,7 @@ def _last_user_text(messages: List[Dict[str, Any]]) -> str:
     for m in reversed(messages):
         if m.get("role") != "user":
             continue
-        c = m.get("content", "")
-        if isinstance(c, str):
-            return c
-        if isinstance(c, list):
-            parts = [
-                b.get("text", "")
-                for b in c
-                if isinstance(b, dict) and b.get("type") == "text"
-            ]
-            return "\n".join(parts)
+        return get_text_from_content(m.get("content", ""))
     return ""
 
 
@@ -52,26 +44,30 @@ def _count_user_messages(messages: List[Dict[str, Any]]) -> int:
 def _last_user_hash(messages: List[Dict[str, Any]]) -> str:
     """最后一条 user 消息的短哈希（检测重复消息用）。"""
     text = _last_user_text(messages)
-    return hashlib.md5(text.encode()).hexdigest()[:8] if text else "empty"
+    return hash_str(text, algo="md5")[:8] if text else "empty"
 
 
 class DailyUpgradeThrottle:
-    """防刷屏保护：同一 user 消息连续触发升格 N 次后，强制降级 Flash + 冷却。
+    """防刷屏保护：同一对话窗口内同一 user 消息连续触发升格 N 次后，强制降级 Flash + 冷却。
 
     Coding Agent 场景下同一复杂 prompt 可能被重复提交多次，
     每次 BERT/启发式都会打高分升格到 Pro，造成浪费。
 
     规则：
-      - 同一 user hash 连续触发升格 ≥ max_repeats 次 → 强制 Flash
+      - 同一对话（fingerprint）内同一 user hash 连续触发升格 ≥ max_repeats 次 → 强制 Flash
       - 冷却 cooldown_turns 轮（期间新消息不计数，直接走 Flash）
       - 冷却结束后自动恢复，计数器清零
+
+    键隔离：使用 (conversation_fingerprint, last_user_hash) 组合键，确保
+    不同对话窗口的限流状态互不干扰。即使两个窗口有完全相同的最后一条
+    user 消息（不同对话中相同的追问），也各自独立计数。
     """
 
     def __init__(self, max_repeats: int = 5, cooldown_turns: int = 3):
         self._max = max_repeats
         self._cooldown = cooldown_turns
-        # hash → (consecutive_upgrade_count, cooldown_remaining)
-        self._state: Dict[str, Tuple[int, int]] = {}
+        # (fingerprint, last_user_hash) → (consecutive_upgrade_count, cooldown_remaining)
+        self._state: Dict[Tuple[str, str], Tuple[int, int]] = {}
 
     def should_throttle(
         self, messages: List[Dict[str, Any]], did_upgrade: bool
@@ -85,29 +81,31 @@ class DailyUpgradeThrottle:
         Returns:
             True = 强制使用 Flash（降级）；False = 走正常逻辑
         """
+        fp = conversation_fingerprint(messages)
         h = _last_user_hash(messages)
-        entry = self._state.get(h)
+        key = (fp, h)
+        entry = self._state.get(key)
 
         if entry is None:
-            self._state[h] = (1 if did_upgrade else 0, 0)
+            self._state[key] = (1 if did_upgrade else 0, 0)
             return False
 
         count, cooldown = entry
         if cooldown > 0:
             # 冷却中：强制 Flash，扣一轮
-            self._state[h] = (0, cooldown - 1)
+            self._state[key] = (0, cooldown - 1)
             return True
 
         if did_upgrade:
             count += 1
             if count >= self._max:
                 # 冷却 3 轮
-                self._state[h] = (0, self._cooldown - 1)
+                self._state[key] = (0, self._cooldown - 1)
                 return True
-            self._state[h] = (count, 0)
+            self._state[key] = (count, 0)
         else:
             # 没升格 → 序列中断，归零
-            self._state[h] = (0, 0)
+            self._state[key] = (0, 0)
 
         return False
 
@@ -124,11 +122,10 @@ def conversation_fingerprint(messages: List[Dict[str, Any]]) -> str:
     """
     first_user = next((m for m in messages if m.get("role") == "user"), None)
     if first_user is None:
-        return hashlib.md5(b"empty").hexdigest()
+        return hash_str("empty", algo="md5")
 
-    c = first_user.get("content", "")
-    prefix = c[:300] if isinstance(c, str) else str(c)[:300]
-    return hashlib.md5(prefix.encode()).hexdigest()
+    prefix = get_text_from_content(first_user.get("content", ""))[:300]
+    return hash_str(prefix, algo="md5")
 
 
 class UpgradeTracker:
@@ -204,14 +201,6 @@ class UpgradeTracker:
     def active_count(self) -> int:
         """当前活跃的升格对话数。"""
         return len(self._sessions)
-
-    def evict_expired(self) -> int:
-        """清理残留的已过期记录。返回 evict 数量。"""
-        before = len(self._sessions)
-        self._sessions = OrderedDict(
-            (k, v) for k, v in self._sessions.items() if v[0] > 0
-        )
-        return before - len(self._sessions)
 
 
 # ======================================================================
@@ -307,13 +296,21 @@ _COMPLEXITY_KEYWORDS = [
 # 数学 Unicode 符号集合（用于密度检测）
 _MATH_SYMBOLS = set("∑∫∂∇∈∉⊂⊃⊆⊇∪∩⇒⇔∀∃≈≡≠≤≥→←↔⟹⟺")
 
+ComplexityResult = namedtuple(
+    "ComplexityResult", ["score", "user_text", "user_msg_count"]
+)
+
 
 def compute_complexity_score(
     messages: List[Dict[str, Any]],
-) -> float:
+) -> ComplexityResult:
     """零成本的启发式复杂度评分（Layer 1 快速路径）。
 
-    返回 0.0–10.0 的分数，越高越可能要 Pro。
+    返回 ComplexityResult(score, user_text, user_msg_count)：
+      - score: 0.0–10.0，越高越可能要 Pro
+      - user_text: 所有 user 消息拼接文本（供外部复用，避免重复计算）
+      - user_msg_count: user 消息条数
+
     各维度加权求和，满分 10。
 
     通行做法对标：RouteLLM 的请求前静态评分、Cline 的内置复杂度判断。
@@ -325,7 +322,7 @@ def compute_complexity_score(
       - 移除 coding_port 加分（v4-flash 处理简单编码任务效果已极好）。
     """
     if not messages:
-        return 0.0
+        return ComplexityResult(0.0, "", 0)
 
     # 全量文本 → token 估算 + 上下文膨胀分母
     total_text = _flatten_messages(messages)
@@ -381,7 +378,7 @@ def compute_complexity_score(
                 code_score *= (1.0 - discount)
 
     score = token_score + code_score + turn_score + keyword_score + math_score
-    return round(min(score, 10.0), 2)
+    return ComplexityResult(round(min(score, 10.0), 2), user_text, user_turns)
 
 
 # ======================================================================
@@ -400,14 +397,9 @@ def has_upgrade_sentinel(messages: List[Dict[str, Any]]) -> bool:
     """
     for m in messages:
         if m.get("role") == "system":
-            c = m.get("content", "")
-            if isinstance(c, str) and _SENTINEL_RE.search(c):
+            text = get_text_from_content(m.get("content", ""))
+            if _SENTINEL_RE.search(text):
                 return True
-            if isinstance(c, list):
-                for block in c:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        if _SENTINEL_RE.search(block.get("text", "")):
-                            return True
     return False
 
 
@@ -445,10 +437,5 @@ def _flatten_messages(
         if user_only and m.get("role") != "user":
             continue
         c = m.get("content", "")
-        if isinstance(c, str):
-            parts.append(c)
-        elif isinstance(c, list):
-            for block in c:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
+        parts.append(get_text_from_content(c))
     return "\n".join(parts)

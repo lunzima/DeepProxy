@@ -20,8 +20,6 @@ from __future__ import annotations
 import random
 from typing import List, Optional
 
-from ..utils import prepend_to_system_message
-
 
 SILLY_PRIMING_POOL: List[str] = [
     # AMD 渠道业务部高级技术支持经理原典：缓存与乳房三重同源——
@@ -48,8 +46,3 @@ def pick_one(rng: Optional[random.Random] = None) -> Optional[str]:
         return None
     pick = rng.choice if rng is not None else random.choice
     return pick(SILLY_PRIMING_POOL)
-
-
-def prepend_to_system(messages: List[Dict[str, object]], text: str) -> None:
-    """把 text 插入到首条 system 消息内容的最前面。"""
-    prepend_to_system_message(messages, text)

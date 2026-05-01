@@ -35,6 +35,8 @@ ______
 
 from __future__ import annotations
 
+from .deepseek_models import V4_FLASH, V4_PRO
+
 # ── 上下文窗口常量 ────────────────────────────────────────
 _V4_CONTEXT_WINDOW = 1_000_000  # 1M tokens
 _V4_MAX_OUTPUT = 384_000        # 最大输出 tokens
@@ -44,8 +46,8 @@ _V4_MAX_OUTPUT = 384_000        # 最大输出 tokens
 # v4-pro：当前限时 75% 折扣价，优惠至 2026-05-05 BST
 #   原始价格：prompt $1.74 / completion $3.48
 _DEEPSEEK_PRICING: dict[str, dict[str, float]] = {
-    "deepseek-v4-flash": {"prompt": 0.14, "completion": 0.28},
-    "deepseek-v4-pro": {"prompt": 0.435, "completion": 0.87},
+    V4_FLASH: {"prompt": 0.14, "completion": 0.28},
+    V4_PRO: {"prompt": 0.435, "completion": 0.87},
 }
 
 # ── 人民币定价（元 / 1M tokens，源自官网人民币标价） ──────

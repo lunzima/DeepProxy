@@ -54,7 +54,7 @@ class OptimizationConfig(BaseModel):
                     "默认放在工作目录下、非 dotfile 命名以便用户可见。",
     )
     compressor_model: str = Field(
-        default="deepseek/deepseek-v4-flash",
+        default="deepseek/deepseek-v4-flash",  # LiteLLM 格式需要 deepseek/ 前缀，不引用 V4_FLASH 常量
         description="用于压缩的模型（应是廉价模型；默认 v4-flash + thinking=disabled）",
     )
 
@@ -262,12 +262,6 @@ class FlashUpgradeConfig(BaseModel):
         description="升格后保持 Pro 的额外轮次数",
     )
 
-    # 未来校准参考
-    target_upgrade_rate: float = Field(
-        default=0.15, ge=0.0, le=1.0,
-        description="目标升格率（用于 RouteLLM 风格阈值校准）",
-    )
-
 
 class CreativeSamplingConfig(BaseModel):
     """高多样性采样预设（适用 RP / 创意写作 / 通用写作 / 日常聊天）。
@@ -373,6 +367,26 @@ class ProxyConfig(BaseModel):
     creative_sampling: CreativeSamplingConfig = Field(default_factory=CreativeSamplingConfig)
     precise_sampling: PreciseSamplingConfig = Field(default_factory=PreciseSamplingConfig)
     model_routes: List[ModelRoute] = Field(default_factory=list)
+
+    @classmethod
+    def discover_and_load(cls) -> "ProxyConfig":
+        """按优先级搜索标准路径加载配置。
+
+        搜索顺序（先匹配即停止）：
+        1. 工作目录 ./config.yaml
+        2. 项目根目录 ./config.yaml（本文件上级的上级）
+        3. DEEPPROXY_CONFIG 环境变量指向的路径
+        兜底：ProxyConfig.from_env()
+        """
+        config_paths = [
+            Path(os.getcwd()) / "config.yaml",
+            Path(__file__).parent.parent / "config.yaml",
+            Path(os.getenv("DEEPPROXY_CONFIG", "")),
+        ]
+        for cp in config_paths:
+            if cp.exists():
+                return cls.from_yaml(cp)
+        return cls.from_env()
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ProxyConfig":

@@ -10,8 +10,8 @@ from deep_proxy.config import (
 )
 from deep_proxy.optimization.silly_priming import (
     SILLY_PRIMING_POOL,
-    prepend_to_system,
 )
+from deep_proxy.utils import prepend_to_system_message as prepend_to_system
 from deep_proxy.router import DeepProxyRouter
 
 

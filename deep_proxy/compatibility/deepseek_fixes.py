@@ -20,6 +20,7 @@ from ..deepseek_models import (
     DEFAULT_V4_ALIASES,
     LEGACY_ALIAS_THINKING,
     V4_MODELS,
+    v4_model_full_set,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,10 +95,9 @@ def normalize_model_name(model: str, model_routes: Optional[List[Dict]] = None) 
 def is_v4_model(model: str) -> bool:
     """精确判断是否为 DeepSeek V4 系列模型。
 
-    使用已知 V4 模型列表进行精确匹配，避免子串误判。
-    仿冒模型也视为 V4（内部路由到 V4）。
+    使用完整全集进行精确匹配，避免子串误判。
     """
-    return model in V4_MODELS or model in DEFAULT_V4_ALIASES or model in CLONE_MODEL_ALIASES
+    return model in v4_model_full_set()
 
 
 def sanitize_stream_options(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -116,3 +116,20 @@ def sanitize_stream_options(body: Dict[str, Any]) -> Dict[str, Any]:
 def is_thinking_disabled(thinking: Any) -> bool:
     """检查 thinking 对象是否显式 disabled。"""
     return isinstance(thinking, dict) and thinking.get("type") == "disabled"
+
+
+def has_tools(body: dict) -> bool:
+    """检查请求体是否携带 tools 或 tool_choice。"""
+    return bool(body.get("tools") or body.get("tool_choice"))
+
+
+def ensure_thinking_dict(body: dict) -> dict:
+    """确保 body 中 thinking 字段为合法 dict，不存在时初始化为空 dict 并写回。
+
+    返回 thinking 引用供调用方操作（如 setdefault）。
+    """
+    thinking = body.get("thinking")
+    if not isinstance(thinking, dict):
+        thinking = {}
+        body["thinking"] = thinking
+    return thinking

@@ -1,9 +1,8 @@
 """模型列表生成 —— OpenRouter 风格 /v1/models 响应。
 
 职责范围：
-  - 模型条目标准化（_normalize_model_entry）：OpenRouter 风格字段映射
+  - 模型条目标准化（normalize_model_entry）：OpenRouter 风格字段映射
   - 上游 /v1/models 拉取（fetch_upstream_models）
-  - strip_api_version（与 utils 共享的 URL 后缀剥离）
 
 这些函数不依赖路由器实例状态，仅需要纯参数。
 """
@@ -19,7 +18,6 @@ from .clone_models import CLONE_MODELS
 from .deepseek_models import DEEPSEEK_MODELS, V4_MODELS, V4_MODELS_1M
 from .deepseek_pricing import _V4_CONTEXT_WINDOW, _V4_MAX_OUTPUT, model_pricing
 from .litellm_client import _to_litellm_api_base
-from .utils import strip_api_version
 
 logger = logging.getLogger(__name__)
 

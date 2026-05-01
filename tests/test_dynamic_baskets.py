@@ -16,10 +16,10 @@ from deep_proxy.optimization.dynamic_baskets import (
     _CODING_BASKETS as CODING_BASKETS,
     _CREATIVE_BASKETS as CREATIVE_BASKETS,
     _GENERAL_BASKETS as GENERAL_BASKETS,
-    append_to_system,
     assemble_paragraph,
     scenario_from_profile,
 )
+from deep_proxy.utils import append_to_system_message as append_to_system
 from deep_proxy.router import DeepProxyRouter
 
 

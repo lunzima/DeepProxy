@@ -22,7 +22,7 @@ import json
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from ..utils import format_sse_event as _sse_event
+from ..utils import format_sse_event as _sse_event, get_text_from_content
 
 
 # ---------------------------------------------------------------------------
@@ -47,19 +47,6 @@ def _map_stop_reason(openai_finish: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _flatten_text_blocks(value: Any) -> str:
-    """把 Anthropic 的 text-block 数组展平为单字符串。string 直接返回。"""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        parts: List[str] = []
-        for block in value:
-            if isinstance(block, dict) and block.get("type") == "text":
-                parts.append(str(block.get("text", "")))
-        return "\n".join(parts)
-    return ""
-
-
 def _convert_user_content_blocks(
     blocks: List[Dict[str, Any]],
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -82,7 +69,7 @@ def _convert_user_content_blocks(
         elif btype == "tool_result":
             content = b.get("content")
             if isinstance(content, list):
-                content = _flatten_text_blocks(content)
+                content = get_text_from_content(content)
             elif not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False)
             tool_messages.append({
@@ -166,7 +153,7 @@ def _convert_messages(
             out.append(msg)
         else:
             # 未知 role 按 user 处理（保险起见保留 string 化的内容）
-            out.append({"role": role, "content": _flatten_text_blocks(content)})
+            out.append({"role": role, "content": get_text_from_content(content)})
     return out
 
 
@@ -239,7 +226,7 @@ def claude_request_to_openai(body: Dict[str, Any]) -> Dict[str, Any]:
     sys_value = body.get("system")
     messages: List[Dict[str, Any]] = []
     if sys_value:
-        sys_text = _flatten_text_blocks(sys_value)
+        sys_text = get_text_from_content(sys_value)
         if sys_text:
             messages.append({"role": "system", "content": sys_text})
     messages.extend(_convert_messages(body.get("messages") or []))

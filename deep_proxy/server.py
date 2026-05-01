@@ -25,15 +25,7 @@ if str(_root) not in sys.path:
 
 def _load_config():
     from .config import ProxyConfig
-    config_paths = [
-        Path(os.getcwd()) / "config.yaml",
-        _root / "config.yaml",
-        Path(os.getenv("DEEPPROXY_CONFIG", "")),
-    ]
-    for cp in config_paths:
-        if cp.exists():
-            return ProxyConfig.from_yaml(cp)
-    return ProxyConfig.from_env()
+    return ProxyConfig.discover_and_load()
 
 
 async def _serve_both(host: str, coding_port: int, writing_port: int, log_level: str):

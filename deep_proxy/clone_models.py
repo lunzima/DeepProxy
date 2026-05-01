@@ -15,26 +15,28 @@
 
 from __future__ import annotations
 
+from .deepseek_models import V4_FLASH, V4_PRO
+
 CLONE_MODEL_ALIASES = {
     # ── Anthropic Claude（OpenRouter 路由名 + 官方 API ID） ──
     # OpenRouter 使用 dot 分隔符
-    "claude-opus-4.7": "deepseek-v4-pro",
-    "claude-opus-4.6": "deepseek-v4-pro",
-    "claude-opus-latest": "deepseek-v4-pro",
-    "claude-sonnet-4.6": "deepseek-v4-flash",
+    "claude-opus-4.7": V4_PRO,
+    "claude-opus-4.6": V4_PRO,
+    "claude-opus-latest": V4_PRO,
+    "claude-sonnet-4.6": V4_FLASH,
     # Anthropic 官方 API ID 使用 dash 分隔符（与 dot 共存，客户端两者皆用）
-    "claude-opus-4-7": "deepseek-v4-pro",
-    "claude-opus-4-6": "deepseek-v4-pro",
-    "claude-sonnet-4-6": "deepseek-v4-flash",
+    "claude-opus-4-7": V4_PRO,
+    "claude-opus-4-6": V4_PRO,
+    "claude-sonnet-4-6": V4_FLASH,
 
     # ── OpenAI（OpenRouter 路由名） ─────────────────────────
-    "gpt-5.5-pro": "deepseek-v4-pro",
-    "gpt-5.5": "deepseek-v4-flash",
-    "gpt-5.4-pro": "deepseek-v4-pro",
-    "gpt-5.4": "deepseek-v4-flash",
+    "gpt-5.5-pro": V4_PRO,
+    "gpt-5.5": V4_FLASH,
+    "gpt-5.4-pro": V4_PRO,
+    "gpt-5.4": V4_FLASH,
 
     # ── Google Gemini（OpenRouter 路由名） ──────────────────
-    "gemini-3.1-pro-preview": "deepseek-v4-pro",
+    "gemini-3.1-pro-preview": V4_PRO,
 }
 
 # 仿冒模型在 /v1/models 中的展示条目

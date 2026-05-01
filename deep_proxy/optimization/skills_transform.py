@@ -15,7 +15,8 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from .skills_general import _COT_SYSTEM_PROMPT
+from ..utils import prepend_to_system_message
+from .skills_general import _COT_SYSTEM_PROMPT, _READURLS_MARKER
 
 logger = logging.getLogger(__name__)
 
@@ -50,15 +51,13 @@ _COT_TAG_RE = re.compile(r"</?(?:thinking|reflection|output)>", re.IGNORECASE)
 def _apply_cot_reflection(messages: List[Dict[str, Any]]) -> None:
     """注入 CoT Reflection 引导的 system 提示。
 
-    若已有 system 消息，把 CoT 提示叠加到其前；否则新增一条 system 消息。
+    使用 prepend_to_system_message 统一插入逻辑。
     """
-    for msg in messages:
-        if msg.get("role") == "system":
-            content = msg.get("content")
-            if isinstance(content, str) and _COT_SYSTEM_PROMPT not in content:
-                msg["content"] = f"{_COT_SYSTEM_PROMPT}\n\n{content}"
-            return
-    messages.insert(0, {"role": "system", "content": _COT_SYSTEM_PROMPT})
+    from ..utils import find_system_message
+    _idx, content, _compressible = find_system_message(messages)
+    if content and _COT_SYSTEM_PROMPT in content:
+        return  # 已存在，跳过
+    prepend_to_system_message(messages, _COT_SYSTEM_PROMPT)
 
 
 def extract_cot_output(content: str) -> str:
@@ -85,7 +84,6 @@ def extract_cot_output(content: str) -> str:
 # ── readurls ─────────────────────────────────────────────────────────────
 
 _URL_RE = re.compile(r"https?://[^\s\'\"<>)]+")
-_READURLS_MARKER = "[Content from "  # 用于 idempotent 检测
 _READURLS_MAX_LEN = 8000  # 每个 URL 最多内联多少字符
 _READURLS_TIMEOUT = 5.0  # 单个 URL 抓取超时（秒）
 _READURLS_MAX_PER_MSG = 6  # 单条消息最多抓多少个 URL（防滥发链接 → 串行超时累积）

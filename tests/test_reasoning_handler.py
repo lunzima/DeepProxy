@@ -13,6 +13,7 @@ from deep_proxy.compatibility.reasoning_handler import (
     process_streaming_delta,
     recover_reasoning_content,
 )
+from deep_proxy.optimization.flash_upgrade import conversation_fingerprint
 
 
 class TestProcessReasoningResponse:
@@ -46,22 +47,26 @@ class TestStreamingDelta:
 
 
 class TestReasoningCache:
-    """LRU 缓存键 = (对话前缀, content + normalized_tool_calls)。"""
+    """LRU 缓存键 = (对话指纹, 对话前缀, content + normalized_tool_calls)。"""
+
+    _FP_EMPTY = conversation_fingerprint([])
 
     def test_remember_lookup_and_miss(self):
         c = ReasoningCache()
-        c.remember([], "hello", None, "RC1")
-        assert c.lookup([], "hello", None) == "RC1"
-        assert c.lookup([], "never", None) is None
+        c.remember([], "hello", None, "RC1", fingerprint=self._FP_EMPTY)
+        assert c.lookup([], "hello", None, fingerprint=self._FP_EMPTY) == "RC1"
+        assert c.lookup([], "never", None, fingerprint=self._FP_EMPTY) is None
 
     def test_different_conversation_isolation(self):
-        """不同对话前缀互不命中。"""
+        """不同对话指纹互不命中。"""
         c = ReasoningCache()
         prefix1 = [{"role": "user", "content": "话题甲"}]
         prefix2 = [{"role": "user", "content": "话题乙"}]
-        c.remember(prefix1, "ans", None, "TRACE_FOR_TOPIC_1")
-        assert c.lookup(prefix2, "ans", None) is None
-        assert c.lookup(prefix1, "ans", None) == "TRACE_FOR_TOPIC_1"
+        fp1 = conversation_fingerprint(prefix1)
+        fp2 = conversation_fingerprint(prefix2)
+        c.remember(prefix1, "ans", None, "TRACE_FOR_TOPIC_1", fingerprint=fp1)
+        assert c.lookup(prefix2, "ans", None, fingerprint=fp2) is None
+        assert c.lookup(prefix1, "ans", None, fingerprint=fp1) == "TRACE_FOR_TOPIC_1"
 
     def test_tool_call_id_does_not_affect_signature(self):
         """tool_call.id 每轮可能不同，不应破坏匹配。"""
@@ -70,18 +75,23 @@ class TestReasoningCache:
                   "function": {"name": "search", "arguments": '{"q":"x"}'}}]
         tcs_b = [{"id": "xyz", "type": "function",
                   "function": {"name": "search", "arguments": '{"q":"x"}'}}]
-        c.remember([], "looking up", tcs_a, "RC")
-        assert c.lookup([], "looking up", tcs_b) == "RC"
+        c.remember([], "looking up", tcs_a, "RC", fingerprint=self._FP_EMPTY)
+        assert c.lookup([], "looking up", tcs_b, fingerprint=self._FP_EMPTY) == "RC"
 
     def test_different_tool_args_miss(self):
         c = ReasoningCache()
-        c.remember([], "x", [{"function": {"name": "f", "arguments": "1"}}], "RC")
-        assert c.lookup([], "x", [{"function": {"name": "f", "arguments": "2"}}]) is None
+        c.remember([], "x", [{"function": {"name": "f", "arguments": "1"}}], "RC",
+                    fingerprint=self._FP_EMPTY)
+        assert c.lookup([], "x", [{"function": {"name": "f", "arguments": "2"}}],
+                        fingerprint=self._FP_EMPTY) is None
 
     def test_prefix_role_distinguishes(self):
         c = ReasoningCache()
-        c.remember([{"role": "user", "content": "Q"}], "ans", None, "RC_U")
-        assert c.lookup([{"role": "system", "content": "Q"}], "ans", None) is None
+        prefix = [{"role": "user", "content": "Q"}]
+        fp = conversation_fingerprint(prefix)
+        c.remember(prefix, "ans", None, "RC_U", fingerprint=fp)
+        assert c.lookup([{"role": "system", "content": "Q"}], "ans", None,
+                        fingerprint=conversation_fingerprint([{"role": "system", "content": "Q"}])) is None
 
     def test_remember_response_with_request_messages(self):
         c = ReasoningCache()
@@ -98,38 +108,32 @@ class TestReasoningCache:
 
     def test_empty_reasoning_content_not_stored(self):
         c = ReasoningCache()
-        c.remember([], "x", None, "")
-        c.remember([], "y", None, None)
-        assert c.lookup([], "x", None) is None
-        assert c.lookup([], "y", None) is None
+        c.remember([], "x", None, "", fingerprint=self._FP_EMPTY)
+        c.remember([], "y", None, None, fingerprint=self._FP_EMPTY)
+        assert c.lookup([], "x", None, fingerprint=self._FP_EMPTY) is None
+        assert c.lookup([], "y", None, fingerprint=self._FP_EMPTY) is None
 
     def test_lru_eviction(self):
         c = ReasoningCache(max_size=2)
-        c.remember([], "a", None, "A")
-        c.remember([], "b", None, "B")
-        c.remember([], "c", None, "C")
-        assert c.lookup([], "a", None) is None
-        assert c.lookup([], "b", None) == "B"
-        assert c.lookup([], "c", None) == "C"
+        c.remember([], "a", None, "A", fingerprint=self._FP_EMPTY)
+        c.remember([], "b", None, "B", fingerprint=self._FP_EMPTY)
+        c.remember([], "c", None, "C", fingerprint=self._FP_EMPTY)
+        assert c.lookup([], "a", None, fingerprint=self._FP_EMPTY) is None
+        assert c.lookup([], "b", None, fingerprint=self._FP_EMPTY) == "B"
+        assert c.lookup([], "c", None, fingerprint=self._FP_EMPTY) == "C"
 
     def test_lookup_promotes_to_recent(self):
         c = ReasoningCache(max_size=2)
-        c.remember([], "a", None, "A")
-        c.remember([], "b", None, "B")
-        c.lookup([], "a", None)
-        c.remember([], "c", None, "C")
-        assert c.lookup([], "a", None) == "A"
-        assert c.lookup([], "b", None) is None
+        c.remember([], "a", None, "A", fingerprint=self._FP_EMPTY)
+        c.remember([], "b", None, "B", fingerprint=self._FP_EMPTY)
+        c.lookup([], "a", None, fingerprint=self._FP_EMPTY)
+        c.remember([], "c", None, "C", fingerprint=self._FP_EMPTY)
+        assert c.lookup([], "a", None, fingerprint=self._FP_EMPTY) == "A"
+        assert c.lookup([], "b", None, fingerprint=self._FP_EMPTY) is None
 
     def test_backfill_uses_messages_prefix_per_assistant_msg(self):
         """每条 assistant 消息查询时使用它**之前**的 messages 作为 prefix。"""
         c = ReasoningCache()
-        c.remember([{"role": "user", "content": "Q1"}], "A1", None, "T1")
-        c.remember([
-            {"role": "user", "content": "Q1"},
-            {"role": "assistant", "content": "A1"},
-            {"role": "user", "content": "Q2"},
-        ], "A2", None, "T2")
         msgs = [
             {"role": "user", "content": "Q1"},
             {"role": "assistant", "content": "A1"},
@@ -137,6 +141,13 @@ class TestReasoningCache:
             {"role": "assistant", "content": "A2"},
             {"role": "user", "content": "Q3"},
         ]
+        fp = conversation_fingerprint(msgs)
+        c.remember([{"role": "user", "content": "Q1"}], "A1", None, "T1", fingerprint=fp)
+        c.remember([
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "user", "content": "Q2"},
+        ], "A2", None, "T2", fingerprint=fp)
         n = c.backfill(msgs)
         assert n == 2
         assert msgs[1]["reasoning_content"] == "T1"
@@ -144,8 +155,9 @@ class TestReasoningCache:
 
     def test_backfill_skips_when_already_present(self):
         c = ReasoningCache()
-        c.remember([], "ans", None, "from_cache")
         msgs = [{"role": "assistant", "content": "ans", "reasoning_content": "客户端有"}]
+        fp = conversation_fingerprint(msgs)
+        c.remember([], "ans", None, "from_cache", fingerprint=fp)
         n = c.backfill(msgs)
         assert n == 0
         assert msgs[0]["reasoning_content"] == "客户端有"
@@ -157,14 +169,16 @@ class TestEnsurePersistence:
     def test_backfill_via_cache_keeps_thinking_enabled(self):
         c = ReasoningCache()
         prefix = [{"role": "user", "content": "hi"}]
-        c.remember(prefix, "ok",
-                   [{"function": {"name": "f", "arguments": ""}}], "TRACE")
         msgs = [
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "ok",
              "tool_calls": [{"id": "1", "function": {"name": "f", "arguments": ""}}]},
             {"role": "tool", "content": "r", "tool_call_id": "1"},
         ]
+        fp = conversation_fingerprint(msgs)
+        c.remember(prefix, "ok",
+                   [{"function": {"name": "f", "arguments": ""}}], "TRACE",
+                   fingerprint=fp)
         body = {"thinking": {"type": "enabled"}, "messages": msgs}
         out = ensure_reasoning_content_persistence(msgs, body, cache=c)
         assert msgs[1]["reasoning_content"] == "TRACE"
@@ -275,9 +289,10 @@ class TestStreamingAccumulator:
 
         c = ReasoningCache()
         acc.flush_to_cache(c)
-        assert c.lookup(prefix, "Hello world", None) == "step1 step2"
+        fp = conversation_fingerprint(prefix)
+        assert c.lookup(prefix, "Hello world", None, fingerprint=fp) == "step1 step2"
         # 空前缀不命中（不同对话）
-        assert c.lookup([], "Hello world", None) is None
+        assert c.lookup([], "Hello world", None, fingerprint=TestReasoningCache._FP_EMPTY) is None
 
     def test_accumulates_tool_call_deltas(self):
         prefix = [{"role": "user", "content": "搜索 hello"}]
@@ -291,6 +306,7 @@ class TestStreamingAccumulator:
 
         c = ReasoningCache()
         acc.flush_to_cache(c)
+        fp = conversation_fingerprint(prefix)
         tcs_other = [{"id": "different",
                       "function": {"name": "search", "arguments": '{"q":"hello"}'}}]
-        assert c.lookup(prefix, "", tcs_other) == "RC"
+        assert c.lookup(prefix, "", tcs_other, fingerprint=fp) == "RC"

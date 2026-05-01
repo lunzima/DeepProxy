@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from ..utils import sample_in_range
+from ..compatibility.deepseek_fixes import has_tools
+from ..utils import append_to_system_message, find_system_message, prepend_to_system_message, sample_in_range
 
 from .skills_general import (
     _SKILL_AVOID_FABRICATED_CITATIONS,
@@ -27,10 +28,8 @@ from .skills_general import (
     _SKILL_REASON_GENUINELY,
     _SKILL_SAFE_INLINED,
     _SKILL_SHOW_MATH_STEPS,
-    _append_date_to_system,
     _cot_eligible,
     _date_skill_line,
-    _extract_system,
     _has_inlined_content,
     _is_json_mode,
 )
@@ -88,7 +87,7 @@ async def apply_cheap_optimizations(
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         return body
-    if body.get("tools") or body.get("tool_choice"):
+    if has_tools(body):
         return body
     # 防双重处理（同一 body 多次穿过）
     if body.get("_deepproxy_optimized"):
@@ -134,7 +133,7 @@ async def apply_cheap_optimizations(
 
     # 把 skills + 用户原 system 拼成完整 system prompt 后整体送 LLM 压缩
     skills_text = "\n\n".join(skill_lines) if skill_lines else ""
-    sys_idx, user_sys_text, user_sys_compressible = _extract_system(messages)
+    sys_idx, user_sys_text, user_sys_compressible = find_system_message(messages)
 
     if skills_text and user_sys_text:
         combined = f"{skills_text}\n\n{user_sys_text}"
@@ -158,15 +157,15 @@ async def apply_cheap_optimizations(
         elif sys_idx is not None:
             # 已有 system 但 content 是非字符串（多模态）—— 不动它，把 skills 插一条新的在前
             if skills_text:
-                messages.insert(0, {"role": "system", "content": skills_text})
+                prepend_to_system_message(messages, skills_text)
         else:
-            messages.insert(0, {"role": "system", "content": combined})
+            prepend_to_system_message(messages, combined)
 
     # 2.5 inject_date：在压缩之后追加到 system 末尾。
     # 日期每天变化，若进入压缩缓存键会让缓存每日全部失效；放在压缩外，
     # 同时位于 system 末尾确保最新日期始终对模型可见。
     if inject_date:
-        _append_date_to_system(messages, _date_skill_line())
+        append_to_system_message(messages, _date_skill_line(), dedup=True)
 
     # 3. RE2
     if re2:

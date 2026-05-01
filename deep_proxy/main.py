@@ -43,25 +43,8 @@ async def lifespan(app: FastAPI):
     _lifespan_done = True
 
     import os
-    from pathlib import Path
 
-    # 查找配置文件
-    config_paths = [
-        Path(os.getcwd()) / "config.yaml",
-        Path(__file__).parent.parent / "config.yaml",
-        Path(os.getenv("DEEPPROXY_CONFIG", "")),
-    ]
-
-    loaded_config = None
-    for cp in config_paths:
-        if cp.exists():
-            logger.info("加载配置文件: %s", cp)
-            loaded_config = ProxyConfig.from_yaml(cp)
-            break
-
-    if loaded_config is None:
-        logger.info("未找到配置文件，使用环境变量/默认配置")
-        loaded_config = ProxyConfig.from_env()
+    loaded_config = ProxyConfig.discover_and_load()
 
     # 环境变量兜底
     if not loaded_config.deepseek.api_key:
@@ -116,9 +99,10 @@ app.add_middleware(
 
 
 async def _check_api_key(request: Request):
+    """检查 OpenAI 风格 Authorization: Bearer 头。"""
     if config and config.api_key:
         auth = request.headers.get("authorization", "")
-        if not auth.startswith("Bearer ") or auth.removeprefix("Bearer ") != config.api_key:
+        if _extract_bearer_token(auth) != config.api_key:
             raise HTTPException(
                 status_code=401,
                 detail={
@@ -140,7 +124,7 @@ async def _check_anthropic_api_key(request: Request):
     if x_key == config.api_key:
         return
     auth = request.headers.get("authorization", "")
-    if auth.startswith("Bearer ") and auth.removeprefix("Bearer ") == config.api_key:
+    if _extract_bearer_token(auth) == config.api_key:
         return
     raise HTTPException(
         status_code=401,
@@ -151,12 +135,28 @@ async def _check_anthropic_api_key(request: Request):
     )
 
 
+def _ensure_router_ready():
+    """检查路由器是否就绪，未就绪则返回 503。"""
+    if router is None:
+        raise HTTPException(status_code=503, detail="代理未就绪")
+
+
+def _extract_bearer_token(auth_header: str) -> str | None:
+    """从 Authorization 头提取 Bearer token。
+
+    格式兼容：'Bearer sk-...' 或 'bEARER sk-...'。
+    无效格式返回 None。
+    """
+    if auth_header.startswith(("Bearer ", "bearer ", "BEARER ")):
+        return auth_header[len("Bearer "):].strip()
+    return None
+
+
 @app.get("/v1/models")
 async def list_models(request: Request):
     """列出可用模型（OpenAI 兼容格式）。"""
     await _check_api_key(request)
-    if router is None:
-        raise HTTPException(status_code=503, detail="代理未就绪")
+    _ensure_router_ready()
     return await router.list_models()
 
 
@@ -196,8 +196,7 @@ async def chat_completions(request: Request):
     （temperature / top_p / presence_penalty / frequency_penalty）。
     """
     await _check_api_key(request)
-    if router is None:
-        raise HTTPException(status_code=503, detail="代理未就绪")
+    _ensure_router_ready()
 
     body: Dict[str, Any] = await request.json()
     body = await router.prepare_request(
@@ -240,8 +239,7 @@ async def anthropic_messages(request: Request):
     然后把响应/SSE 流翻译回 Anthropic 格式。
     """
     await _check_anthropic_api_key(request)
-    if router is None:
-        raise HTTPException(status_code=503, detail="代理未就绪")
+    _ensure_router_ready()
 
     from .compatibility.anthropic_translator import (
         claude_request_to_openai,

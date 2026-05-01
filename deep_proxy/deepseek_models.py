@@ -71,3 +71,22 @@ LEGACY_ALIAS_THINKING = {
     "deepseek-chat": "disabled",
     "deepseek-reasoner": "enabled",
 }
+
+# ── V4 模型全集（用于快速成员检测） ──────────────────────
+# 合并 V4_MODELS 的键、DEFAULT_V4_ALIASES 的键（含 [1m] 变体）、仿冒别名
+# 注：仿冒别名需延迟导入（clone_models 依赖 deepseek_models 的 V4_FLASH/PRO）
+_V4_FULL_SET: set | None = None
+
+
+def _build_v4_full_set() -> set:
+    """延迟组装 V4 模型全集，避免循环导入。"""
+    from .clone_models import CLONE_MODEL_ALIASES
+    return set(V4_MODELS.keys()) | set(DEFAULT_V4_ALIASES.keys()) | set(CLONE_MODEL_ALIASES.keys())
+
+
+def v4_model_full_set() -> set:
+    """返回 V4 模型名全集。"""
+    global _V4_FULL_SET
+    if _V4_FULL_SET is None:
+        _V4_FULL_SET = _build_v4_full_set()
+    return _V4_FULL_SET

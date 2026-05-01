@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -18,6 +19,8 @@ import httpx
 
 from .compatibility.deepseek_fixes import (
     default_thinking_type,
+    ensure_thinking_dict,
+    has_tools,
     is_thinking_disabled,
     is_v4_model,
     normalize_model_name,
@@ -34,20 +37,18 @@ from .compatibility.reasoning_handler import (
     process_reasoning_response,
 )
 from .config import ProxyConfig
+from .utils import SSE_DONE, append_to_system_message, prepend_to_system_message
 from .litellm_client import call_litellm, iter_litellm_chunks, _to_litellm_api_base
 from .models_list import build_models_list, fetch_upstream_models
 from .optimization import apply_cheap_optimizations, extract_cot_output, sample_in_range
 from .optimization.compressor import SystemPromptCompressor
 from .optimization.dynamic_baskets import (
-    append_to_system as _append_basket_to_system,
     assemble_paragraph as _assemble_basket_paragraph,
     scenario_from_profile as _scenario_from_profile,
 )
 from .optimization.flash_upgrade import (
     DailyUpgradeThrottle,
     UpgradeTracker,
-    _count_user_messages,
-    _flatten_messages,
     compute_complexity_score,
     extra_body_requests_upgrade,
     has_upgrade_sentinel,
@@ -55,7 +56,6 @@ from .optimization.flash_upgrade import (
 from .optimization.upgrade_router import create_router
 from .optimization.silly_priming import (
     pick_one as _pick_silly_priming,
-    prepend_to_system as _prepend_silly_to_system,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,8 @@ class DeepProxyRouter:
 
     def __init__(self, config: ProxyConfig):
         self.config = config
+        # 预序列化 model_routes 为 dict 列表，避免每请求重复 model_dump()
+        self._model_routes_dicts = [r.model_dump() for r in config.model_routes]
         # 服务端缓存上一轮 reasoning_content；下一轮请求若客户端没回传则补齐
         self._reasoning_cache = ReasoningCache(max_size=1024)
         self._http_client: Optional[httpx.AsyncClient] = None
@@ -128,8 +130,7 @@ class DeepProxyRouter:
                 body["thinking"] = {"type": implicit}
 
         # 0b. 模型名称规范化（reasoner/chat 都会被映射到 v4-flash）
-        model_routes = [r.model_dump() for r in self.config.model_routes]
-        body["model"] = normalize_model_name(raw_model, model_routes)
+        body["model"] = normalize_model_name(raw_model, self._model_routes_dicts)
         model = body.get("model", "")
 
         # 0c. Flash→Pro 选择性升格路由（仅 v4-flash + 启用时）
@@ -144,15 +145,9 @@ class DeepProxyRouter:
         # 1. 默认 reasoning_effort=max 注入（仅当未显式 disabled 且未指定）。
         #    官方文档：reasoning_effort 是 thinking 对象的子字段，不是顶层参数。
         if is_v4_model(model):
-            thinking = body.get("thinking")
-            explicitly_disabled = (
-                is_thinking_disabled(thinking)
-            )
+            explicitly_disabled = is_thinking_disabled(body.get("thinking"))
             if not explicitly_disabled:
-                if not isinstance(thinking, dict):
-                    thinking = {}
-                    body["thinking"] = thinking
-                thinking.setdefault("reasoning_effort", "max")
+                ensure_thinking_dict(body).setdefault("reasoning_effort", "max")
 
         # 2. 采样参数：
         #    - 若传入 sampling_profile（生产路径，端口绑定）：强制覆盖客户端值
@@ -222,8 +217,7 @@ class DeepProxyRouter:
         if (
             self.config.optimization.enabled
             and self.config.optimization.dynamic_baskets
-            and not body.get("tools")
-            and not body.get("tool_choice")
+            and not has_tools(body)
         ):
             scenario = _scenario_from_profile(sampling_profile)
             if scenario:
@@ -234,21 +228,20 @@ class DeepProxyRouter:
                 if paragraph:
                     messages = body.get("messages")
                     if isinstance(messages, list) and messages:
-                        _append_basket_to_system(messages, paragraph)
+                        append_to_system_message(messages, paragraph)
 
         # 8. 无厘头 expert priming（最后一步）
         #    Always 全场景生效；不进压缩缓存键；插入到 system 消息最前面
         if (
             self.config.optimization.enabled
             and self.config.optimization.silly_expert_priming
-            and not body.get("tools")
-            and not body.get("tool_choice")
+            and not has_tools(body)
         ):
             priming = _pick_silly_priming()
             if priming:
                 messages = body.get("messages")
                 if isinstance(messages, list) and messages:
-                    _prepend_silly_to_system(messages, priming)
+                    prepend_to_system_message(messages, priming)
 
         # 9. V4 多轮 reasoning 自愈：在全部消息修改之后执行，确保
         #    缓存键与 remember_response 存储时的对话前缀一致。
@@ -308,31 +301,29 @@ class DeepProxyRouter:
             return
 
         # ── Step 3: 启发式快速路径（Layer 1） ──
-        heuristic_score = compute_complexity_score(messages)
+        heuristic_result = compute_complexity_score(messages)
         did_upgrade = False
-        if heuristic_score >= cfg.heuristic_threshold:
+        if heuristic_result.score >= cfg.heuristic_threshold:
             did_upgrade = True
             logger.info("启发式升格: score=%s >= threshold=%s",
-                        heuristic_score, cfg.heuristic_threshold)
+                        heuristic_result.score, cfg.heuristic_threshold)
 
         # ── Step 4: Router 决策（Layer 0） ──
         # 注：v4-flash 处理简单编码任务效果已极好，不再对 coding_port 做阈值优惠。
         if not did_upgrade:
             router_score = self._upgrade_router.score(messages, body=body)
             if router_score >= cfg.router_threshold:
-                user_text = _flatten_messages(messages, user_only=True)
-                user_msg_count = _count_user_messages(messages)
                 logger.info(
                     "Router 升格: score=%.3f >= threshold=%.2f "
                     "(heuristic=%.1f/10, user_msgs=%d, user_chars=%d)",
                     router_score, cfg.router_threshold,
-                    heuristic_score, user_msg_count, len(user_text),
+                    heuristic_result.score, heuristic_result.user_msg_count, len(heuristic_result.user_text),
                 )
                 did_upgrade = True
             else:
                 logger.info(
                     "保留 Flash: score=%.3f < threshold=%.2f (heuristic=%.1f/10) → %s",
-                    router_score, cfg.router_threshold, heuristic_score, V4_FLASH,
+                    router_score, cfg.router_threshold, heuristic_result.score, V4_FLASH,
                 )
 
         # ── Step 5: 防重复刷屏（Layer 2） ──
@@ -364,7 +355,7 @@ class DeepProxyRouter:
     async def chat_completions(self, body: Dict[str, Any]) -> Dict[str, Any]:
         request_messages = list(body.get("messages") or [])
         # 是否需要剥离 CoT Reflection 标签（由 apply_cheap_optimizations 在 prepare_request 时打的标）
-        strip_cot = bool(body.pop("_deepproxy_strip_cot", False))
+        strip_cot = bool(body.get("_deepproxy_strip_cot", False))
         raw = await call_litellm(self.config, body)
         result = self.process_response(raw)
         if strip_cot:
@@ -388,7 +379,6 @@ class DeepProxyRouter:
 
         SSE 序列化（`data:` 前缀、`[DONE]` 前哨）由调用方在协议层完成。
         """
-        body.pop("_deepproxy_strip_cot", None)
         request_messages = list(body.get("messages") or [])
         accumulator = StreamingReasoningAccumulator(request_messages=request_messages)
         try:
@@ -405,11 +395,11 @@ class DeepProxyRouter:
         负责协议细节：dict → `data: {...}\\n\\n`、错误帧序列化、`data: [DONE]\\n\\n` 前哨。
         """
         async for item in self.iter_chat_chunks(body):
-            yield f"data: {__import__('json').dumps(item)}\n\n"
+            yield f"data: {json.dumps(item)}\n\n"
             if "error" in item and "choices" not in item:
-                yield "data: [DONE]\n\n"
+                yield SSE_DONE
                 return
-        yield "data: [DONE]\n\n"
+        yield SSE_DONE
 
     async def list_models(self) -> Dict[str, Any]:
         """列出可用模型（OpenRouter 风格）。
@@ -426,10 +416,6 @@ class DeepProxyRouter:
         models = build_models_list(
             raw,
             expose_legacy_models=self.config.deepseek.expose_legacy_models,
-            model_routes=[r.model_dump() for r in self.config.model_routes],
+            model_routes=self._model_routes_dicts,
         )
         return {"object": "list", "data": models}
-
-    # ------------------------------------------------------------------
-    # 预处理管道（公共方法，由 main.py 端点层调用）
-    # ------------------------------------------------------------------
