@@ -10,6 +10,8 @@ from deep_proxy.config import (
 )
 from deep_proxy.optimization.silly_priming import (
     SILLY_PRIMING_POOL,
+    pick_one,
+    pick_n,
 )
 from deep_proxy.utils import prepend_to_system_message as prepend_to_system
 from deep_proxy.router import DeepProxyRouter
@@ -24,6 +26,32 @@ class TestSillyPoolContent:
             assert s.endswith("。"), f"非陈述句末: {s}"
         # 代表性举例——否定字不应出现在专家预置池中
         assert not any("不" in s for s in SILLY_PRIMING_POOL), "池中含否定字"
+
+
+class TestPickN:
+    def test_pick_two_returns_two_unique_items(self):
+        items = pick_n(2)
+        assert len(items) == 2
+        assert items[0] != items[1]
+        for s in items:
+            assert s in SILLY_PRIMING_POOL
+
+    def test_pick_n_respects_rng(self):
+        import random
+        rng = random.Random(0)
+        items_a = pick_n(2, rng=rng)
+        rng = random.Random(0)
+        items_b = pick_n(2, rng=rng)
+        assert items_a == items_b
+
+    def test_pick_n_exceeding_pool_size_returns_all(self):
+        items = pick_n(100)
+        assert len(items) == len(SILLY_PRIMING_POOL)
+        assert set(items) == set(SILLY_PRIMING_POOL)
+
+    def test_pick_one_still_works(self):
+        item = pick_one()
+        assert item in SILLY_PRIMING_POOL
 
 
 class TestPrependToSystem:
@@ -58,6 +86,8 @@ def _minimal_config(*, silly: bool = True) -> ProxyConfig:
         enabled=True,
         compress_skills=False,
         avoid_negative_style=False,
+        natural_temperament=False,
+        contextual_register=False,
         assume_good_intent=False,
         instruction_priority=False,
         independent_analysis=False,
@@ -90,9 +120,12 @@ class TestRouterIntegration:
         }
         out = await router.prepare_request(body, sampling_profile=PreciseSamplingConfig())
         sys_text = out["messages"][0]["content"]
-        # 注入内容必须出现在 system 消息开头，并仍保留用户原 system 内容
+        # 注入 2 条 priming，首条在最前面，次条紧随其后，均来自池
         assert any(sys_text.startswith(p) for p in SILLY_PRIMING_POOL)
         assert "USER_SYSTEM" in sys_text
+        pool = set(SILLY_PRIMING_POOL)
+        injected = [p for p in pool if p in sys_text]
+        assert len(injected) >= 2, f"应注入 2 条 priming，实际找到: {injected}"
         await router.close()
 
     async def test_silly_priming_disabled(self):
@@ -118,7 +151,7 @@ class TestRouterIntegration:
         await router.close()
 
     async def test_silly_priming_works_under_creative_profile(self):
-        """全场景生效：creative profile 也应注入。"""
+        """全场景生效：creative profile 也应注入 2 条。"""
         router = DeepProxyRouter(_minimal_config(silly=True))
         body = {
             "model": "deepseek-v4-flash",
@@ -127,5 +160,8 @@ class TestRouterIntegration:
         out = await router.prepare_request(body, sampling_profile=CreativeSamplingConfig())
         sys_msgs = [m for m in out["messages"] if m.get("role") == "system"]
         assert sys_msgs
-        assert any(sys_msgs[0]["content"].startswith(p) for p in SILLY_PRIMING_POOL)
+        sys_text = sys_msgs[0]["content"]
+        pool = set(SILLY_PRIMING_POOL)
+        injected = [p for p in pool if p in sys_text]
+        assert len(injected) >= 2, f"creative profile 应注入 2 条 priming，实际找到: {injected}"
         await router.close()

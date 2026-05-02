@@ -69,6 +69,27 @@ class OptimizationConfig(BaseModel):
                     "空洞升华与终结感收尾（\"这就够了\" \"一句话总结\"等）。"
                     "保留创作/RP 豁免。代替原 avoid_unrequested_moralizing。",
     )
+    natural_temperament: bool = Field(
+        default=True,
+        description="[来源: Model MBTI 93 题 × 30 款模型加权分析 + 混元 2.0 Instruct 独立性分析] "
+                    "注入一套自然气质描述到 system prompt，引导模型在直觉/可能性(S/N)、"
+                    "温情/人文(T/F)、慢热/深度(E/I)、率性/松弛(J/P) 四个维度上"
+                    "呈现更接近\"人\"的回应风格。基于 DS V3.2(×1.5)、混元 2.0(×1.0)、"
+                    "Grok 4.1 Fast(×1.0) 三款参考模型的加权共识，混元 2.0 因其"
+                    "\"在所有模型中最像人\" 的独立性而在 T/F 和 J/P 维度获得锚定权重。"
+                    "文本以气质素描而非行为指令的形式编写，不直接映射任何 MBTI 题目。"
+                    "默认开启，每个请求激活。",
+    )
+    contextual_register: bool = Field(
+        default=True,
+        description="抑制 V4 系列模型的句式简化倾向。V4 在默认输出中倾向于使用短句、"
+                    "简单句而非复杂嵌套句式。本 skill 鼓励：充分复杂的从句结构、"
+                    "长短句交替的段落节奏、逻辑连接词的多样化使用。"
+                    "创意写作/RP 场景中句法节奏可自由调节，但传递复杂信息时"
+                    "不回避长句和嵌套结构。"
+                    "来源：Model MBTI 分析 —— V4 较 V3.2/混元 2.0 Instruct/Grok 4.1 Fast 等"
+                    "\"人格较好\"模型更倾向于简单句输出，本 skill 矫正此偏差。",
+    )
     assume_good_intent: bool = Field(
         default=True,
         description="[来源: grok_4_safety_prompt] "

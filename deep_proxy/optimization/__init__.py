@@ -19,11 +19,13 @@ from ..utils import append_to_system_message, find_system_message, prepend_to_sy
 from .skills_general import (
     _SKILL_AVOID_FABRICATED_CITATIONS,
     _SKILL_AVOID_NEGATIVE_STYLE,
+    _SKILL_COMPLEX_SENTENCE,
     _SKILL_COT_RESET,
     _SKILL_ASSUME_GOOD_INTENT,
     _SKILL_INDEPENDENT_ANALYSIS,
     _SKILL_INSTRUCTION_PRIORITY,
     _SKILL_JSON_MODE,
+    _SKILL_NATURAL_TEMPERAMENT,
     _SKILL_PREFER_MULTIPLE_SOURCES,
     _SKILL_REASON_GENUINELY,
     _SKILL_SAFE_INLINED,
@@ -48,6 +50,8 @@ async def apply_cheap_optimizations(
     *,
     # A. 通用风格 skills (always active)
     avoid_negative_style: bool = True,
+    natural_temperament: bool = True,
+    contextual_register: bool = True,
     assume_good_intent: bool = True,
     instruction_priority: bool = True,
     independent_analysis: bool = True,
@@ -71,10 +75,14 @@ async def apply_cheap_optimizations(
 ) -> Dict[str, Any]:
     """对请求体施加廉价的提示词优化（原地修改并返回 body）。
 
-    分为三类：
-    - 内联检索：readurls
-    - 推理引导：cot_reflection（条件启用）/ re2
-    - 内置 skills（prompt 注入）：json_mode_hint / inject_date / readurls
+    分为四组：
+    - A. 通用风格 skills（avoid_negative_style / natural_temperament /
+      contextual_register / assume_good_intent / instruction_priority /
+      independent_analysis / reason_genuinely / cot_reset / inject_date）
+    - B. 求证 / 反幻觉 skills（show_math_steps / prefer_multiple_sources /
+      avoid_fabricated_citations）
+    - C. 上下文相关 skills（json_mode_hint / safe_inlined_content）
+    - D. 消息转换（re2 / cot_reflection / readurls）
 
     跳过条件：
     - 没有 messages
@@ -104,6 +112,10 @@ async def apply_cheap_optimizations(
     # A. 通用风格（每请求激活，对创作积极改善）
     if avoid_negative_style:
         skill_lines.append(_SKILL_AVOID_NEGATIVE_STYLE)
+    if natural_temperament:
+        skill_lines.append(_SKILL_NATURAL_TEMPERAMENT)
+    if contextual_register:
+        skill_lines.append(_SKILL_COMPLEX_SENTENCE)
     if assume_good_intent:
         skill_lines.append(_SKILL_ASSUME_GOOD_INTENT)
     if instruction_priority:

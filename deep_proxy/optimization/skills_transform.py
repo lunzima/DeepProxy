@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # ── RE2 ──────────────────────────────────────────────────────────────────
 
-_RE2_MARKER = "\n再读一遍这个问题："
+_RE2_MARKER = "\n请再阅读一遍上面的内容，然后作答：\n"
 
 
 def _apply_re2(messages: List[Dict[str, Any]]) -> None:

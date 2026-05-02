@@ -20,8 +20,8 @@ async def _apply(body, **kwargs):
     defaults = {
         "cot_reflection": False, "re2": False, "readurls": False,
         "json_mode_hint": False, "inject_date": False, "safe_inlined_content": False,
-        "avoid_negative_style": False, "assume_good_intent": False,
-        "instruction_priority": False,
+        "avoid_negative_style": False, "natural_temperament": False, "contextual_register": False,
+        "assume_good_intent": False, "instruction_priority": False,
         "show_math_steps": False, "avoid_fabricated_citations": False,
         "independent_analysis": False, "prefer_multiple_sources": False,
         "reason_genuinely": False, "cot_reset": False,
@@ -35,7 +35,7 @@ class TestRe2:
         b = _make_body([{"role": "user", "content": "What is 1+1?"}])
         await _apply(b, re2=True)
         assert b["messages"][0]["content"] == (
-            "What is 1+1?\n再读一遍这个问题：What is 1+1?"
+            "What is 1+1?\n请再阅读一遍上面的内容，然后作答：\nWhat is 1+1?"
         )
 
     async def test_only_last_user_modified(self):
@@ -46,10 +46,12 @@ class TestRe2:
         ])
         await _apply(b, re2=True)
         assert b["messages"][0]["content"] == "first"
-        assert b["messages"][2]["content"] == "second\n再读一遍这个问题：second"
+        assert b["messages"][2]["content"] == (
+            "second\n请再阅读一遍上面的内容，然后作答：\nsecond"
+        )
 
     async def test_idempotent(self):
-        original = "q\n再读一遍这个问题：q"
+        original = "q\n请再阅读一遍上面的内容，然后作答：\nq"
         b = _make_body([{"role": "user", "content": original}])
         await _apply(b, re2=True)
         assert b["messages"][0]["content"] == original
@@ -256,12 +258,13 @@ class TestReadUrls:
             await apply_cheap_optimizations(
                 b, cot_reflection=False, re2=False, readurls=True,
                 json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, assume_good_intent=False,
+                avoid_negative_style=False, natural_temperament=False,
+                assume_good_intent=False,
                 instruction_priority=False,
                 show_math_steps=False, avoid_fabricated_citations=False,
                 independent_analysis=False, prefer_multiple_sources=False,
                 reason_genuinely=False,
-                cot_reset=False,
+                cot_reset=False, contextual_register=False,
                 http_client=client,
             )
         content = b["messages"][0]["content"]
@@ -277,12 +280,13 @@ class TestReadUrls:
             await apply_cheap_optimizations(
                 b, cot_reflection=False, re2=False, readurls=True,
                 json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, assume_good_intent=False,
+                avoid_negative_style=False, natural_temperament=False,
+                assume_good_intent=False,
                 instruction_priority=False,
                 show_math_steps=False, avoid_fabricated_citations=False,
                 independent_analysis=False, prefer_multiple_sources=False,
                 reason_genuinely=False,
-                cot_reset=False,
+                cot_reset=False, contextual_register=False,
                 http_client=client,
             )
         # fail-open：失败不修改
@@ -312,12 +316,13 @@ class TestReadUrls:
             await apply_cheap_optimizations(
                 b, cot_reflection=False, re2=False, readurls=True,
                 json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, assume_good_intent=False,
+                avoid_negative_style=False, natural_temperament=False,
+                assume_good_intent=False,
                 instruction_priority=False,
                 show_math_steps=False, avoid_fabricated_citations=False,
                 independent_analysis=False, prefer_multiple_sources=False,
                 reason_genuinely=False,
-                cot_reset=False,
+                cot_reset=False, contextual_register=False,
                 http_client=client,
             )
         c = b["messages"][0]["content"]
@@ -335,12 +340,13 @@ class TestReadUrls:
             await apply_cheap_optimizations(
                 b, cot_reflection=False, re2=False, readurls=True,
                 json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, assume_good_intent=False,
+                avoid_negative_style=False, natural_temperament=False,
+                assume_good_intent=False,
                 instruction_priority=False,
                 show_math_steps=False, avoid_fabricated_citations=False,
                 independent_analysis=False, prefer_multiple_sources=False,
                 reason_genuinely=False,
-                cot_reset=False,
+                cot_reset=False, contextual_register=False,
                 http_client=client,
             )
         c = b["messages"][0]["content"]
@@ -364,12 +370,13 @@ class TestReadUrls:
             await apply_cheap_optimizations(
                 b, cot_reflection=False, re2=False, readurls=True,
                 json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, assume_good_intent=False,
+                avoid_negative_style=False, natural_temperament=False,
+                assume_good_intent=False,
                 instruction_priority=False,
                 show_math_steps=False, avoid_fabricated_citations=False,
                 independent_analysis=False, prefer_multiple_sources=False,
                 reason_genuinely=False,
-                cot_reset=False,
+                cot_reset=False, contextual_register=False,
                 http_client=client,
             )
         # 内容未被注入（不应有 [Content from ...]）
@@ -391,12 +398,13 @@ class TestReadUrls:
             await apply_cheap_optimizations(
                 b, cot_reflection=False, re2=False, readurls=True,
                 json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, assume_good_intent=False,
+                avoid_negative_style=False, natural_temperament=False,
+                assume_good_intent=False,
                 instruction_priority=False,
                 show_math_steps=False, avoid_fabricated_citations=False,
                 independent_analysis=False, prefer_multiple_sources=False,
                 reason_genuinely=False,
-                cot_reset=False,
+                cot_reset=False, contextual_register=False,
                 http_client=client,
             )
         c = b["messages"][0]["content"]
@@ -417,12 +425,13 @@ class TestReadUrls:
             await apply_cheap_optimizations(
                 b, cot_reflection=False, re2=False, readurls=True,
                 json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, assume_good_intent=False,
+                avoid_negative_style=False, natural_temperament=False,
+                assume_good_intent=False,
                 instruction_priority=False,
                 show_math_steps=False, avoid_fabricated_citations=False,
                 independent_analysis=False, prefer_multiple_sources=False,
                 reason_genuinely=False,
-                cot_reset=False,
+                cot_reset=False, contextual_register=False,
                 http_client=client,
             )
         c = b["messages"][0]["content"]
@@ -442,12 +451,13 @@ class TestReadUrls:
             await apply_cheap_optimizations(
                 b, cot_reflection=False, re2=False, readurls=True,
                 json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, assume_good_intent=False,
+                avoid_negative_style=False, natural_temperament=False,
+                assume_good_intent=False,
                 instruction_priority=False,
                 show_math_steps=False, avoid_fabricated_citations=False,
                 independent_analysis=False, prefer_multiple_sources=False,
                 reason_genuinely=False,
-                cot_reset=False,
+                cot_reset=False, contextual_register=False,
                 http_client=client,
             )
         c = b["messages"][0]["content"]

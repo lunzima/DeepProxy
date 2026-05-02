@@ -221,7 +221,8 @@ class TestCompressedCombinedSystem:
         }
         await apply_cheap_optimizations(
             body,
-            avoid_negative_style=True, assume_good_intent=False,
+            avoid_negative_style=True, natural_temperament=False, contextual_register=False,
+            assume_good_intent=False,
             instruction_priority=False, independent_analysis=False, inject_date=False,
             show_math_steps=False, prefer_multiple_sources=False,
             avoid_fabricated_citations=False, json_mode_hint=False,
@@ -259,7 +260,7 @@ class TestCompressedCombinedSystem:
             }
 
         kwargs = dict(
-            avoid_negative_style=True,
+            avoid_negative_style=True, natural_temperament=False, contextual_register=False,
             assume_good_intent=False, instruction_priority=False,
             independent_analysis=False, inject_date=False,
             show_math_steps=False, prefer_multiple_sources=False,
@@ -291,7 +292,7 @@ class TestCompressedCombinedSystem:
 
         body = {"messages": [{"role": "user", "content": "hi"}]}
         await apply_cheap_optimizations(
-            body, avoid_negative_style=True,
+            body, avoid_negative_style=True, contextual_register=False,
             assume_good_intent=False, instruction_priority=False,
             independent_analysis=False, inject_date=False,
             show_math_steps=False, prefer_multiple_sources=False,
@@ -318,7 +319,7 @@ class TestCompressedCombinedSystem:
 
         body = {"messages": [{"role": "user", "content": "hi"}]}
         await apply_cheap_optimizations(
-            body, avoid_negative_style=False,
+            body, avoid_negative_style=False, natural_temperament=False, contextual_register=False,
             assume_good_intent=False, instruction_priority=False,
             independent_analysis=False, reason_genuinely=False,
             inject_date=False, cot_reset=False,
@@ -351,7 +352,7 @@ class TestCompressedCombinedSystem:
             ],
         }
         await apply_cheap_optimizations(
-            body, avoid_negative_style=True,
+            body, avoid_negative_style=True, contextual_register=False,
             assume_good_intent=False, instruction_priority=False,
             independent_analysis=False, inject_date=False,
             show_math_steps=False, prefer_multiple_sources=False,

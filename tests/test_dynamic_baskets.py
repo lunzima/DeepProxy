@@ -16,57 +16,63 @@ from deep_proxy.optimization.dynamic_baskets import (
     _CODING_BASKETS as CODING_BASKETS,
     _CREATIVE_BASKETS as CREATIVE_BASKETS,
     _GENERAL_BASKETS as GENERAL_BASKETS,
-    assemble_paragraph,
+    assemble_paragraphs,
     scenario_from_profile,
 )
 from deep_proxy.utils import append_to_system_message as append_to_system
 from deep_proxy.router import DeepProxyRouter
 
 
-class TestAssemblePara:
-    def test_three_sentences_in_fixed_order(self):
+class TestAssembleParas:
+    def test_default_returns_three_paragraphs(self):
         rng = random.Random(0)
-        para = assemble_paragraph("coding", rng=rng)
-        parts: List[str] = [p for p in para.split("。") if p]
-        assert len(parts) == 3
-        assert parts[0] in {s.rstrip("。") for s in CODING_BASKETS["methodology"]}
-        assert parts[1] in {s.rstrip("。") for s in CODING_BASKETS["best_practices"]}
-        assert parts[2] in {s.rstrip("。") for s in CODING_BASKETS["moderate_encouragement"]}
+        paras = assemble_paragraphs("coding", rng=rng)
+        assert len(paras) == 3
+        for para in paras:
+            parts: List[str] = [p for p in para.split("。") if p]
+            assert len(parts) == 3
+            assert parts[0] in {s.rstrip("。") for s in CODING_BASKETS["methodology"]}
+            assert parts[1] in {s.rstrip("。") for s in CODING_BASKETS["best_practices"]}
+            assert parts[2] in {s.rstrip("。") for s in CODING_BASKETS["moderate_encouragement"]}
 
     def test_unknown_scenario_returns_empty(self):
-        assert assemble_paragraph("nonexistent") == ""
+        assert assemble_paragraphs("nonexistent") == []
 
     def test_writing_creative_picks_from_creative_baskets(self):
         rng = random.Random(0)
-        para = assemble_paragraph("writing", writing_kind="creative", rng=rng)
-        parts: List[str] = [p for p in para.split("。") if p]
-        assert len(parts) == 3
-        assert parts[0] in {s.rstrip("。") for s in CREATIVE_BASKETS["methodology"]}
-        assert parts[1] in {s.rstrip("。") for s in CREATIVE_BASKETS["best_practices"]}
-        assert parts[2] in {s.rstrip("。") for s in CREATIVE_BASKETS["moderate_encouragement"]}
+        paras = assemble_paragraphs("writing", writing_kind="creative", rng=rng)
+        assert len(paras) == 3
+        for para in paras:
+            parts: List[str] = [p for p in para.split("。") if p]
+            assert len(parts) == 3
+            assert parts[0] in {s.rstrip("。") for s in CREATIVE_BASKETS["methodology"]}
+            assert parts[1] in {s.rstrip("。") for s in CREATIVE_BASKETS["best_practices"]}
+            assert parts[2] in {s.rstrip("。") for s in CREATIVE_BASKETS["moderate_encouragement"]}
 
     def test_writing_general_picks_from_general_baskets(self):
         rng = random.Random(0)
-        para = assemble_paragraph("writing", writing_kind="general", rng=rng)
-        parts: List[str] = [p for p in para.split("。") if p]
-        assert len(parts) == 3
-        assert parts[0] in {s.rstrip("。") for s in GENERAL_BASKETS["methodology"]}
-        assert parts[1] in {s.rstrip("。") for s in GENERAL_BASKETS["best_practices"]}
-        assert parts[2] in {s.rstrip("。") for s in GENERAL_BASKETS["moderate_encouragement"]}
+        paras = assemble_paragraphs("writing", writing_kind="general", rng=rng)
+        assert len(paras) == 3
+        for para in paras:
+            parts: List[str] = [p for p in para.split("。") if p]
+            assert len(parts) == 3
+            assert parts[0] in {s.rstrip("。") for s in GENERAL_BASKETS["methodology"]}
+            assert parts[1] in {s.rstrip("。") for s in GENERAL_BASKETS["best_practices"]}
+            assert parts[2] in {s.rstrip("。") for s in GENERAL_BASKETS["moderate_encouragement"]}
 
     def test_unknown_writing_kind_falls_back_to_creative(self):
         rng = random.Random(0)
-        para = assemble_paragraph("writing", writing_kind="unknown", rng=rng)
-        parts: List[str] = [p for p in para.split("。") if p]
+        paras = assemble_paragraphs("writing", writing_kind="unknown", rng=rng)
+        assert len(paras) == 3
+        parts: List[str] = [p for p in paras[0].split("。") if p]
         assert parts[0] in {s.rstrip("。") for s in CREATIVE_BASKETS["methodology"]}
 
     def test_empty_basket_returns_empty(self):
-        # 容错路径：篮为空 → 整段返回 ""（避免半段注入）
         from deep_proxy.optimization import dynamic_baskets as db
         original = db._CREATIVE_BASKETS["methodology"]
         try:
             db._CREATIVE_BASKETS["methodology"] = []
-            assert assemble_paragraph("writing", writing_kind="creative") == ""
+            assert assemble_paragraphs("writing", writing_kind="creative") == []
         finally:
             db._CREATIVE_BASKETS["methodology"] = original
 
@@ -114,6 +120,8 @@ def _minimal_config(*, dynamic_baskets: bool = True) -> ProxyConfig:
         enabled=True,
         compress_skills=False,
         avoid_negative_style=False,
+        natural_temperament=False,
+        contextual_register=False,
         assume_good_intent=False,
         instruction_priority=False,
         independent_analysis=False,

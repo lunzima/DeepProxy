@@ -43,7 +43,7 @@ from .models_list import build_models_list, fetch_upstream_models
 from .optimization import apply_cheap_optimizations, extract_cot_output, sample_in_range
 from .optimization.compressor import SystemPromptCompressor
 from .optimization.dynamic_baskets import (
-    assemble_paragraph as _assemble_basket_paragraph,
+    assemble_paragraphs as _assemble_basket_paragraphs,
     scenario_from_profile as _scenario_from_profile,
 )
 from .optimization.flash_upgrade import (
@@ -55,7 +55,7 @@ from .optimization.flash_upgrade import (
 )
 from .optimization.upgrade_router import create_router
 from .optimization.silly_priming import (
-    pick_one as _pick_silly_priming,
+    pick_n as _pick_silly_n,
 )
 
 logger = logging.getLogger(__name__)
@@ -189,6 +189,8 @@ class DeepProxyRouter:
                 body,
                 # A. 通用风格
                 avoid_negative_style=opt.avoid_negative_style,
+                natural_temperament=opt.natural_temperament,
+                contextual_register=opt.contextual_register,
                 assume_good_intent=opt.assume_good_intent,
                 instruction_priority=opt.instruction_priority,
                 independent_analysis=opt.independent_analysis,
@@ -221,27 +223,30 @@ class DeepProxyRouter:
         ):
             scenario = _scenario_from_profile(sampling_profile)
             if scenario:
-                paragraph = _assemble_basket_paragraph(
+                paragraphs = _assemble_basket_paragraphs(
                     scenario,
                     writing_kind=self.config.optimization.writing_basket_kind,
                 )
-                if paragraph:
+                if paragraphs:
                     messages = body.get("messages")
                     if isinstance(messages, list) and messages:
-                        append_to_system_message(messages, paragraph)
+                        for para in paragraphs:
+                            append_to_system_message(messages, para)
 
         # 8. 无厘头 expert priming（最后一步）
-        #    Always 全场景生效；不进压缩缓存键；插入到 system 消息最前面
+        #    Always 全场景生效；不进压缩缓存键；插入到 system 消息最前面，每次随机 2 条
         if (
             self.config.optimization.enabled
             and self.config.optimization.silly_expert_priming
             and not has_tools(body)
         ):
-            priming = _pick_silly_priming()
-            if priming:
+            primings = _pick_silly_n(2)
+            if primings:
                 messages = body.get("messages")
                 if isinstance(messages, list) and messages:
-                    prepend_to_system_message(messages, priming)
+                    # 倒序 prepend 以保证首条在最前面
+                    for p in reversed(primings):
+                        prepend_to_system_message(messages, p)
 
         # 9. V4 多轮 reasoning 自愈：在全部消息修改之后执行，确保
         #    缓存键与 remember_response 存储时的对话前缀一致。

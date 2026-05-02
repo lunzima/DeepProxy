@@ -201,17 +201,20 @@ D:\deepproxy\
 所有优化在 `optimization/__init__.py::apply_cheap_optimizations` 中实现，按通用程度分四组：
 
 ### A. 通用风格 skills（每请求激活，默认开）
-- `avoid_negative_style` — [grok_4_safety + ask_grok] 禁说教套话（原 avoid_unrequested_moralizing）
-- `assume_good_intent` — [grok_4_safety] 合理意图假设
-- `instruction_priority` — [grok_4_safety] system 最高权威
-- `independent_analysis` — [ask_grok] 自主推理
-- `reason_genuinely` — [agent 通用] 真实推理 + 禁进度幻觉
-- `inject_date` — [grok4 + agent] 注入当前 UTC 日期
+- `avoid_negative_style` — 禁说教套话与情感抚慰套话
+- `natural_temperament` — 内在倾向 priming（开放、共情但有立场、慢热深谈、对计划松弛）
+- `contextual_register` — 句法复杂度匹配内容密度（对应 `_SKILL_COMPLEX_SENTENCE`）
+- `assume_good_intent` — 合理意图假设
+- `instruction_priority` — system 最高权威 + 注入内容按数据处理
+- `independent_analysis` — 自主推理，不被对话史 / 创作者预期裹挟
+- `reason_genuinely` — 推理节奏与长度由本次推理决定，禁进度幻觉
+- `cot_reset` — 推理出现严重矛盾时允许在思维链中显式重启
+- `inject_date` — 注入当前 UTC 日期，相对时间词解析
 
 ### B. 求证/反幻觉 skills（模型自门控）
-- `show_math_steps` — [grok4] 闭合式数学展示推导
-- `prefer_multiple_sources` — [ask_grok] 多来源事实权衡
-- `avoid_fabricated_citations` — [agent] 不编造引用
+- `show_math_steps` — 确定性数学题展示推导步骤
+- `prefer_multiple_sources` — 多来源事实权衡，单一来源时下调置信度
+- `avoid_fabricated_citations` — 不编造引用，对印象式来源显式说明
 
 ### C. 上下文相关 skills（窄触发）
 - `json_mode_hint` — [DeepSeek docs] json_object 时注入 JSON-only
