@@ -200,16 +200,16 @@ D:\deepproxy\
 
 所有优化在 `optimization/__init__.py::apply_cheap_optimizations` 中实现，按通用程度分四组：
 
-### A. 通用风格 skills（每请求激活，默认开）
+### A. 通用风格 skills（每请求激活，默认开；按语义连贯性排序）
 - `avoid_negative_style` — 禁说教套话与情感抚慰套话
+- `assume_good_intent` — 合理意图假设（与上条组成"交互契约"对）
 - `natural_temperament` — 内在倾向 priming（开放、共情但有立场、慢热深谈、对计划松弛）
-- `contextual_register` — 句法复杂度匹配内容密度（对应 `_SKILL_COMPLEX_SENTENCE`）
-- `assume_good_intent` — 合理意图假设
+- `contextual_register` — 句法复杂度匹配内容密度（对应 `_SKILL_COMPLEX_SENTENCE`；与上条组成"输出风格"对）
 - `instruction_priority` — system 最高权威 + 注入内容按数据处理
-- `independent_analysis` — 自主推理，不被对话史 / 创作者预期裹挟
+- `independent_analysis` — 自主推理，不被对话史 / 创作者预期裹挟（与上条组成"推理自主性"对）
 - `reason_genuinely` — 推理节奏与长度由本次推理决定，禁进度幻觉
-- `cot_reset` — 推理出现严重矛盾时允许在思维链中显式重启
-- `inject_date` — 注入当前 UTC 日期，相对时间词解析
+- `cot_reset` — 推理出现严重矛盾时允许在思维链中显式重启（与上条组成"推理元认知"对）
+- `inject_date` — 注入当前 UTC 日期，相对时间词解析（压缩后追加，不进缓存键）
 
 ### B. 求证/反幻觉 skills（模型自门控）
 - `show_math_steps` — 确定性数学题展示推导步骤
@@ -252,33 +252,12 @@ D:\deepproxy\
 4. **Plaintext API key** 在 `config.yaml` 中是故意行为（单用户玩具项目），不视为泄漏
 5. **LiteLLM 的 deepseek provider** 必须以 kwarg 传递 `api_key`/`api_base`（忽略全局 `litellm.api_base`）
 
-## V4 兼容性验证状态（2026-04-26 确认）
-
-外部兼容性审计识别的 4 项高优修复——经逐项代码审查，**全部已完成**：
-
-| # | 修复项 | 状态 | 实现位置 | 验证要点 |
-|---|--------|------|----------|----------|
-| 1 | **Reasoning_content 保留 + 多轮回传** | ✅ 已完成 | `reasoning_handler.py` | `process_reasoning_response` 不 pop + 加 `reasoning` 别名；`ReasoningCache` (对话前缀签名)；`ensure_reasoning_content_persistence` (缓存补齐 → 补不齐则注入 dummy 占位并保持 thinking=enabled)；`recover_reasoning_content` (LiteLLM `model_dump` 兜底)；`StreamingReasoningAccumulator` (流式累加→写缓存) |
-| 2 | **统一流式/非流式路径 + 错误 SSE** | ✅ 已完成 | `router.py` | 双路径共用 `prepare_request` → LiteLLM SDK (`acompletion` / `acompletion stream`)；共享 `_to_litellm_api_base`；流式错误映射为 JSON SSE + `[DONE]` |
-| 3 | **动态参数过滤 + V4 模型 alias** | ✅ 已完成 | `deepseek_fixes.py` + `error_mapper.py` | `normalize_model_name`: V4 原生不加 `deepseek/` 前缀；`DEFAULT_V4_ALIASES`: chat/reasoner→v4-flash；`LEGACY_ALIAS_THINKING`: 隐式注入 thinking.type；`strip_unsupported_params`: 仅移除 `functions`/`user` |
-| 4 | **FIM 走 LiteLLM** | ✅ 已处理（下线） | DeepSeek 官方 FIM 端点不支持 reasoning | FIM 端点已下线，说明见下方"已移除功能"。LiteLLM `atext_completion` 对 deepseek 路由无效（prompt→messages→chat 转换），直连 DeepSeek `/beta/completions` |
-
-### 已排除的过时问题（不再需要处理）
-
-- `reasoning_handler` 默认 pop `reasoning_content` → 已改为 `process_reasoning_response` 保留 + 别名注入
-- 流式路径完全不经过 reasoning 处理 → `call_litellm_stream` 已调用 `recover_reasoning_content` + `process_streaming_delta`
-- `_get_litellm_api_base()` 硬编码 localhost:4000、仅流式使用 → 已替换为共享函数 `_to_litellm_api_base`
-- V4 新模型不需要 `deepseek/` 前缀 → `normalize_model_name` 已正确处理
-- thinking mode 下忽略 temperature/top_p 等参数 → 已验证 V4 全面支持，不剥离
-
-## DeepSeek API Gotchas（已验证官方文档）
+## DeepSeek API 要点
 
 - `temperature=0.0` 不稳定，最小有效值 ~0.1
 - `thinking.reasoning_effort` 是 `thinking` 的子字段，非顶层参数
 - `thinking.type` 服务端默认 `enabled`，代理不强制 `disabled`
 - V4 支持 temperature/top_p/presence_penalty/frequency_penalty/response_format/tools/tool_choice/stream_options.include_usage
-- DeepSeek 上游 `/v1/models` 返回条目缺 `created` 字段——`normalize_model_entry` 注入默认值
-- `deepseek-coder` 不存在，仅 `deepseek-v4-flash` 和 `deepseek-v4-pro`
 - 上下文长度：1M tokens，输出最大 384K tokens
 
 ## What Not to Reintroduce（已移除的功能）

@@ -76,9 +76,10 @@ async def apply_cheap_optimizations(
     """对请求体施加廉价的提示词优化（原地修改并返回 body）。
 
     分为四组：
-    - A. 通用风格 skills（avoid_negative_style / natural_temperament /
-      contextual_register / assume_good_intent / instruction_priority /
+    - A. 通用风格 skills（avoid_negative_style / assume_good_intent /
+      natural_temperament / contextual_register / instruction_priority /
       independent_analysis / reason_genuinely / cot_reset / inject_date）
+      （排序按语义连贯性：交互契约→输出风格→推理自主性→推理元认知）
     - B. 求证 / 反幻觉 skills（show_math_steps / prefer_multiple_sources /
       avoid_fabricated_citations）
     - C. 上下文相关 skills（json_mode_hint / safe_inlined_content）
@@ -110,14 +111,24 @@ async def apply_cheap_optimizations(
     skill_lines: List[str] = []
 
     # A. 通用风格（每请求激活，对创作积极改善）
+    #
+    # 排序说明：按语义连贯性分组。
+    #   1) avoid_negative_style + assume_good_intent — 输出约束 + 输入解读，
+    #      组成"交互契约"对（模型怎么理解、怎么回）。
+    #   2) natural_temperament + contextual_register — 内在倾向 + 句法复杂度，
+    #      组成"输出风格"对。
+    #   3) instruction_priority + independent_analysis — 推理自主性对（system
+    #      权威 + 不受外部预期裹挟），语义最接近，紧邻排列使下游模型
+    #      连续读入两个抵抗外部影响的规则，减少认知跳跃。
+    #   4) reason_genuinely + cot_reset — 推理元认知对（节奏自主 + 矛盾重启）。
     if avoid_negative_style:
         skill_lines.append(_SKILL_AVOID_NEGATIVE_STYLE)
+    if assume_good_intent:
+        skill_lines.append(_SKILL_ASSUME_GOOD_INTENT)
     if natural_temperament:
         skill_lines.append(_SKILL_NATURAL_TEMPERAMENT)
     if contextual_register:
         skill_lines.append(_SKILL_COMPLEX_SENTENCE)
-    if assume_good_intent:
-        skill_lines.append(_SKILL_ASSUME_GOOD_INTENT)
     if instruction_priority:
         skill_lines.append(_SKILL_INSTRUCTION_PRIORITY)
     if independent_analysis:
