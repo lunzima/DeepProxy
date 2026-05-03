@@ -414,7 +414,7 @@ class _AnthropicStreamBuilder:
             events.append(_sse_event("error", {"type": "error", "error": chunk["error"]}))
             return events
 
-        # usage 尾包 / 同包 usage
+        # usage 尾包 / 同包 usage（input/output 各自取最大值，避免迟到 chunk 倒退）
         u = chunk.get("usage") or {}
         if u:
             # max() 避免迟到 chunk 倒退（completion_tokens / prompt_tokens 均适用）
@@ -516,11 +516,13 @@ class _AnthropicStreamBuilder:
                 "index": self._text_idx,
             }))
 
-        # 发出累加的 tool_use 块（按原始 index 排序）。
-        # 设计取舍：此处在流末整块发出 tool_use，而非 Anthropic SSE 规范定义的
-        # input_json_delta 增量流。原因：DeepSeek V4 的 tool_calls 增量缺乏稳定的
-        # partial JSON 边界，强行切分易破坏 JSON 结构；整块兼容所有 SDK 客户端，
-        # 是两害相权下的更安全选择。
+        # 发出累加的 tool_use 块（按原始 index 排序）
+        # 设计取舍：DeepSeek V4 的 tool_calls 增量缺乏稳定的 partial JSON 边界，
+        # 这里在流末整块发出（content_block_start + 单个 input_json_delta + stop），
+        # 而不是 Anthropic 官方规范的"逐 token input_json_delta 增量"。
+        # 大多数 Anthropic SDK 客户端可正常消费此整体 block 形态；
+        # 仅依赖 streaming tool input 渐进解析的客户端会感受到延迟（整块到达），
+        # 不会感受到错误。
         if self._tool_calls:
             msg_start = self._ensure_message_start()
             if msg_start:

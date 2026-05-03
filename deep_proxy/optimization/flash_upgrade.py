@@ -110,7 +110,7 @@ class RepeatUpgradeThrottle:
         if did_upgrade:
             count += 1
             if count >= self._max:
-                # 冷却 3 轮
+                # 冷却 cooldown_turns 轮
                 self._set(key, (0, self._cooldown - 1))
                 return True
             self._set(key, (count, 0))
