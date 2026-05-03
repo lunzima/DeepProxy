@@ -378,6 +378,7 @@ class _AnthropicStreamBuilder:
         self._next_idx: int = 0
         self._finish_reason: Optional[str] = None
         self._usage_output: int = 0
+        self._usage_input: int = 0  # 从 OpenAI usage.prompt_tokens 填入，message_delta 时写出
         self._tool_calls: Dict[int, Dict[str, Any]] = {}
 
     def _ensure_message_start(self) -> Optional[str]:
@@ -395,6 +396,8 @@ class _AnthropicStreamBuilder:
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
+                # Anthropic SSE 规范要求 message_start 中 usage 字段必须存在；
+                # 实际 input_tokens 在 message_delta 阶段从 OpenAI usage 补齐。
                 "usage": {"input_tokens": 0, "output_tokens": 0},
             },
         })
@@ -403,8 +406,8 @@ class _AnthropicStreamBuilder:
         """处理一个 chunk，返回 0..N 条 SSE 事件字符串。"""
         events: List[str] = []
 
-        # 错误终止包
-        if "error" in chunk and "choices" not in chunk:
+        # 错误终止包（error 必须是 dict 且 choices 为空）
+        if isinstance(chunk.get("error"), dict) and not chunk.get("choices"):
             msg_start = self._ensure_message_start()
             if msg_start:
                 events.append(msg_start)
@@ -415,6 +418,10 @@ class _AnthropicStreamBuilder:
         u = chunk.get("usage") or {}
         if u:
             self._usage_output = int(u.get("completion_tokens") or self._usage_output)
+            # prompt_tokens 可能在任何 chunk 中出现（含尾包）；max() 避免迟到 chunk 倒退
+            pt = u.get("prompt_tokens")
+            if pt:
+                self._usage_input = max(self._usage_input, int(pt))
 
         choices = chunk.get("choices") or []
         if not choices:
@@ -507,7 +514,11 @@ class _AnthropicStreamBuilder:
                 "index": self._text_idx,
             }))
 
-        # 发出累加的 tool_use 块（按原始 index 排序）
+        # 发出累加的 tool_use 块（按原始 index 排序）。
+        # 设计取舍：此处在流末整块发出 tool_use，而非 Anthropic SSE 规范定义的
+        # input_json_delta 增量流。原因：DeepSeek V4 的 tool_calls 增量缺乏稳定的
+        # partial JSON 边界，强行切分易破坏 JSON 结构；整块兼容所有 SDK 客户端，
+        # 是两害相权下的更安全选择。
         if self._tool_calls:
             msg_start = self._ensure_message_start()
             if msg_start:
@@ -562,7 +573,13 @@ class _AnthropicStreamBuilder:
                 "stop_reason": _map_stop_reason(self._finish_reason),
                 "stop_sequence": None,
             },
-            "usage": {"output_tokens": self._usage_output},
+            # input_tokens 从 OpenAI usage.prompt_tokens 转写补齐；
+            # message_start 中占位 0（Anthropic SSE 规范要求该字段必现），
+            # 首次有效值在此处 message_delta 阶段发出。
+            "usage": {
+                "input_tokens": self._usage_input,
+                "output_tokens": self._usage_output,
+            },
         }))
         events.append(_sse_event("message_stop", {"type": "message_stop"}))
 
@@ -586,8 +603,8 @@ async def openai_stream_to_claude(
         events = builder.on_chunk(chunk)
         for ev in events:
             yield ev
-        # error 包后立即终止
-        if "error" in chunk and "choices" not in chunk:
+        # error 包后立即终止（error 必须是 dict 且 choices 为空）
+        if isinstance(chunk.get("error"), dict) and not chunk.get("choices"):
             return
     for ev in builder.on_finish():
         yield ev

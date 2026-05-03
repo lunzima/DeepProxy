@@ -145,8 +145,16 @@ async def _apply_readurls(
                         break
 
                 # 并发抓取（return_exceptions=True：单 URL 异常不影响其它）
+                # asyncio.wait_for 确保 per-URL 超时严格 = _READURLS_TIMEOUT，
+                # 防止共享 httpx 客户端的全局 10s timeout 让慢站点逃过 5s 上限。
                 results = await asyncio.gather(
-                    *(_fetch_url_text(client, u) for u in clean_urls),
+                    *(
+                        asyncio.wait_for(
+                            _fetch_url_text(client, u),
+                            timeout=_READURLS_TIMEOUT,
+                        )
+                        for u in clean_urls
+                    ),
                     return_exceptions=True,
                 )
 

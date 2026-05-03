@@ -47,7 +47,7 @@ def _last_user_hash(messages: List[Dict[str, Any]]) -> str:
     return hash_str(text, algo="md5")[:8] if text else "empty"
 
 
-class DailyUpgradeThrottle:
+class RepeatUpgradeThrottle:
     """防刷屏保护：同一对话窗口内同一 user 消息连续触发升格 N 次后，强制降级 Flash + 冷却。
 
     Coding Agent 场景下同一复杂 prompt 可能被重复提交多次，
@@ -61,13 +61,25 @@ class DailyUpgradeThrottle:
     键隔离：使用 (conversation_fingerprint, last_user_hash) 组合键，确保
     不同对话窗口的限流状态互不干扰。即使两个窗口有完全相同的最后一条
     user 消息（不同对话中相同的追问），也各自独立计数。
+
+    容量限制：有界 LRU（max_size=2048），与 UpgradeTracker / ReasoningCache 统一策略，
+    防止长时间运行时内存无限增长。
     """
 
-    def __init__(self, max_repeats: int = 5, cooldown_turns: int = 3):
+    def __init__(self, max_repeats: int = 5, cooldown_turns: int = 3, max_size: int = 2048):
         self._max = max_repeats
         self._cooldown = cooldown_turns
+        self._max_size = max_size
         # (fingerprint, last_user_hash) → (consecutive_upgrade_count, cooldown_remaining)
-        self._state: Dict[Tuple[str, str], Tuple[int, int]] = {}
+        self._state: OrderedDict[Tuple[str, str], Tuple[int, int]] = OrderedDict()
+
+    def _set(self, key: Tuple[str, str], value: Tuple[int, int]) -> None:
+        """写入 key，LRU move_to_end + 驱逐最旧条目。"""
+        if key in self._state:
+            self._state.move_to_end(key)
+        self._state[key] = value
+        while len(self._state) > self._max_size:
+            self._state.popitem(last=False)
 
     def should_throttle(
         self, messages: List[Dict[str, Any]], did_upgrade: bool
@@ -87,25 +99,25 @@ class DailyUpgradeThrottle:
         entry = self._state.get(key)
 
         if entry is None:
-            self._state[key] = (1 if did_upgrade else 0, 0)
+            self._set(key, (1 if did_upgrade else 0, 0))
             return False
 
         count, cooldown = entry
         if cooldown > 0:
             # 冷却中：强制 Flash，扣一轮
-            self._state[key] = (0, cooldown - 1)
+            self._set(key, (0, cooldown - 1))
             return True
 
         if did_upgrade:
             count += 1
             if count >= self._max:
                 # 冷却 3 轮
-                self._state[key] = (0, self._cooldown - 1)
+                self._set(key, (0, self._cooldown - 1))
                 return True
-            self._state[key] = (count, 0)
+            self._set(key, (count, 0))
         else:
             # 没升格 → 序列中断，归零
-            self._state[key] = (0, 0)
+            self._set(key, (0, 0))
 
         return False
 
