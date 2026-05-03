@@ -144,16 +144,17 @@ class DeepProxyRouter:
             self._maybe_upgrade(body)
             model = body.get("model", "")
 
-        # 1. 默认 thinking.type=enabled + reasoning_effort=max 注入（仅当未显式 disabled）。
+        # 1. 默认 reasoning_effort=max + thinking.type=enabled 注入
+        #    （仅当未显式 disabled 且未指定）。
         #    官方文档：reasoning_effort 是 thinking 对象的子字段，不是顶层参数。
-        #    同步注入 type=enabled 让步骤 9 的 ensure_reasoning_content_persistence
-        #    无需再做隐式补齐 —— 全管道里 thinking.type 永远显式存在。
+        #    同步显式注入 type=enabled，让步骤 8 的 ensure_reasoning_content_persistence
+        #    退化为纯"补齐"逻辑，消除跨步隐式依赖。
         if is_v4_model(model):
             explicitly_disabled = is_thinking_disabled(body.get("thinking"))
             if not explicitly_disabled:
-                t = ensure_thinking_dict(body)
-                t.setdefault("type", "enabled")
-                t.setdefault("reasoning_effort", "max")
+                td = ensure_thinking_dict(body)
+                td.setdefault("type", "enabled")
+                td.setdefault("reasoning_effort", "max")
 
         # 2. 采样参数：
         #    - 若传入 sampling_profile（生产路径，端口绑定）：强制覆盖客户端值

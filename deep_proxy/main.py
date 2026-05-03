@@ -36,9 +36,9 @@ async def lifespan(app: FastAPI):
     global config, router, _lifespan_done
 
     # 双端口共享同一个 app 实例，两个 uvicorn Server 各触发一次 lifespan。
-    # 仅首次执行完整 startup + shutdown 路径（含 BERT 模型加载与 router.close()）。
-    # 第二个实例命中此分支后只 yield，没有 cleanup —— 这是期望行为：
-    # shared 资源由首个实例独占管理，第二个实例不应重复释放。
+    # 首个到达的实例（_lifespan_done=False）独占完整的 startup + shutdown 流程
+    # （加载配置、初始化 BERT 路由器、创建 HTTP 客户端等重量资源仅执行一次）；
+    # 第二个实例直接 yield 返回，既不做初始化也不做清理，共享首个实例的全局状态。
     if _lifespan_done:
         yield
         return
@@ -146,7 +146,7 @@ def _ensure_router_ready():
 def _extract_bearer_token(auth_header: str) -> str | None:
     """从 Authorization 头提取 Bearer token。
 
-    遵循 RFC 7235：scheme 大小写不敏感，且容忍多余空格。
+    RFC 7235：scheme 名称大小写不敏感；顺带容忍多空格 / tab 分隔符。
     无效格式返回 None。
     """
     parts = auth_header.split(None, 1)
@@ -165,23 +165,23 @@ async def list_models(request: Request):
 
 @app.get("/health")
 async def health():
-    """健康检查端点（含运维诊断信息）。"""
-    payload: Dict[str, Any] = {
+    """健康检查端点。"""
+    result: dict = {
         "status": "ok",
         "deepseek_api_key_set": bool(config and config.deepseek.api_key),
         "optimization_enabled": bool(config and config.optimization.enabled),
     }
-    if config:
-        payload["flash_upgrade_enabled"] = config.flash_upgrade.enabled
-        payload["router_type"] = config.flash_upgrade.router_type
-        payload["writing_basket_kind"] = config.optimization.writing_basket_kind
-    if router:
-        payload["reasoning_cache_size"] = len(router._reasoning_cache._cache)
-        payload["upgrade_tracker_active"] = router._upgrade_tracker.active_count
-        payload["upgrade_throttle_size"] = len(router._upgrade_throttle._state)
-        if router._compressor is not None:
-            payload["compressor_cache_entries"] = len(router._compressor._mem)
-    return payload
+    if config and router:
+        result["flash_upgrade_enabled"] = config.flash_upgrade.enabled
+        result["router_type"] = config.flash_upgrade.router_type
+        result["writing_basket_kind"] = config.optimization.writing_basket_kind
+        result["reasoning_cache_size"] = len(router._reasoning_cache)
+        result["upgrade_tracker_active"] = router._upgrade_tracker.active_count
+        result["upgrade_throttle_size"] = len(router._upgrade_throttle._state)
+        result["compressor_cache_entries"] = (
+            len(router._compressor._mem) if router._compressor is not None else 0
+        )
+    return result
 
 
 def _profile_for_request(request: Request):

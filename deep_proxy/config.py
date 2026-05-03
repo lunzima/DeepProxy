@@ -403,9 +403,9 @@ class ProxyConfig(BaseModel):
             Path(os.getcwd()) / "config.yaml",
             Path(__file__).parent.parent / "config.yaml",
         ]
-        env_cfg = os.getenv("DEEPPROXY_CONFIG")
-        if env_cfg:
-            config_paths.append(Path(env_cfg))
+        _env_cfg = os.getenv("DEEPPROXY_CONFIG")
+        if _env_cfg:
+            config_paths.append(Path(_env_cfg))
         for cp in config_paths:
             if cp.is_file():
                 return cls.from_yaml(cp)

@@ -62,15 +62,11 @@ class RepeatUpgradeThrottle:
     不同对话窗口的限流状态互不干扰。即使两个窗口有完全相同的最后一条
     user 消息（不同对话中相同的追问），也各自独立计数。
 
-    内存：max_size LRU 上限，防止长时间运行下不同对话累积无界增长。
+    容量限制：有界 LRU（max_size=2048），与 UpgradeTracker / ReasoningCache 统一策略，
+    防止长时间运行时内存无限增长。
     """
 
-    def __init__(
-        self,
-        max_repeats: int = 5,
-        cooldown_turns: int = 3,
-        max_size: int = 2048,
-    ):
+    def __init__(self, max_repeats: int = 5, cooldown_turns: int = 3, max_size: int = 2048):
         self._max = max_repeats
         self._cooldown = cooldown_turns
         self._max_size = max_size
@@ -78,7 +74,7 @@ class RepeatUpgradeThrottle:
         self._state: OrderedDict[Tuple[str, str], Tuple[int, int]] = OrderedDict()
 
     def _set(self, key: Tuple[str, str], value: Tuple[int, int]) -> None:
-        """写入并 LRU 驱逐最旧条目（包含 move_to_end，保证近用提升）。"""
+        """写入 key，LRU move_to_end + 驱逐最旧条目。"""
         self._state[key] = value
         self._state.move_to_end(key)
         while len(self._state) > self._max_size:
