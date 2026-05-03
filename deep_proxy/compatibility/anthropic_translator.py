@@ -377,6 +377,7 @@ class _AnthropicStreamBuilder:
         self._text_idx: int = 0
         self._next_idx: int = 0
         self._finish_reason: Optional[str] = None
+        self._usage_input: int = 0
         self._usage_output: int = 0
         self._tool_calls: Dict[int, Dict[str, Any]] = {}
 
@@ -403,18 +404,23 @@ class _AnthropicStreamBuilder:
         """处理一个 chunk，返回 0..N 条 SSE 事件字符串。"""
         events: List[str] = []
 
-        # 错误终止包
-        if "error" in chunk and "choices" not in chunk:
+        # 错误终止包（要求 error 是 dict 且没有 choices，避免误吞含 choices 的混合包）
+        if isinstance(chunk.get("error"), dict) and not chunk.get("choices"):
             msg_start = self._ensure_message_start()
             if msg_start:
                 events.append(msg_start)
             events.append(_sse_event("error", {"type": "error", "error": chunk["error"]}))
             return events
 
-        # usage 尾包 / 同包 usage
+        # usage 尾包 / 同包 usage（input/output 各自取最大值，避免迟到 chunk 倒退）
         u = chunk.get("usage") or {}
         if u:
-            self._usage_output = int(u.get("completion_tokens") or self._usage_output)
+            self._usage_output = max(
+                self._usage_output, int(u.get("completion_tokens") or 0)
+            )
+            self._usage_input = max(
+                self._usage_input, int(u.get("prompt_tokens") or 0)
+            )
 
         choices = chunk.get("choices") or []
         if not choices:
@@ -508,6 +514,12 @@ class _AnthropicStreamBuilder:
             }))
 
         # 发出累加的 tool_use 块（按原始 index 排序）
+        # 设计取舍：DeepSeek V4 的 tool_calls 增量缺乏稳定的 partial JSON 边界，
+        # 这里在流末整块发出（content_block_start + 单个 input_json_delta + stop），
+        # 而不是 Anthropic 官方规范的"逐 token input_json_delta 增量"。
+        # 大多数 Anthropic SDK 客户端可正常消费此整体 block 形态；
+        # 仅依赖 streaming tool input 渐进解析的客户端会感受到延迟（整块到达），
+        # 不会感受到错误。
         if self._tool_calls:
             msg_start = self._ensure_message_start()
             if msg_start:
@@ -556,13 +568,18 @@ class _AnthropicStreamBuilder:
                 "index": 0,
             }))
 
+        usage_payload: Dict[str, int] = {"output_tokens": self._usage_output}
+        if self._usage_input:
+            # Anthropic 客户端用 input_tokens 计费 / 显示上下文占用；
+            # 从 OpenAI usage.prompt_tokens 转写补齐（message_start 阶段是占位 0）。
+            usage_payload["input_tokens"] = self._usage_input
         events.append(_sse_event("message_delta", {
             "type": "message_delta",
             "delta": {
                 "stop_reason": _map_stop_reason(self._finish_reason),
                 "stop_sequence": None,
             },
-            "usage": {"output_tokens": self._usage_output},
+            "usage": usage_payload,
         }))
         events.append(_sse_event("message_stop", {"type": "message_stop"}))
 
@@ -587,7 +604,7 @@ async def openai_stream_to_claude(
         for ev in events:
             yield ev
         # error 包后立即终止
-        if "error" in chunk and "choices" not in chunk:
+        if isinstance(chunk.get("error"), dict) and not chunk.get("choices"):
             return
     for ev in builder.on_finish():
         yield ev

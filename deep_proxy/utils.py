@@ -184,7 +184,7 @@ def append_to_system_message(
     """
     if not text:
         return
-    for msg in messages:
+    for i, msg in enumerate(messages):
         if msg.get("role") != "system":
             continue
         content = msg.get("content")
@@ -194,7 +194,7 @@ def append_to_system_message(
             sep = "\n\n" if content else ""
             msg["content"] = f"{content}{sep}{text}"
         else:
-            messages.insert(messages.index(msg), {"role": "system", "content": text})
+            messages.insert(i, {"role": "system", "content": text})
         return
     messages.insert(0, {"role": "system", "content": text})
 
@@ -212,7 +212,7 @@ def prepend_to_system_message(
     """
     if not text:
         return
-    for msg in messages:
+    for i, msg in enumerate(messages):
         if msg.get("role") != "system":
             continue
         content = msg.get("content")
@@ -220,7 +220,7 @@ def prepend_to_system_message(
             sep = "\n\n" if content else ""
             msg["content"] = f"{text}{sep}{content}"
         else:
-            messages.insert(messages.index(msg), {"role": "system", "content": text})
+            messages.insert(i, {"role": "system", "content": text})
         return
     messages.insert(0, {"role": "system", "content": text})
 

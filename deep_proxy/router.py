@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, AsyncGenerator
 
 import httpx
 
@@ -47,7 +47,7 @@ from .optimization.dynamic_baskets import (
     scenario_from_profile as _scenario_from_profile,
 )
 from .optimization.flash_upgrade import (
-    DailyUpgradeThrottle,
+    RepeatUpgradeThrottle,
     UpgradeTracker,
     compute_complexity_score,
     extra_body_requests_upgrade,
@@ -70,15 +70,15 @@ class DeepProxyRouter:
         self._model_routes_dicts = [r.model_dump() for r in config.model_routes]
         # 服务端缓存上一轮 reasoning_content；下一轮请求若客户端没回传则补齐
         self._reasoning_cache = ReasoningCache(max_size=1024)
-        self._http_client: Optional[httpx.AsyncClient] = None
+        self._http_client: httpx.AsyncClient | None = None
         # Flash→Pro 升格跟踪器 + 路由决策器 + 防重复刷屏
         self._upgrade_tracker = UpgradeTracker()
         self._upgrade_router = self._build_upgrade_router()
-        self._upgrade_throttle = DailyUpgradeThrottle()
+        self._upgrade_throttle = RepeatUpgradeThrottle()
         # LLM-based system prompt 压缩器（持久化磁盘缓存）
         # 复用 PreciseSamplingConfig 的采样预设：高确定性 + 微抖动，最适合
         # 同义改写类任务（确定性是主要诉求，微随机仅供并行重试）
-        self._compressor: Optional[SystemPromptCompressor] = None
+        self._compressor: SystemPromptCompressor | None = None
         if config.optimization.enabled and config.optimization.compress_skills:
             from pathlib import Path
             self._compressor = SystemPromptCompressor(
@@ -108,10 +108,10 @@ class DeepProxyRouter:
 
     async def prepare_request(
         self,
-        body: Dict[str, Any],
+        body: dict[str, Any],
         *,
         sampling_profile: Any = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """聊天补全请求预处理管道。
 
         Args:
@@ -144,12 +144,16 @@ class DeepProxyRouter:
             self._maybe_upgrade(body)
             model = body.get("model", "")
 
-        # 1. 默认 reasoning_effort=max 注入（仅当未显式 disabled 且未指定）。
+        # 1. 默认 thinking.type=enabled + reasoning_effort=max 注入（仅当未显式 disabled）。
         #    官方文档：reasoning_effort 是 thinking 对象的子字段，不是顶层参数。
+        #    同步注入 type=enabled 让步骤 9 的 ensure_reasoning_content_persistence
+        #    无需再做隐式补齐 —— 全管道里 thinking.type 永远显式存在。
         if is_v4_model(model):
             explicitly_disabled = is_thinking_disabled(body.get("thinking"))
             if not explicitly_disabled:
-                ensure_thinking_dict(body).setdefault("reasoning_effort", "max")
+                t = ensure_thinking_dict(body)
+                t.setdefault("type", "enabled")
+                t.setdefault("reasoning_effort", "max")
 
         # 2. 采样参数：
         #    - 若传入 sampling_profile（生产路径，端口绑定）：强制覆盖客户端值
@@ -184,7 +188,7 @@ class DeepProxyRouter:
         # 4. 清理空 stream_options
         body = sanitize_stream_options(body)
 
-        # 6. 廉价提示词优化 + 内置 skills（in-process，0 额外上游调用）
+        # 5. 廉价提示词优化 + 内置 skills（in-process，0 额外上游调用）
         if self.config.optimization.enabled:
             opt = self.config.optimization
             await apply_cheap_optimizations(
@@ -215,7 +219,7 @@ class DeepProxyRouter:
                 http_client=self._get_http_client(),
             )
 
-        # 7. 动态短段注入（场景化 PUA-substance 提示词）
+        # 6. 动态短段注入（场景化 PUA-substance 提示词）
         #    必须在 apply_cheap_optimizations（含 LLM 压缩）之后执行，避免随机
         #    句子进入压缩缓存键、每请求刷新缓存。
         if (
@@ -235,7 +239,7 @@ class DeepProxyRouter:
                         for para in paragraphs:
                             append_to_system_message(messages, para)
 
-        # 8. 无厘头 expert priming（最后一步）
+        # 7. 无厘头 expert priming（最后一步）
         #    Always 全场景生效；不进压缩缓存键；插入到 system 消息最前面，每次随机 2 条
         if (
             self.config.optimization.enabled
@@ -250,7 +254,7 @@ class DeepProxyRouter:
                     for p in reversed(primings):
                         prepend_to_system_message(messages, p)
 
-        # 9. V4 多轮 reasoning 自愈：在全部消息修改之后执行，确保
+        # 8. V4 多轮 reasoning 自愈：在全部消息修改之后执行，确保
         #    缓存键与 remember_response 存储时的对话前缀一致。
         if is_v4_model(model):
             messages = body.get("messages", [])
@@ -280,7 +284,7 @@ class DeepProxyRouter:
 
     def _maybe_upgrade(
         self,
-        body: Dict[str, Any],
+        body: dict[str, Any],
     ) -> None:
         """Flash→Pro 升格路由主逻辑（Layer 0–3，全部 upfront）。
 
@@ -350,7 +354,7 @@ class DeepProxyRouter:
             body["model"] = V4_PRO
             self._upgrade_tracker.set_remaining(messages, cfg.persist_turns)
 
-    def process_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+    def process_response(self, response: dict[str, Any]) -> dict[str, Any]:
         if self.config.deepseek.enable_reasoning:
             response = process_reasoning_response(response)
         return response
@@ -359,7 +363,7 @@ class DeepProxyRouter:
     # 端点方法（轻量封装，供 main.py 调用）
     # ------------------------------------------------------------------
 
-    async def chat_completions(self, body: Dict[str, Any]) -> Dict[str, Any]:
+    async def chat_completions(self, body: dict[str, Any]) -> dict[str, Any]:
         request_messages = list(body.get("messages") or [])
         # 是否需要剥离 CoT Reflection 标签（由 apply_cheap_optimizations 在 prepare_request 时打的标）
         strip_cot = bool(body.get("_deepproxy_strip_cot", False))
@@ -375,8 +379,8 @@ class DeepProxyRouter:
         return result
 
     async def iter_chat_chunks(
-        self, body: Dict[str, Any]
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+        self, body: dict[str, Any]
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """业务层流式 chunk 流（dict 形态）。
 
         - 每个 yield：OpenAI 风格的 chunk dict（带 reasoning 字段已自愈/累加）
@@ -395,7 +399,7 @@ class DeepProxyRouter:
             accumulator.flush_to_cache(self._reasoning_cache)
 
     async def chat_completions_stream(
-        self, body: Dict[str, Any]
+        self, body: dict[str, Any]
     ) -> AsyncGenerator[str, None]:
         """OpenAI 协议层流式输出：iter_chat_chunks → SSE 字符串。
 
@@ -403,12 +407,12 @@ class DeepProxyRouter:
         """
         async for item in self.iter_chat_chunks(body):
             yield f"data: {json.dumps(item)}\n\n"
-            if "error" in item and "choices" not in item:
+            if isinstance(item.get("error"), dict) and not item.get("choices"):
                 yield SSE_DONE
                 return
         yield SSE_DONE
 
-    async def list_models(self) -> Dict[str, Any]:
+    async def list_models(self) -> dict[str, Any]:
         """列出可用模型（OpenRouter 风格）。
 
         优先从 DeepSeek 上游 `GET /v1/models` 拉取真实清单；上游不可用时退化到
