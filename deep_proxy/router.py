@@ -122,7 +122,9 @@ class DeepProxyRouter:
         raw_model = body.get("model", "")
 
         # 0a. 模型别名隐含特定 thinking 模式（仅当客户端未显式提供 thinking 时应用）：
+        #     政策：除显式 disabled 与 deepseek-chat（"非思考模式"专属别名）外，默认 enabled。
         #     - deepseek-chat → disabled；deepseek-reasoner → enabled
+        #     - V4 原生 → 不强制（服务端默认 enabled）
         #     - claude-* → enabled（OpenAI 兼容端点收到 claude 名字时同样开 reasoning）
         if "thinking" not in body:
             implicit = default_thinking_type(raw_model)

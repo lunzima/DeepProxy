@@ -23,13 +23,12 @@ logger = logging.getLogger(__name__)
 
 
 def normalize_model_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
-    """OpenRouter 风格模型条目（简洁版）。
+    """OpenRouter 风格模型条目（带下游 Code Agent 兼容字段）。
 
     基础字段 `id` / `object` / `created` / `owned_by` 保留兼容，
-    增加 OpenRouter 风格的 `context_length` / `max_completion_tokens` / `pricing` / `top_provider` 字段。
-
-    不再输出 OpenAI 遗留字段（`root` / `parent` / `permission`），
-    也不再输出冗余的 `context_window` / `max_input_tokens`（`context_length` 已足够）。
+    增加 `context_length`（OpenRouter）/`max_completion_tokens`/`pricing`，
+    并同步输出 `max_model_len`（vLLM/SGLang/Qwen Code）与 `context_window`（部分 Agent 备用）
+    以覆盖整个 OpenAI 兼容生态对上下文长度的探测约定。
     """
     model_id = entry["id"]
     created = int(entry.get("created") or 1700000000)
@@ -37,7 +36,7 @@ def normalize_model_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     # 向上游取真实值；无则用默认常量
     ctx = _V4_CONTEXT_WINDOW
     mxo = _V4_MAX_OUTPUT
-    for k in ("context_length", "context_window"):
+    for k in ("context_length", "context_window", "max_model_len"):
         v = entry.get(k)
         if isinstance(v, int) and v > 0:
             ctx = v
@@ -54,12 +53,10 @@ def normalize_model_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         # OpenRouter 核心字段
         "context_length": ctx,
         "max_completion_tokens": mxo,
+        # 下游 Code Agent 兼容（vLLM/SGLang/Qwen Code/Continue/Cursor/LM Studio/OpenWebUI）
+        "max_model_len": ctx,
+        "context_window": ctx,
         "pricing": model_pricing(model_id),
-        "top_provider": {
-            "context_length": ctx,
-            "max_completion_tokens": mxo,
-            "is_moderated": False,
-        },
         "description": f"DeepSeek V4 — {ctx:,} context window, up to {mxo:,} output tokens",
     }
     return out

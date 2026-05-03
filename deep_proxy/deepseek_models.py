@@ -56,7 +56,7 @@ V4_MODELS_1M = {
 }
 
 # ── 老模型 → V4 默认别名映射 ──────────────────────────────
-# deepseek-chat     → deepseek-v4-flash + thinking=disabled
+# deepseek-chat     → deepseek-v4-flash + thinking=disabled（"非思考模式"显式别名）
 # deepseek-reasoner → deepseek-v4-flash + thinking=enabled
 DEFAULT_V4_ALIASES = {
     "deepseek-chat": V4_FLASH,
@@ -67,6 +67,8 @@ DEFAULT_V4_ALIASES = {
 }
 
 # ── 别名隐含的 thinking.type ──────────────────────────────
+# 政策：除非客户端显式 thinking={"type":"disabled"} 或选用 deepseek-chat 这类
+# "非思考模式"专属别名，否则默认 enabled。其它别名 / V4 原生 / 未知名一律 enabled。
 LEGACY_ALIAS_THINKING = {
     "deepseek-chat": "disabled",
     "deepseek-reasoner": "enabled",

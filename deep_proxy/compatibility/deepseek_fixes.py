@@ -31,10 +31,13 @@ def default_thinking_type(raw_model: str) -> Optional[str]:
 
     - 空 / V4 原生名 / DEFAULT_V4_ALIASES（含 [1m] 变体）/ 第三方 provider 前缀
       （含 ``/`` 非 deepseek/）：返回 None，由 router 的 V4 检测路径或客户端显式
-      thinking 处理
+      thinking 处理（服务端默认 enabled）
     - deepseek-chat / deepseek-reasoner：按 LEGACY_ALIAS_THINKING
+      （chat=disabled 是该别名的"非思考模式"语义；reasoner=enabled）
     - 其他未知名（claude-*、gpt-*、误拼写……）：默认 enabled，与
       ``normalize_model_name`` 的"未知名兜底到 v4-flash"语义对齐
+
+    政策：除显式 thinking={"type":"disabled"} 与 deepseek-chat 别名外，一律默认 enabled。
     """
     if not raw_model:
         return None
