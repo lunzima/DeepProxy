@@ -417,8 +417,10 @@ class _AnthropicStreamBuilder:
         # usage 尾包 / 同包 usage
         u = chunk.get("usage") or {}
         if u:
-            self._usage_output = int(u.get("completion_tokens") or self._usage_output)
-            # prompt_tokens 可能在任何 chunk 中出现（含尾包）；max() 避免迟到 chunk 倒退
+            # max() 避免迟到 chunk 倒退（completion_tokens / prompt_tokens 均适用）
+            ct = u.get("completion_tokens")
+            if ct:
+                self._usage_output = max(self._usage_output, int(ct))
             pt = u.get("prompt_tokens")
             if pt:
                 self._usage_input = max(self._usage_input, int(pt))

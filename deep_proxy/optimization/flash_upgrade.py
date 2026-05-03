@@ -75,9 +75,8 @@ class RepeatUpgradeThrottle:
 
     def _set(self, key: Tuple[str, str], value: Tuple[int, int]) -> None:
         """写入 key，LRU move_to_end + 驱逐最旧条目。"""
-        if key in self._state:
-            self._state.move_to_end(key)
         self._state[key] = value
+        self._state.move_to_end(key)
         while len(self._state) > self._max_size:
             self._state.popitem(last=False)
 
