@@ -11,7 +11,7 @@
 ```
 客户端 (OpenAI SDK / Anthropic SDK) → DeepProxy (:8000 / :8001)
   ├─ [兼容层] 参数过滤 / 老模型别名 / reasoning / 错误映射 / Anthropic↔OpenAI 翻译
-  ├─ [模型层] OpenRouter 风格 /v1/models（真实定价 / 上下文长度 / 仿冒别名）
+  ├─ [模型层] 三生态 /v1/models（OpenAI/OpenRouter/Anthropic 同条目共存：定价 / 上下文长度 / display_name / 仿冒别名）
   ├─ [升格层] Flash→Pro 选择路由器（BERT 二分类 + 启发式快速路径）
   ├─ [优化层] 内建 skills（A/B/C/D 四组，0 额外 LLM 调用）
   │            + LLM 压缩（首次调一次，结果磁盘缓存复用）
@@ -30,7 +30,7 @@
 | **提示词优化** | 内建 15+ 廉价 skills（通用风格 / 反幻觉 / 上下文 / 消息转换），全 in-process，0 额外 LLM 调用 |
 | **Flash→Pro 升格** | 四层路由器自动评估请求复杂度，高复杂度请求升格到 Pro（BERT 二分类 + 启发式快速路径） |
 | **Anthropic 兼容** | 将 Anthropic Messages API 请求转换为 OpenAI 格式路由到 DeepSeek，支持流式和非流式 |
-| **模型列表** | OpenRouter 风格 `/v1/models`，含真实 USD 定价、上下文长度、仿冒别名映射 |
+| **模型列表** | 三生态 `/v1/models`：单条目同时含 OpenAI / OpenRouter（定价/上下文）/ Anthropic（display_name + 社区扩展 max_input_tokens/max_tokens）字段，响应顶层带 Anthropic 分页（first_id/last_id/has_more）。故意不输出 `capabilities`（避免谎报代理未实现的 context-management beta） |
 | **克隆模型** | 将 pro/opus/codex 等仿冒模型别名映射到对应的 DeepSeek 实际模型 |
 
 ## 快速开始
@@ -167,7 +167,7 @@ precise_sampling:
 |------|------|------|
 | `/v1/chat/completions` | POST | 聊天补全 (OpenAI 完全兼容) |
 | `/v1/messages` | POST | Anthropic Messages API 兼容（请求被转换为 OpenAI 格式后路由到 DeepSeek） |
-| `/v1/models` | GET | 列出可用模型（OpenRouter 风格，含定价/上下文长度/仿冒别名） |
+| `/v1/models` | GET | 列出可用模型（三生态：OpenAI / OpenRouter / Anthropic 字段共存，含定价/上下文长度/display_name/仿冒别名 + Anthropic 分页字段） |
 | `/health` | GET | 健康检查 |
 
 > 注：FIM (`/v1/completions`) 已下线——DeepSeek 官方 FIM 端点不支持 reasoning，需 FIM 的客户端请直连 DeepSeek `/beta/completions`。
@@ -214,7 +214,7 @@ deep_proxy/
 │   ├── router.py                # 核心路由器（请求/响应生命周期）
 │   ├── config.py                # Pydantic 配置模型
 │   ├── litellm_client.py        # LiteLLM 调用封装（流式/非流式）
-│   ├── models_list.py           # OpenRouter 风格 /v1/models 构建器
+│   ├── models_list.py           # /v1/models 构建器（OpenAI/OpenRouter/Anthropic 三生态字段共存）
 │   ├── deepseek_models.py       # 真实模型列表 + 仿冒别名映射
 │   ├── deepseek_pricing.py      # USD / CNY 定价数据
 │   ├── clone_models.py          # 仿冒模型条目生成

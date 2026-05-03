@@ -22,7 +22,7 @@
 ```
 客户端 (OpenAI SDK / Anthropic SDK) ──→ DeepProxy (:8000 / :8001)
   ├─ [兼容层] 参数过滤 / 老模型别名 / reasoning / 错误映射 / Anthropic↔OpenAI 翻译
-  ├─ [模型层] OpenRouter 风格 /v1/models（真实定价 / 上下文长度 / 仿冒别名）
+  ├─ [模型层] 三生态 /v1/models（OpenAI/OpenRouter/Anthropic 同条目共存：定价 / 上下文长度 / display_name / 仿冒别名）
   ├─ [升格层] Flash→Pro 选择路由器（BERT 二分类 + 启发式快速路径）
   ├─ [优化层] In-process 提示词 skills（0 额外 LLM 调用）
   └─ [路由层] LiteLLM ──→ DeepSeek API (api.deepseek.com)
@@ -120,7 +120,7 @@ D:\deepproxy\
 │   ├── router.py              # 核心路由器（请求/响应生命周期）
 │   ├── config.py              # Pydantic 配置模型
 │   ├── litellm_client.py      # LiteLLM 调用封装（流式/非流式）
-│   ├── models_list.py         # OpenRouter 风格 /v1/models 构建器
+│   ├── models_list.py         # /v1/models 构建器（OpenAI/OpenRouter/Anthropic 三生态字段共存）
 │   ├── deepseek_models.py     # 真实模型列表 + 仿冒别名映射
 │   ├── deepseek_pricing.py    # USD / CNY 定价数据
 │   ├── clone_models.py        # 仿冒模型条目生成

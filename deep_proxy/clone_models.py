@@ -39,7 +39,7 @@ CLONE_MODEL_ALIASES = {
     "gemini-3.1-pro-preview": V4_PRO,
 }
 
-# 仿冒模型在 /v1/models 中的展示条目
+# 仿冒模型在 /v1/models 中的展示条目（normalize_model_entry 会补齐三生态字段）
 CLONE_MODELS = {
     name: {
         "id": name,

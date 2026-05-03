@@ -157,7 +157,7 @@ def _extract_bearer_token(auth_header: str) -> str | None:
 
 @app.get("/v1/models")
 async def list_models(request: Request):
-    """列出可用模型（OpenAI 兼容格式）。"""
+    """列出可用模型（三生态：OpenAI / OpenRouter / Anthropic 字段共存，响应同时带 Anthropic 分页 first_id/last_id/has_more）。"""
     await _check_api_key(request)
     _ensure_router_ready()
     return await router.list_models()
