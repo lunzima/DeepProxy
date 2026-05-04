@@ -260,7 +260,7 @@ class SystemPromptCompressor:
         """直连 LiteLLM 调一次压缩；不通过 router（避免递归注入 skills）。
 
         max_tokens 容量计算：
-          - DeepSeek 服务端**有时会忽略 `thinking={"type":"disabled"}`** 走 enabled 路径，
+          - DeepSeek 服务端有时会忽略 `thinking={"type":"disabled"}` 走 enabled 路径，
             把 token 配额耗在 reasoning_content 上、content 被截断为空。
           - 原文 token 估计上限 ≈ 字符数；服务端 reasoning 可能 1-2× 原文；
             实际压缩输出 ≈ 0.5× 原文。给 `4× 字符数 + 4096 安全余量`，足以容纳

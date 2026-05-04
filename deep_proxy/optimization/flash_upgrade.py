@@ -189,7 +189,7 @@ class UpgradeTracker:
         """升格触发后记录剩余 Pro 轮次。
 
         Args:
-            turns: 当前请求**之后**还能使用 Pro 的轮次数。
+            turns: 当前请求之后还能使用 Pro 的轮次数。
                    例如 turns=2 表示当前请求走 Pro + 后续 2 轮。
         """
         fp = conversation_fingerprint(messages)
