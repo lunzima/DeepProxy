@@ -10,8 +10,12 @@ from deep_proxy.config import (
 )
 from deep_proxy.optimization.silly_priming import (
     SILLY_PRIMING_POOL,
+    _AMD_ATTRIBUTION,
+    _AMD_SENTENCE,
+    _NEUTRAL_ATTRIBUTIONS,
     pick_one,
     pick_n,
+    wrap_for_injection,
 )
 from deep_proxy.utils import prepend_to_system_message as prepend_to_system
 from deep_proxy.router import DeepProxyRouter
@@ -21,7 +25,7 @@ class TestSillyPoolContent:
     """池内容质量举证——不做穷举遍历。"""
 
     def test_spotcheck_quality(self):
-        assert len(SILLY_PRIMING_POOL) == 8
+        assert len(SILLY_PRIMING_POOL) == 20
         for s in SILLY_PRIMING_POOL:
             assert s.endswith("。"), f"非陈述句末: {s}"
         # 代表性举例——否定字不应出现在专家预置池中
@@ -52,6 +56,60 @@ class TestPickN:
     def test_pick_one_still_works(self):
         item = pick_one()
         assert item in SILLY_PRIMING_POOL
+
+
+class TestWrapForInjection:
+    """注入包装：每条独立成段+独立署名，AMD 句固定署名，其余从中性库抽。"""
+
+    def test_empty_returns_empty_string(self):
+        assert wrap_for_injection([]) == ""
+
+    def test_amd_sentence_uses_amd_attribution(self):
+        out = wrap_for_injection([_AMD_SENTENCE])
+        assert _AMD_SENTENCE in out
+        assert _AMD_ATTRIBUTION in out
+
+    def test_non_amd_uses_neutral_attribution(self):
+        non_amd = next(s for s in SILLY_PRIMING_POOL if s != _AMD_SENTENCE)
+        out = wrap_for_injection([non_amd])
+        assert non_amd in out
+        # 必须命中中性库中的一个署名
+        assert any(attr in out for attr in _NEUTRAL_ATTRIBUTIONS)
+        # AMD 署名不能出现在非 AMD 条目上
+        assert _AMD_ATTRIBUTION not in out
+
+    def test_each_item_gets_attribution_line(self):
+        non_amd = [s for s in SILLY_PRIMING_POOL if s != _AMD_SENTENCE][:2]
+        out = wrap_for_injection(non_amd)
+        # 段间空行隔开 → 包含 \n\n
+        assert "\n\n" in out
+        # 两条均出现
+        assert all(s in out for s in non_amd)
+        # 至少出现 2 个 "—— "
+        assert out.count("—— ") >= 2
+
+    def test_mixed_amd_and_neutral(self):
+        non_amd = next(s for s in SILLY_PRIMING_POOL if s != _AMD_SENTENCE)
+        out = wrap_for_injection([_AMD_SENTENCE, non_amd])
+        assert _AMD_ATTRIBUTION in out
+        assert any(attr in out for attr in _NEUTRAL_ATTRIBUTIONS)
+        assert _AMD_SENTENCE in out
+        assert non_amd in out
+
+    def test_no_silly_label_leak(self):
+        """整块文本不得出现暴露 silly 性质的关键词。"""
+        items = pick_n(2)
+        out = wrap_for_injection(items)
+        forbidden = ("弱智", "金句", "段子", "搞笑", "测试", "实验", "扰动")
+        for word in forbidden:
+            assert word not in out, f"包装文本不得含 '{word}'"
+
+    def test_rng_makes_attribution_deterministic(self):
+        import random
+        non_amd = [s for s in SILLY_PRIMING_POOL if s != _AMD_SENTENCE][:2]
+        rng_a = random.Random(42)
+        rng_b = random.Random(42)
+        assert wrap_for_injection(non_amd, rng=rng_a) == wrap_for_injection(non_amd, rng=rng_b)
 
 
 class TestPrependToSystem:

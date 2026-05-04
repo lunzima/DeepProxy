@@ -8,9 +8,9 @@
 |---|------|--------|------|----------|
 | 1 | `deep_proxy/optimization/skills_general.py` | 14 条长多行字符串（~100 句） | A组通用风格 + B组反幻觉 + C组上下文技能 + CoT模板 + 日期注入 | 拼接后注入 system |
 | 2 | `deep_proxy/optimization/skills_transform.py` | 1 条短语 + 1 导入 | D组消息转换：RE2 追加 user 消息尾部 | 直接追加到 user 消息 |
-| 3 | `deep_proxy/optimization/silly_priming.py` | 8 条列表字符串 | [实验性] 无厘头断言扰动 | 注入 system 最前 |
+| 3 | `deep_proxy/optimization/silly_priming.py` | 20 条列表字符串 | [实验性] 无厘头断言扰动 | 注入 system 最前 |
 | 4 | `deep_proxy/optimization/compressor.py` | 1 大段元提示（~25 句） | LLM 压缩器指令（压缩 system prompt 用的提示） | 发给压缩 LLM，不入最终请求 |
-| 5 | `deep_proxy/optimization/dynamic_baskets.py` | 3 套 × 3 篮 × 8 句 = 72 句 | 场景化短段注入 | 追加到 system 末尾 |
+| 5 | `deep_proxy/optimization/dynamic_baskets.py` | 3 套 × 3 篮 × 16 句 = 144 句 | 场景化短段注入 | 追加到 system 末尾 |
 | 6 | `deep_proxy/compatibility/reasoning_handler.py` | 1 条多句占位（~3 句） | dummy reasoning_content 回退 | 注入 assistant 消息 |
 
 ---
@@ -74,7 +74,7 @@
 
 ### 3. silly_priming.py
 
-**格式**：8 条短列表字符串。**注意**：这些句子故意荒谬/不合逻辑，用于扰动 MoE 路由器。**通用性和语体一致性维度不适用**。
+**格式**：20 条短列表字符串。**注意**：这些句子故意荒谬/不合逻辑，用于扰动 MoE 路由器。**通用性和语体一致性维度不适用**。
 
 > **反向锚定**：修改 `silly_priming.py` 池内容或调整注入条数前，请同步检查该文件 docstring 顶部的"审查豁免（重要）"段——该段定义了曝光率阈值与扩池/提注入率的安全方向区分。维护需保持本节与 docstring 双向一致。
 
@@ -98,9 +98,9 @@
 
 ### 5. dynamic_baskets.py
 
-**格式**：3 套 × 3 篮 × 8 句 = 72 句，嵌套字典。按通用审查 4 维度逐句审查即可。
+**格式**：3 套 × 3 篮 × 16 句 = 144 句，嵌套字典。按通用审查 4 维度逐句审查即可。
 
-**已有基线**：该文件已通过一次完整审查，已修正的问题见 git log。
+**已有基线**：该文件已通过一次完整审查，已修正的问题见 git log。creative 套额外受项目根 `通用创作要求.md` 12 条红线约束（详见对应规约段）。
 
 ### 6. reasoning_handler.py
 

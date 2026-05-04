@@ -56,6 +56,7 @@ from .optimization.flash_upgrade import (
 from .optimization.upgrade_router import create_router
 from .optimization.silly_priming import (
     pick_n as _pick_silly_n,
+    wrap_for_injection as _wrap_silly_for_injection,
 )
 
 logger = logging.getLogger(__name__)
@@ -251,9 +252,10 @@ class DeepProxyRouter:
             if primings:
                 messages = body.get("messages")
                 if isinstance(messages, list) and messages:
-                    # 倒序 prepend 以保证首条在最前面
-                    for p in reversed(primings):
-                        prepend_to_system_message(messages, p)
+                    # 包装为带署名的"摘录式"段落组后整体 prepend
+                    block = _wrap_silly_for_injection(primings)
+                    if block:
+                        prepend_to_system_message(messages, block)
 
         # 8. V4 多轮 reasoning 自愈：在全部消息修改之后执行，确保
         #    缓存键与 remember_response 存储时的对话前缀一致。
