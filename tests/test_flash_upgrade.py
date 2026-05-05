@@ -161,6 +161,54 @@ class TestUpgradeTracker:
         assert tracker.is_upgraded(conv_a) is True
         assert tracker.is_upgraded(conv_b) is False
 
+    def test_compaction_does_not_freeze_counter(self):
+        """会话被客户端压缩（messages 数量变短）后仍按 last user 推进轮次。
+
+        回归保护：早期实现以 len(messages) 作为新轮次判据，当客户端在长对话中
+        做 history compaction，下一轮 len_now <= last_len，counter 永远不递减，
+        模型被锁死在 Pro。
+        """
+        tracker = UpgradeTracker()
+        # 第 0 轮：长对话触发升格
+        long_msgs = [{"role": "user", "content": "首条问题"}]
+        for i in range(10):
+            long_msgs.append({"role": "assistant", "content": f"a{i}"})
+            long_msgs.append({"role": "user", "content": f"u{i}"})
+        tracker.set_remaining(long_msgs, 2)
+
+        # 第 1 轮：客户端把对话压缩（len 大幅缩短），但有新 user 消息
+        compacted = [
+            {"role": "user", "content": "首条问题"},     # 同 fingerprint
+            {"role": "assistant", "content": "[summary]"},
+            {"role": "user", "content": "新一轮的提问"},  # 新的最后 user
+        ]
+        assert tracker.is_upgraded(compacted) is True   # 消耗 1，剩 1
+        assert tracker.remaining(compacted) == 1
+
+        # 第 2 轮：再压缩 + 新 user
+        compacted2 = [
+            {"role": "user", "content": "首条问题"},
+            {"role": "assistant", "content": "[summary v2]"},
+            {"role": "user", "content": "再下一轮"},
+        ]
+        assert tracker.is_upgraded(compacted2) is False  # 耗尽
+        assert tracker.remaining(compacted2) == 0
+
+    def test_repeated_identical_request_does_not_consume(self):
+        """同一 last user 消息重复请求（agent retry / 同步重试）不消耗轮次。"""
+        tracker = UpgradeTracker()
+        msgs = [
+            {"role": "user", "content": "首条问题"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "追问"},
+        ]
+        tracker.set_remaining(msgs, 2)
+
+        # 同一 messages 数组重复发 5 次 → 不消耗
+        for _ in range(5):
+            assert tracker.is_upgraded(msgs) is True
+        assert tracker.remaining(msgs) == 2
+
 
 # ======================================================================
 # compute_complexity_score
@@ -470,3 +518,124 @@ class TestMaybeUpgradeIntegration:
         """未知 router_type 静默降级到 rule。"""
         r = create_router("nonexistent")
         assert isinstance(r, RuleUpgradeRouter)
+
+    def test_pending_upgrade_only_commits_on_success(self):
+        """#6 回归：set_remaining 延迟到上游成功后提交，失败请求不污染 tracker。
+
+        此前 _maybe_upgrade 在 prepare 阶段直接 set_remaining，上游 500/超时
+        也照样写入。本回归断言：仅 _commit_pending_upgrade 被调用后才落账。
+        """
+        cfg = _make_upgrade_cfg()
+        router = DeepProxyRouter(cfg)
+        body = {
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "system", "content": "<deepproxy_upgrade>force</deepproxy_upgrade>"},
+                {"role": "user", "content": "复杂请求"},
+            ],
+        }
+        # 决策阶段：升格生效，但 tracker 仍空
+        router._maybe_upgrade(body)
+        assert body["model"] == "deepseek-v4-pro"
+        assert "_deepproxy_pending_upgrade" in body
+        assert router._upgrade_tracker.active_count == 0
+
+        # 模拟失败：永不调用 _commit_pending_upgrade，下一轮新对话不应被锁 Pro
+        # （此处不能直接复用同一 messages，因为 sentinel 仍会触发 Step 1）
+        new_body = {
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "user", "content": "复杂请求"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "再来一次"},
+            ],
+        }
+        router._maybe_upgrade(new_body)
+        # 没人 commit 过，cache 仍空，应走启发式/BERT 重新评估而非 cache hit
+        # 即使最终也升格，也不会打 "持久升格命中" 日志路径
+
+        # 现在显式 commit 之前那次升格
+        router._commit_pending_upgrade(body)
+        assert router._upgrade_tracker.active_count == 1
+
+    def test_throttle_clears_tracker_to_avoid_cache_bypass(self):
+        """#3 回归：throttle 触发时同步清掉 UpgradeTracker entry，避免下一轮
+        Step 2 cache hit 越过 throttle cooldown 直走 Pro。
+        """
+        cfg = _make_upgrade_cfg()
+        router = DeepProxyRouter(cfg)
+        # 手动注入一个"已升格"的对话状态
+        msgs = [{"role": "user", "content": "复杂代码任务"}]
+        router._upgrade_tracker.set_remaining(msgs, 5)
+        assert router._upgrade_tracker.active_count == 1
+
+        # 模拟 throttle 触发并调用 clear
+        router._upgrade_tracker.clear(msgs)
+        assert router._upgrade_tracker.active_count == 0
+        assert router._upgrade_tracker.is_upgraded(msgs) is False
+
+    def test_persist_cache_hit_after_commit(self):
+        """补 test_upgrade_persists_across_turns 的覆盖缺口：
+
+        原测试两轮都带 <deepproxy_upgrade>force</deepproxy_upgrade>，每轮都走
+        Step 1 sentinel 路径，从未真正命中 Step 2 持久化 cache。本回归显式：
+        触发升格 → commit → 下一轮命中 Step 2 cache。
+        """
+        cfg = _make_upgrade_cfg()
+        router = DeepProxyRouter(cfg)
+        # 第一轮：复杂内容触发升格（启发式 / Router）
+        body1 = {
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "user", "content": "请帮我设计一个分布式系统架构，"
+                                            "需要支持高并发、容错和一致性。"
+                                            "请给出详细的架构图和关键组件说明。"},
+            ],
+        }
+        router._maybe_upgrade(body1)
+        assert body1["model"] == "deepseek-v4-pro"
+        assert "_deepproxy_pending_upgrade" in body1
+        assert router._upgrade_tracker.active_count == 0  # 尚未 commit
+
+        # 模拟上游成功 → commit
+        router._commit_pending_upgrade(body1)
+        assert router._upgrade_tracker.active_count == 1
+
+        # 第二轮：消息增长，新的最后 user，无 sentinel
+        body2 = {
+            "model": "deepseek-v4-flash",
+            "messages": [
+                body1["messages"][0],
+                {"role": "assistant", "content": "好的，我来设计..."},
+                {"role": "user", "content": "继续"},  # 简单追问，本身分数低
+            ],
+        }
+        router._maybe_upgrade(body2)
+        # 必须命中 Step 2 cache 走 Pro，而非走 Step 3-4（"继续"的复杂度分数远低于阈值）
+        assert body2["model"] == "deepseek-v4-pro"
+
+    def test_throttle_cooldown_blocks_persist_cache_hit(self):
+        """#3 回归（端到端）：throttle 冷却期内即使 tracker 有 entry，也强制 Flash。
+
+        模拟 cooldown 状态 + 旧 entry 残留（防御性测试），验证 in_cooldown
+        预检在 Step 2 之前生效。
+        """
+        cfg = _make_upgrade_cfg()
+        router = DeepProxyRouter(cfg)
+        msgs = [{"role": "user", "content": "复杂任务"}]
+
+        # 人为注入 throttle 冷却状态 + tracker entry
+        from deep_proxy.optimization.flash_upgrade import (
+            conversation_fingerprint as _cfp,
+            _last_user_hash as _lh,
+        )
+        fp = _cfp(msgs)
+        h = _lh(msgs)
+        router._upgrade_throttle._state[(fp, h)] = (0, 2)  # cooldown=2
+        router._upgrade_tracker.set_remaining(msgs, 5)  # 残留 entry
+
+        body = {"model": "deepseek-v4-flash", "messages": msgs}
+        router._maybe_upgrade(body)
+        # cooldown 期：强制 Flash + 清掉 tracker，绝不能命中 cache 走 Pro
+        assert body["model"] == "deepseek-v4-flash"
+        assert router._upgrade_tracker.active_count == 0

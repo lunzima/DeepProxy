@@ -308,6 +308,34 @@ class DeepProxyRouter:
             return create_router("bert", checkpoint_path=cfg.bert_checkpoint)
         return create_router("rule")
 
+    def _stash_pending_upgrade(
+        self, body: dict[str, Any], messages: list[dict[str, Any]], turns: int
+    ) -> None:
+        """快照 fingerprint + last_user_hash，等上游成功后再 commit。
+
+        必要性：set_remaining 直接写入会让失败的上游请求也"白扣"一个
+        Pro 轮次额度。延迟到 chat_completions / 流式自然结束后提交，
+        失败请求不污染 tracker。
+
+        快照在此处取，因为 messages 会被 skills 阶段（RE2/readurls）改写，
+        提交时直接读取已不可靠。
+        """
+        fp, last_user_h = UpgradeTracker.snapshot_keys(messages)
+        body["_deepproxy_pending_upgrade"] = {
+            "fingerprint": fp,
+            "last_user_hash": last_user_h,
+            "turns": turns,
+        }
+
+    def _commit_pending_upgrade(self, body: dict[str, Any]) -> None:
+        """上游成功后提交挂起的升格记账（无挂起则空操作）。"""
+        pending = body.get("_deepproxy_pending_upgrade")
+        if not isinstance(pending, dict):
+            return
+        self._upgrade_tracker.set_remaining_by_key(
+            pending["fingerprint"], pending["last_user_hash"], pending["turns"],
+        )
+
     def _maybe_upgrade(
         self,
         body: dict[str, Any],
@@ -319,6 +347,9 @@ class DeepProxyRouter:
           2. 对话已升格（Layer 3 持久化）
           3. 启发式快速路径（Layer 1）
           4. Router 决策（Layer 0）
+
+        持久化记账（set_remaining）通过 _stash_pending_upgrade 延迟到上游
+        成功后由调用方 commit，避免失败请求白扣 Pro 槽位。
         """
         cfg = self.config.flash_upgrade
         messages = body.get("messages", [])
@@ -327,10 +358,18 @@ class DeepProxyRouter:
         if has_upgrade_sentinel(messages) or extra_body_requests_upgrade(body):
             logger.info("Sentinel 强制升格 → %s", V4_PRO)
             body["model"] = V4_PRO
-            self._upgrade_tracker.set_remaining(messages, cfg.persist_turns)
+            self._stash_pending_upgrade(body, messages, cfg.persist_turns)
             return
 
         # ── Step 2: 对话已处于升格状态（Layer 3 持久化） ──
+        # 预检 throttle 冷却：throttle 触发后的 cooldown 期内必须强制 Flash，
+        # 不能让 persist cache 越过 throttle。
+        if self._upgrade_throttle.in_cooldown(messages):
+            self._upgrade_throttle.should_throttle(messages, False)  # 推进冷却计数
+            self._upgrade_tracker.clear(messages)
+            logger.info("升格限流冷却中 → 强制 %s", V4_FLASH)
+            return
+
         if self._upgrade_tracker.is_upgraded(messages):
             remaining = self._upgrade_tracker.remaining(messages)
             logger.info("持久升格命中 → %s（剩余 %d 轮）", V4_PRO, remaining)
@@ -369,6 +408,9 @@ class DeepProxyRouter:
         if did_upgrade:
             if self._upgrade_throttle.should_throttle(messages, True):
                 did_upgrade = False
+                # 同步清掉持久升格 entry，否则下一轮 Step 2 会越过 throttle
+                # 直接走 Pro，使 cooldown 失效。
+                self._upgrade_tracker.clear(messages)
                 logger.info(
                     "升格限流: 连续 %d 次触发 → 强制 Flash（冷却 %d 轮）",
                     self._upgrade_throttle._max, self._upgrade_throttle._cooldown,
@@ -378,7 +420,7 @@ class DeepProxyRouter:
 
         if did_upgrade:
             body["model"] = V4_PRO
-            self._upgrade_tracker.set_remaining(messages, cfg.persist_turns)
+            self._stash_pending_upgrade(body, messages, cfg.persist_turns)
 
     def process_response(self, response: dict[str, Any]) -> dict[str, Any]:
         if self.config.deepseek.enable_reasoning:
@@ -402,6 +444,8 @@ class DeepProxyRouter:
                     msg["content"] = extract_cot_output(msg["content"])
         # 按对话前缀写缓存，供下一轮补齐
         self._reasoning_cache.remember_response(request_messages, result)
+        # 上游成功，提交挂起的升格记账（失败路径会 raise，下方不会执行）
+        self._commit_pending_upgrade(body)
         return result
 
     async def iter_chat_chunks(
@@ -418,11 +462,19 @@ class DeepProxyRouter:
         """
         request_messages = list(body.get("messages") or [])
         accumulator = StreamingReasoningAccumulator(request_messages=request_messages)
+        completed_cleanly = False
+        saw_error_frame = False
         try:
             async for chunk_dict in iter_litellm_chunks(self.config, body, _accumulator=accumulator):
+                if isinstance(chunk_dict.get("error"), dict) and not chunk_dict.get("choices"):
+                    saw_error_frame = True
                 yield chunk_dict
+            completed_cleanly = True
         finally:
             accumulator.flush_to_cache(self._reasoning_cache)
+            # 流自然结束（无 error frame、无异常、未被取消）才提交升格记账
+            if completed_cleanly and not saw_error_frame:
+                self._commit_pending_upgrade(body)
 
     async def chat_completions_stream(
         self, body: dict[str, Any]

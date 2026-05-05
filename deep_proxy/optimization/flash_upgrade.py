@@ -80,6 +80,20 @@ class RepeatUpgradeThrottle:
         while len(self._state) > self._max_size:
             self._state.popitem(last=False)
 
+    def in_cooldown(self, messages: List[Dict[str, Any]]) -> bool:
+        """只读查询：当前 (fingerprint, last_user) 是否处于冷却期。
+
+        与 should_throttle 不同，不修改状态、不计数。供 router 在 Step 2
+        cache hit 之前预检：若仍在 cooldown，应跳过 cache 直接走 Flash。
+        """
+        fp = conversation_fingerprint(messages)
+        h = _last_user_hash(messages)
+        entry = self._state.get((fp, h))
+        if entry is None:
+            return False
+        _, cooldown = entry
+        return cooldown > 0
+
     def should_throttle(
         self, messages: List[Dict[str, Any]], did_upgrade: bool
     ) -> bool:
@@ -142,9 +156,14 @@ def conversation_fingerprint(messages: List[Dict[str, Any]]) -> str:
 class UpgradeTracker:
     """按对话指纹跟踪 Flash→Pro 持久升格状态。
 
-    每轮新请求（消息数组长度增长）消耗 1 轮剩余额度。
-    重试/同轮次请求不消耗。
+    新轮次 = 最后一条 user 消息变了（hash 变了）。同一轮重试（最后 user 不变）
+    不消耗额度；新轮次（最后 user 改变）消耗 1 轮。
     并发安全：不同对话的不同指纹天然隔离。
+
+    为什么用 last_user_hash 而非 len(messages)：
+      - len 在 Claude Code 等客户端做对话压缩 / 历史合并时会缩短，导致
+        `len_now <= last_len`，counter 永远不递减，对话锁死在 Pro。
+      - last user 消息 hash 只反映"是否进入下一轮"，对结构变化稳健。
 
     Examples:
         >>> tracker = UpgradeTracker()
@@ -159,30 +178,42 @@ class UpgradeTracker:
     """
 
     def __init__(self, max_size: int = 512):
-        self._sessions: OrderedDict[str, Tuple[int, int]] = OrderedDict()
+        # value = (remaining_turns, last_user_hash)
+        self._sessions: OrderedDict[str, Tuple[int, str]] = OrderedDict()
         self._max = max_size
 
     # -- 公开 API --
 
+    def clear(self, messages: List[Dict[str, Any]]) -> None:
+        """主动清除当前对话的升格状态（throttle 触发时同步调用）。
+
+        必要性：throttle 在 router._maybe_upgrade Step 5 触发，但 Step 2
+        cache hit 早于 Step 5，下一轮 is_upgraded() 会越过 throttle 直走 Pro。
+        清掉 entry 让 throttle 的 cooldown 真正生效。
+        """
+        fp = conversation_fingerprint(messages)
+        self._sessions.pop(fp, None)
+
     def is_upgraded(self, messages: List[Dict[str, Any]]) -> bool:
         """当前对话是否处于升格状态。
 
-        副作用：如果这不是重试（消息数组变长），消耗 1 轮剩余额度。
+        副作用：如果这是新轮次（最后 user 消息发生变化），消耗 1 轮剩余额度。
         """
         fp = conversation_fingerprint(messages)
         entry = self._sessions.get(fp)
         if entry is None:
             return False
 
-        remaining, last_count = entry
-        if len(messages) > last_count:
+        remaining, last_hash = entry
+        current_hash = _last_user_hash(messages)
+        is_new_turn = current_hash != last_hash
+        if is_new_turn:
             remaining -= 1
         if remaining <= 0:
             del self._sessions[fp]
             return False
-        # 只有当轮次变化时才更新 last_count
-        if len(messages) > last_count:
-            self._sessions[fp] = (remaining, len(messages))
+        if is_new_turn:
+            self._sessions[fp] = (remaining, current_hash)
         return True
 
     def set_remaining(self, messages: List[Dict[str, Any]], turns: int) -> None:
@@ -192,10 +223,29 @@ class UpgradeTracker:
             turns: 当前请求之后还能使用 Pro 的轮次数。
                    例如 turns=2 表示当前请求走 Pro + 后续 2 轮。
         """
-        fp = conversation_fingerprint(messages)
-        self._sessions[fp] = (turns, len(messages))
+        self.set_remaining_by_key(
+            conversation_fingerprint(messages),
+            _last_user_hash(messages),
+            turns,
+        )
+
+    def set_remaining_by_key(
+        self, fingerprint: str, last_user_hash: str, turns: int
+    ) -> None:
+        """低层入口：用预计算的 fingerprint + last_user_hash 写入。
+
+        用于"延迟提交"场景：决策时（_maybe_upgrade）快照 fp + hash，
+        待上游成功后用这两个键提交，避免 messages 在 skills 阶段被改写
+        后键失配。
+        """
+        self._sessions[fingerprint] = (turns, last_user_hash)
         while len(self._sessions) > self._max:
             self._sessions.popitem(last=False)
+
+    @staticmethod
+    def snapshot_keys(messages: List[Dict[str, Any]]) -> Tuple[str, str]:
+        """计算 (fingerprint, last_user_hash) 二元组，供延迟提交场景使用。"""
+        return conversation_fingerprint(messages), _last_user_hash(messages)
 
     def remaining(self, messages: List[Dict[str, Any]]) -> int:
         """查询剩余 Pro 轮次（只读，不消耗）。"""
@@ -203,8 +253,7 @@ class UpgradeTracker:
         entry = self._sessions.get(fp)
         if entry is None:
             return 0
-        remaining, last_count = entry
-        return remaining if len(messages) > last_count else remaining
+        return entry[0]
 
     # -- 管理 --
 
