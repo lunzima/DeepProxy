@@ -88,6 +88,97 @@ class TestScenarioFromProfile:
         assert scenario_from_profile(None) is None
 
 
+class TestCreativeBasketsContent:
+    """验证改写后的创作套内容：每条 25-50 字，书面语，无文艺腔/教材腔。"""
+
+    def test_all_methodology_reasonable_length(self):
+        for s in CREATIVE_BASKETS["methodology"]:
+            n = len(s)
+            assert 20 <= n <= 50, f"长度异常 ({n}字): {s!r}"
+
+    def test_all_best_practices_reasonable_length(self):
+        for s in CREATIVE_BASKETS["best_practices"]:
+            n = len(s)
+            assert 20 <= n <= 50, f"长度异常 ({n}字): {s!r}"
+
+    def test_all_moderate_encouragement_reasonable_length(self):
+        for s in CREATIVE_BASKETS["moderate_encouragement"]:
+            n = len(s)
+            assert 20 <= n <= 50, f"长度异常 ({n}字): {s!r}"
+
+    def test_no_short_permission_format(self):
+        """不应有 ≤12 字的短句存在。"""
+        for basket_name in BASKET_ORDER:
+            for s in CREATIVE_BASKETS[basket_name]:
+                n = len(s)
+                assert n > 12, f"仍有短句格式残留 ({n}字): {s!r}"
+
+    def test_no_slogan_or_colloquial_endings(self):
+        """句尾不应出现口语化后缀。"""
+        all_text = " ".join(
+            s for key in BASKET_ORDER for s in CREATIVE_BASKETS[key]
+        )
+        for suffix in ["就够了", "就行", "就好", "出来了"]:
+            assert suffix not in all_text, f"口语化后缀: {suffix!r}"
+
+    def test_assemble_creative_paragraphs_format(self):
+        rng = random.Random(7)
+        paras = assemble_paragraphs("writing", writing_kind="creative", rng=rng)
+        assert len(paras) == 3
+        # 每段应为三条短句拼接
+        for para in paras:
+            # 每条都以中文句号收尾，所以拼接后是连续句子
+            assert para.endswith("。")
+
+
+class TestCodingBasketsContent:
+    """验证 CODING 套条目长度。"""
+
+    def test_all_coding_methodology_length(self):
+        for s in CODING_BASKETS["methodology"]:
+            n = len(s)
+            assert 18 <= n <= 45, f"长度异常 ({n}字): {s!r}"
+
+    def test_all_coding_best_practices_length(self):
+        for s in CODING_BASKETS["best_practices"]:
+            n = len(s)
+            assert 18 <= n <= 45, f"长度异常 ({n}字): {s!r}"
+
+    def test_all_coding_encouragement_length(self):
+        for s in CODING_BASKETS["moderate_encouragement"]:
+            n = len(s)
+            assert 18 <= n <= 45, f"长度异常 ({n}字): {s!r}"
+
+    def test_coding_basket_sizes(self):
+        assert len(CODING_BASKETS["methodology"]) == 16
+        assert len(CODING_BASKETS["best_practices"]) == 16
+        assert len(CODING_BASKETS["moderate_encouragement"]) == 16
+
+
+class TestGeneralBasketsContent:
+    """验证 GENERAL 套条目长度。"""
+
+    def test_all_general_methodology_length(self):
+        for s in GENERAL_BASKETS["methodology"]:
+            n = len(s)
+            assert 18 <= n <= 45, f"长度异常 ({n}字): {s!r}"
+
+    def test_all_general_best_practices_length(self):
+        for s in GENERAL_BASKETS["best_practices"]:
+            n = len(s)
+            assert 18 <= n <= 45, f"长度异常 ({n}字): {s!r}"
+
+    def test_all_general_encouragement_length(self):
+        for s in GENERAL_BASKETS["moderate_encouragement"]:
+            n = len(s)
+            assert 18 <= n <= 45, f"长度异常 ({n}字): {s!r}"
+
+    def test_general_basket_sizes(self):
+        assert len(GENERAL_BASKETS["methodology"]) == 16
+        assert len(GENERAL_BASKETS["best_practices"]) == 16
+        assert len(GENERAL_BASKETS["moderate_encouragement"]) == 16
+
+
 class TestAppendToSystem:
     def test_appends_to_existing_system(self):
         msgs = [

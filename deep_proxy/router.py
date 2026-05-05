@@ -36,7 +36,7 @@ from .compatibility.reasoning_handler import (
     ensure_reasoning_content_persistence,
     process_reasoning_response,
 )
-from .config import ProxyConfig
+from .config import ProxyConfig, CreativeSamplingConfig
 from .utils import SSE_DONE, append_to_system_message, prepend_to_system_message
 from .litellm_client import call_litellm, iter_litellm_chunks, _to_litellm_api_base
 from .models_list import build_models_list, fetch_upstream_models
@@ -57,6 +57,9 @@ from .optimization.upgrade_router import create_router
 from .optimization.silly_priming import (
     pick_n as _pick_silly_n,
     wrap_for_injection as _wrap_silly_for_injection,
+)
+from .optimization.think_steering import (
+    inject_inner_os_marker,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,11 +193,15 @@ class DeepProxyRouter:
         # 4. 清理空 stream_options
         body = sanitize_stream_options(body)
 
+        # 按 sampling_profile 推导优化模式（在 optimization 块外定义，避免步骤 7.5 的作用域脆弱性）
+        _opt_mode = "creative" if isinstance(sampling_profile, CreativeSamplingConfig) else "coding"
+
         # 5. 廉价提示词优化 + 内置 skills（in-process，0 额外上游调用）
         if self.config.optimization.enabled:
             opt = self.config.optimization
             await apply_cheap_optimizations(
                 body,
+                mode=_opt_mode,
                 # A. 通用风格
                 avoid_negative_style=opt.avoid_negative_style,
                 natural_temperament=opt.natural_temperament,
@@ -241,8 +248,8 @@ class DeepProxyRouter:
                         for para in paragraphs:
                             append_to_system_message(messages, para)
 
-        # 7. 无厘头 expert priming（最后一步）
-        #    Always 全场景生效；不进压缩缓存键；插入到 system 消息最前面，每次随机 2 条
+        # 7. 无厘头 expert priming（最后一步，system 最前插入）
+        #    Always 全场景生效；不进压缩缓存键；每次随机 2 条
         if (
             self.config.optimization.enabled
             and self.config.optimization.silly_expert_priming
@@ -256,6 +263,22 @@ class DeepProxyRouter:
                     block = _wrap_silly_for_injection(primings)
                     if block:
                         prepend_to_system_message(messages, block)
+
+        # 7.5 V4 <think> 角色沉浸引导（creative mode + 非 tools 场景）
+        #     引导 <think> 推理层进入角色第一人称内心独白模式，
+        #     使角色的情感推理真实化，输出自然带体温。
+        #     注入位置：最后一条 user 消息末尾（与 V4 训练时的注入位置一致）。
+        #     idempotent：已有 marker 则跳过。
+        if (
+            self.config.optimization.enabled
+            and _opt_mode == "creative"
+            and not has_tools(body)
+        ):
+            messages = body.get("messages")
+            if isinstance(messages, list) and messages:
+                injected = inject_inner_os_marker(messages)
+                if injected:
+                    logger.debug("已注入 V4 角色沉浸 marker")
 
         # 8. V4 多轮 reasoning 自愈：在全部消息修改之后执行，确保
         #    缓存键与 remember_response 存储时的对话前缀一致。

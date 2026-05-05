@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 
@@ -17,15 +17,16 @@ from ..compatibility.deepseek_fixes import has_tools
 from ..utils import append_to_system_message, find_system_message, prepend_to_system_message, sample_in_range
 
 from .skills_general import (
+    _SKILL_AVOID_AI_TICS,
     _SKILL_AVOID_FABRICATED_CITATIONS,
-    _SKILL_AVOID_NEGATIVE_STYLE,
     _SKILL_COMPLEX_SENTENCE,
     _SKILL_COT_RESET,
     _SKILL_ASSUME_GOOD_INTENT,
     _SKILL_INDEPENDENT_ANALYSIS,
     _SKILL_INSTRUCTION_PRIORITY,
     _SKILL_JSON_MODE,
-    _SKILL_NATURAL_TEMPERAMENT,
+    _SKILL_NARRATOR_STANCE,
+    _SKILL_NATURAL_TEMPERAMENT_CODING,
     _SKILL_PREFER_MULTIPLE_SOURCES,
     _SKILL_REASON_GENUINELY,
     _SKILL_SAFE_INLINED,
@@ -48,6 +49,7 @@ logger = logging.getLogger(__name__)
 async def apply_cheap_optimizations(
     body: Dict[str, Any],
     *,
+    mode: Literal["coding", "creative"] = "coding",
     # A. 通用风格 skills (always active)
     avoid_negative_style: bool = True,
     natural_temperament: bool = True,
@@ -74,6 +76,13 @@ async def apply_cheap_optimizations(
     http_client: httpx.AsyncClient | None = None,
 ) -> Dict[str, Any]:
     """对请求体施加廉价的提示词优化（原地修改并返回 body）。
+
+    mode 参数控制两条 skills 路径：
+    - "coding"（默认）：使用 _SKILL_AVOID_NEGATIVE_STYLE_CODING +
+      _SKILL_NATURAL_TEMPERAMENT_CODING（原版 skills，适合 code/math/技术分析）
+    - "creative"：使用 _SKILL_AVOID_AI_TICS + _SKILL_NARRATOR_STANCE
+      （不抑制情感表达，匹配通用创作要求）。B 组求证/反幻觉 skills 在
+      creative 模式下跳过（math/citation/sources 对创作无益且增加合规心态）。
 
     分为四组：
     - A. 通用风格 skills（avoid_negative_style / assume_good_intent /
@@ -110,23 +119,28 @@ async def apply_cheap_optimizations(
     # 2. 内置 skills（注入到 system prompt 前缀，按通用程度排序）
     skill_lines: List[str] = []
 
-    # A. 通用风格（每请求激活，对创作积极改善）
+    # A. 通用风格（每请求激活）
     #
-    # 排序说明：按语义连贯性分组。
-    #   1) avoid_negative_style + assume_good_intent — 输出约束 + 输入解读，
-    #      组成"交互契约"对（模型怎么理解、怎么回）。
-    #   2) natural_temperament + contextual_register — 内在倾向 + 句法复杂度，
-    #      组成"输出风格"对。
-    #   3) instruction_priority + independent_analysis — 推理自主性对（system
-    #      权威 + 不受外部预期裹挟），语义最接近，紧邻排列使下游模型
-    #      连续读入两个抵抗外部影响的规则，减少认知跳跃。
-    #   4) reason_genuinely + cot_reset — 推理元认知对（节奏自主 + 矛盾重启）。
+    # avoid_negative_style：coding + creative 共用 _SKILL_AVOID_AI_TICS（通用 AI 口癖禁止）
+    # natural_temperament：按 mode 选择路径
+    #   - coding：_SKILL_NATURAL_TEMPERAMENT_CODING（原版人格素描）
+    #   - creative：_SKILL_NARRATOR_STANCE（叙事者立场，通用创作要求编码）
+    # 其余 A 组 skills 两种模式共用
+    is_creative = (mode == "creative")
+
     if avoid_negative_style:
-        skill_lines.append(_SKILL_AVOID_NEGATIVE_STYLE)
+        skill_lines.append(_SKILL_AVOID_AI_TICS)
+
     if assume_good_intent:
         skill_lines.append(_SKILL_ASSUME_GOOD_INTENT)
-    if natural_temperament:
-        skill_lines.append(_SKILL_NATURAL_TEMPERAMENT)
+
+    if is_creative:
+        if natural_temperament:
+            skill_lines.append(_SKILL_NARRATOR_STANCE)
+    else:
+        if natural_temperament:
+            skill_lines.append(_SKILL_NATURAL_TEMPERAMENT_CODING)
+
     if contextual_register:
         skill_lines.append(_SKILL_COMPLEX_SENTENCE)
     if instruction_priority:
@@ -141,11 +155,11 @@ async def apply_cheap_optimizations(
         skill_lines.append(_SKILL_COT_RESET)
 
     # B. 求证 / 反幻觉（模型自门控；对创作豁免）
-    if show_math_steps:
+    if not is_creative and show_math_steps:
         skill_lines.append(_SKILL_SHOW_MATH_STEPS)
-    if prefer_multiple_sources:
+    if not is_creative and prefer_multiple_sources:
         skill_lines.append(_SKILL_PREFER_MULTIPLE_SOURCES)
-    if avoid_fabricated_citations:
+    if not is_creative and avoid_fabricated_citations:
         skill_lines.append(_SKILL_AVOID_FABRICATED_CITATIONS)
 
     # C. 上下文相关（仅窄触发条件下激活）

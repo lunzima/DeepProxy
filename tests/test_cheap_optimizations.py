@@ -464,3 +464,123 @@ class TestReadUrls:
         # 注入成功（截断后仍是有效内容），且包含 ... 截断标记
         assert "[Content from huge.test:" in c
         assert "..." in c
+
+
+class TestCreativeMode:
+    """验证 mode="creative" 时使用新 skills 路径。
+
+    - A 组：_SKILL_AVOID_AI_TICS 替代 _SKILL_AVOID_NEGATIVE_STYLE_CODING
+    - B 组：求证/反幻觉 skills 全部跳过
+    """
+
+    def _find_system_text(self, body):
+        for msg in body.get("messages", []):
+            if msg.get("role") == "system":
+                return msg.get("content", "")
+        return ""
+
+    async def test_creative_mode_uses_ai_tics_not_coding(self):
+        """creative mode 下 avoid_negative_style 应注入通用 _SKILL_AVOID_AI_TICS，
+        不含旧 coding 版的特定指令。"""
+        b = _make_body([{"role": "user", "content": "hello"}])
+        await apply_cheap_optimizations(
+            b, mode="creative",
+            avoid_negative_style=True, natural_temperament=False,
+            contextual_register=False, assume_good_intent=False,
+            instruction_priority=False, independent_analysis=False,
+            reason_genuinely=False, inject_date=False,
+            show_math_steps=False, prefer_multiple_sources=False,
+            avoid_fabricated_citations=False, json_mode_hint=False,
+            safe_inlined_content=False, re2=False, cot_reflection=False,
+            readurls=False, cot_reset=False,
+        )
+        system_text = self._find_system_text(b)
+        # 通用版含"无实质确认"（从旧 coding 版合并进来的）
+        assert "无实质确认" in system_text
+        # 通用版含旧创作版的特性
+        assert "说教套话" in system_text
+        # 通用版不含旧 coding 版的特定情感删除指令
+        assert "把情感支持转成推进事情的方式" not in system_text
+        assert "把总结感受的空间留给读者" not in system_text
+
+    async def test_coding_mode_uses_same_ai_tics(self):
+        """coding mode 使用与 creative 相同的 _SKILL_AVOID_AI_TICS 通用版，
+        不再使用旧的编码版。"""
+        b = _make_body([{"role": "user", "content": "hello"}])
+        await apply_cheap_optimizations(
+            b, mode="coding",
+            avoid_negative_style=True, natural_temperament=False,
+            contextual_register=False, assume_good_intent=False,
+            instruction_priority=False, independent_analysis=False,
+            reason_genuinely=False, inject_date=False,
+            show_math_steps=False, prefer_multiple_sources=False,
+            avoid_fabricated_citations=False, json_mode_hint=False,
+            safe_inlined_content=False, re2=False, cot_reflection=False,
+            readurls=False, cot_reset=False,
+        )
+        system_text = self._find_system_text(b)
+        # 通用版有的（coding 也应有）
+        assert "无实质确认" in system_text
+        assert "说教套话" in system_text
+        assert "情感抚慰套话" in system_text
+        # 旧 coding 版的特定指令已迁移到通用版
+        assert "把情感支持转成推进事情的方式" not in system_text
+
+    async def test_creative_mode_uses_narrator_stance(self):
+        """creative mode 下 natural_temperament 应注入 _SKILL_NARRATOR_STANCE。"""
+        b = _make_body([{"role": "user", "content": "hello"}])
+        await apply_cheap_optimizations(
+            b, mode="creative",
+            avoid_negative_style=False, natural_temperament=True,
+            contextual_register=False, assume_good_intent=False,
+            instruction_priority=False, independent_analysis=False,
+            reason_genuinely=False, inject_date=False,
+            show_math_steps=False, prefer_multiple_sources=False,
+            avoid_fabricated_citations=False, json_mode_hint=False,
+            safe_inlined_content=False, re2=False, cot_reflection=False,
+            readurls=False, cot_reset=False,
+        )
+        system_text = self._find_system_text(b)
+        assert "叙事者不替他们降温" in system_text
+        assert "以动词和名词为主力" in system_text
+        # 不含旧 personality 的"与人交流时保留一定的分寸"
+        assert "与人交流时保留一定的分寸" not in system_text
+
+    async def test_creative_mode_skips_b_group(self):
+        """creative mode 下 B 组求证 skills 全部跳过。"""
+        b = _make_body([{"role": "user", "content": "hello"}])
+        await apply_cheap_optimizations(
+            b, mode="creative",
+            avoid_negative_style=False, natural_temperament=False,
+            contextual_register=False, assume_good_intent=False,
+            instruction_priority=False, independent_analysis=False,
+            reason_genuinely=False, inject_date=False,
+            show_math_steps=True, prefer_multiple_sources=True,
+            avoid_fabricated_citations=True, json_mode_hint=False,
+            safe_inlined_content=False, re2=False, cot_reflection=False,
+            readurls=False, cot_reset=False,
+        )
+        system_text = self._find_system_text(b)
+        # B 组全文不应出现
+        assert "推导过程和关键中间步骤" not in system_text  # show_math_steps
+        assert "交叉验证与权衡" not in system_text  # prefer_multiple_sources
+        assert "逐字引文" not in system_text  # avoid_fabricated_citations
+
+    async def test_coding_mode_includes_b_group(self):
+        """mode="coding" 下 B 组求证 skills 正常注入。"""
+        b = _make_body([{"role": "user", "content": "hello"}])
+        await apply_cheap_optimizations(
+            b, mode="coding",
+            avoid_negative_style=False, natural_temperament=False,
+            contextual_register=False, assume_good_intent=False,
+            instruction_priority=False, independent_analysis=False,
+            reason_genuinely=False, inject_date=False,
+            show_math_steps=True, prefer_multiple_sources=True,
+            avoid_fabricated_citations=True, json_mode_hint=False,
+            safe_inlined_content=False, re2=False, cot_reflection=False,
+            readurls=False, cot_reset=False,
+        )
+        system_text = self._find_system_text(b)
+        assert "推导过程和关键中间步骤" in system_text
+        assert "交叉验证与权衡" in system_text
+        assert "逐字引文" in system_text
