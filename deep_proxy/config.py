@@ -268,18 +268,18 @@ class FlashUpgradeConfig(BaseModel):
                     "仅 router_type=bert 时生效）。默认 'router_model'（本地 LoRA 微调模型）。",
     )
     heuristic_threshold: float = Field(
-        default=7.5, ge=0.0, le=10.0,
+        default=8.0, ge=0.0, le=10.0,
         description="Layer 1 启发式直接升格阈值。复杂度评分 >= 此值时跳过 Router 直接升格。"
-                    "7.5 = 高确信度才走快速路径，防止误触发。",
+                    "8.0 = 仅极高确信度走快速路径，边界 case 交给 BERT 二审。",
     )
     router_threshold: float = Field(
-        default=0.60, ge=0.0, le=1.0,
+        default=0.65, ge=0.0, le=1.0,
         description="Layer 0 Router 升格阈值，与 RouteLLM threshold 语义一致："
-                    "score >= threshold → Pro。0.60 = 偏保守（V4-flash 处理多数任务已足够好）。"
+                    "score >= threshold → Pro。0.65 = 偏保守（V4-flash 处理多数任务已足够好）。"
                     "越低升格越激进（0.0 = 全升），越高越保守（1.0 = 几乎不升）。",
     )
     persist_turns: int = Field(
-        default=2, ge=1, le=10,
+        default=1, ge=1, le=10,
         description="升格后保持 Pro 的额外轮次数",
     )
 
