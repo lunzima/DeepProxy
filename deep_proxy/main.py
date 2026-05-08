@@ -100,41 +100,46 @@ app.add_middleware(
 )
 
 
+def _request_authorized(request: Request) -> bool:
+    """同时识别两种认证头：OpenAI 风格 `Authorization: Bearer` 与 Anthropic 风格 `x-api-key`。
+
+    /v1/models 同时面向 OpenAI 与 Anthropic 生态客户端（条目里两套字段共存），
+    Claude Code 用 ANTHROPIC_API_KEY 配置时只发 x-api-key，因此 OpenAI 风格端点
+    也必须接受这个头，否则启动期 /v1/models 探测就会 401。
+    """
+    if not (config and config.api_key):
+        return True
+    if request.headers.get("x-api-key", "") == config.api_key:
+        return True
+    return _extract_bearer_token(request.headers.get("authorization", "")) == config.api_key
+
+
 async def _check_api_key(request: Request):
-    """检查 OpenAI 风格 Authorization: Bearer 头。"""
-    if config and config.api_key:
-        auth = request.headers.get("authorization", "")
-        if _extract_bearer_token(auth) != config.api_key:
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "error": {
-                        "message": "无效的 API 密钥",
-                        "type": "authentication_error",
-                        "param": None,
-                        "code": 401,
-                    }
-                },
-            )
+    """OpenAI 风格端点鉴权（接受 Bearer 或 x-api-key）。"""
+    if not _request_authorized(request):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": {
+                    "message": "无效的 API 密钥",
+                    "type": "authentication_error",
+                    "param": None,
+                    "code": 401,
+                }
+            },
+        )
 
 
 async def _check_anthropic_api_key(request: Request):
-    """Anthropic 客户端用 x-api-key 头；同时也接受 Authorization: Bearer 兼容。"""
-    if not (config and config.api_key):
-        return
-    x_key = request.headers.get("x-api-key", "")
-    if x_key == config.api_key:
-        return
-    auth = request.headers.get("authorization", "")
-    if _extract_bearer_token(auth) == config.api_key:
-        return
-    raise HTTPException(
-        status_code=401,
-        detail={
-            "type": "error",
-            "error": {"type": "authentication_error", "message": "无效的 API 密钥"},
-        },
-    )
+    """Anthropic 风格端点鉴权（接受 x-api-key 或 Bearer），错误体走 Anthropic 形状。"""
+    if not _request_authorized(request):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "type": "error",
+                "error": {"type": "authentication_error", "message": "无效的 API 密钥"},
+            },
+        )
 
 
 def _ensure_router_ready():
