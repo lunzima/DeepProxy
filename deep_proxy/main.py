@@ -100,6 +100,15 @@ app.add_middleware(
 )
 
 
+def _mask(token: str) -> str:
+    """掩码 token 用于诊断日志：保留前 6 + 后 2 字符，中间打码。"""
+    if not token:
+        return "<empty>"
+    if len(token) <= 10:
+        return f"{token[:2]}***"
+    return f"{token[:6]}...{token[-2:]} (len={len(token)})"
+
+
 def _request_authorized(request: Request) -> bool:
     """同时识别两种认证头：OpenAI 风格 `Authorization: Bearer` 与 Anthropic 风格 `x-api-key`。
 
@@ -109,9 +118,23 @@ def _request_authorized(request: Request) -> bool:
     """
     if not (config and config.api_key):
         return True
-    if request.headers.get("x-api-key", "") == config.api_key:
+    x_api_key = request.headers.get("x-api-key", "")
+    if x_api_key == config.api_key:
         return True
-    return _extract_bearer_token(request.headers.get("authorization", "")) == config.api_key
+    bearer = _extract_bearer_token(request.headers.get("authorization", ""))
+    if bearer == config.api_key:
+        return True
+    # 鉴权失败：记录两种 header 的实际前缀（掩码）便于排查。
+    # 常见根因：Claude Code 本地 OAuth credentials 优先于 ANTHROPIC_API_KEY，
+    # 导致发出的 Bearer token 是 OAuth access token 而非用户配置的 key。
+    logger.warning(
+        "鉴权失败 path=%s x-api-key=%s authorization-bearer=%s expected=%s",
+        request.url.path,
+        _mask(x_api_key),
+        _mask(bearer or ""),
+        _mask(config.api_key),
+    )
+    return False
 
 
 async def _check_api_key(request: Request):

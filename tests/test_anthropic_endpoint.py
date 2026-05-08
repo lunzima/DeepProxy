@@ -192,6 +192,32 @@ class TestClaudeRequestToOpenAI:
             "content": "result data",
         }
 
+    def test_user_tool_result_with_text_ordering(self):
+        """tool 消息必须在 user text 之前，紧跟在 assistant tool_calls 之后。"""
+        body = {
+            "model": "x",
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_a", "name": "f",
+                     "input": {"key": "val"}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_a",
+                     "content": "42"},
+                    {"type": "text", "text": "here is the result"},
+                ]},
+            ],
+        }
+        out = claude_request_to_openai(body)
+        msgs = out["messages"]
+        # 检查消息顺序：assistant (tool_calls) → tool → user
+        assert msgs[0]["role"] == "assistant"
+        assert msgs[0].get("tool_calls")
+        assert msgs[1]["role"] == "tool"
+        assert msgs[1]["tool_call_id"] == "toolu_a"
+        assert msgs[2]["role"] == "user"
+        assert msgs[2]["content"] == "here is the result"
+
     def test_tools_translated(self):
         body = {
             "model": "x",

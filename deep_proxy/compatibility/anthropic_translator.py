@@ -134,14 +134,14 @@ def _convert_messages(
 
         if role == "user":
             parts, tool_msgs = _convert_user_content_blocks(content)
-            # 经 _convert_user_content_blocks 过滤后 parts 仅含 text，
-            # 扁平化为单 string（DeepSeek 不支持多模态）。
+            # tool 消息必须紧跟在 assistant tool_calls 之后（OpenAI API 强制要求），
+            # 因此先 emit tool_msgs，再 emit user text message。
+            out.extend(tool_msgs)
             if parts:
                 out.append({
                     "role": "user",
                     "content": "\n".join(p["text"] for p in parts),
                 })
-            out.extend(tool_msgs)
         elif role == "assistant":
             text, tool_calls, reasoning = _convert_assistant_content_blocks(content)
             msg: Dict[str, Any] = {"role": "assistant", "content": text or None}
