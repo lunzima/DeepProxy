@@ -272,6 +272,7 @@ class DeepProxyRouter:
         if (
             self.config.optimization.enabled
             and _opt_mode == "creative"
+            and self.config.optimization.inner_os_marker
             and not has_tools(body)
         ):
             messages = body.get("messages")

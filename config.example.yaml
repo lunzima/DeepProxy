@@ -50,6 +50,9 @@ optimization:
   # [实验性] 无厘头 expert priming — MoE 路由扰动。默认关闭。
   silly_expert_priming: false
 
+  # V4 <think> 角色沉浸引导 — creative mode 注入角色沉浸 marker
+  inner_os_marker: true                 # [victorchen96/deepseek_v4_rolepaly_instruct]
+
   # writing_port 写作篮变体："creative" 偏 RP/创作；"general" 偏 Q&A/公文
   writing_basket_kind: "creative"
 

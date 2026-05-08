@@ -187,6 +187,15 @@ class OptimizationConfig(BaseModel):
                     "默认关闭（实验性）。",
     )
 
+    inner_os_marker: bool = Field(
+        default=True,
+        description="[来源: victorchen96/deepseek_v4_rolepaly_instruct] "
+                    "V4 <think> 角色沉浸引导：creative mode 下，在第一轮 user 消息"
+                    "末尾注入角色沉浸 marker（【角色沉浸要求】），引导推理层以角色"
+                    "第一人称内心独白的方式思考。idempotent：已有 marker 则跳过。"
+                    "默认开启。关闭后退回到 V4 默认 think 模式（由模型自动选择）。",
+    )
+
     writing_basket_kind: str = Field(
         default="creative",
         description="writing_port 使用的写作篮变体："

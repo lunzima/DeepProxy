@@ -38,27 +38,41 @@ def has_inner_os_marker(messages: List[dict[str, Any]]) -> bool:
 
 
 def inject_inner_os_marker(messages: List[dict[str, Any]]) -> bool:
-    """在最后一条 user 消息末尾注入角色沉浸 marker。
+    """在第一条和最后一条 user 消息末尾分别注入角色沉浸 marker。
 
-    - idempotent：若已有 marker 则跳过，返回 False
-    - 若最后一条消息非 user 或无 content 字符串，返回 False
+    双注入策略：
+    - 第一条 user 末尾：V4 训练时的注入位置，为整个对话设定 think 模式
+    - 最后一条 user 末尾：防止长对话中 marker 效力衰减，或上下文切换时
+      新的 user 轮次未继承第一条的模式设定
+
+    - idempotent：任一条 user 消息已有 marker 则整体跳过，返回 False
+    - 若没有 user 消息或 content 非字符串/为空，返回 False
+    - 第一条 == 最后一条时（单轮对话）只注入一次
     - 注入成功返回 True
-
-    marker 注入位置为 user 消息末尾（非 system prompt），与 V4 训练时的
-    注入位置一致，效果最稳定。后续轮次正常追加消息，marker 在对话史中
-    持续发挥效力。
     """
     if has_inner_os_marker(messages):
         return False
 
-    # 找最后一条 user 消息
-    for msg in reversed(messages):
+    # 收集所有有效 user 消息的索引
+    user_indices: list[int] = []
+    for i, msg in enumerate(messages):
         if msg.get("role") != "user":
             continue
         content = msg.get("content")
-        if not isinstance(content, str) or not content:
-            return False
-        msg["content"] = content + INNER_OS_MARKER
-        return True
+        if isinstance(content, str) and content:
+            user_indices.append(i)
 
-    return False
+    if not user_indices:
+        return False
+
+    first_idx = user_indices[0]
+    last_idx = user_indices[-1]
+
+    # 注入第一条 user 消息
+    messages[first_idx]["content"] += INNER_OS_MARKER
+
+    # 如果第一条 ≠ 最后一条，也注入最后一条
+    if last_idx != first_idx:
+        messages[last_idx]["content"] += INNER_OS_MARKER
+
+    return True
