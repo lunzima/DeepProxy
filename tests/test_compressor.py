@@ -374,3 +374,43 @@ class TestStripWrapping:
         assert _strip_wrapping("```\nfoo bar\n```") == "foo bar"
         assert _strip_wrapping('"hello"') == "hello"
         assert _strip_wrapping("plain text") == "plain text"
+
+
+class TestIdentityClaimDeletionInstruction:
+    """压缩 meta-prompt 必须含"删除 LLM 品牌身份"指令并明确"用户人设要保留"的例外。
+
+    实际删除 / 保留由下游 LLM 在压缩时执行，无法在单元测试里跑真模型；
+    这里仅断言指令文本的关键条款存在，避免后续编辑误删或误改方向。
+    """
+
+    def test_instructs_deletion_of_brand_identity(self):
+        from deep_proxy.optimization.compressor import _COMPRESSION_INSTRUCTION
+        assert "整句删除" in _COMPRESSION_INSTRUCTION
+        # 是 LLM 产品 / 模型 / CLI 身份，不是任意身份
+        assert "AI 产品" in _COMPRESSION_INSTRUCTION
+        # 明确为目标 1 / 2（保留命名实体 / 情态）的例外
+        assert "例外" in _COMPRESSION_INSTRUCTION
+
+    def test_forbids_generic_ai_replacement(self):
+        """显式禁止替换为"AI 助手"等泛化身份——LARP 任意 AI 角色都会降智。"""
+        from deep_proxy.optimization.compressor import _COMPRESSION_INSTRUCTION
+        assert "不要替换" in _COMPRESSION_INSTRUCTION
+        assert "AI 助手" in _COMPRESSION_INSTRUCTION
+
+    def test_preserves_user_defined_personas(self):
+        from deep_proxy.optimization.compressor import _COMPRESSION_INSTRUCTION
+        assert "不要删除" in _COMPRESSION_INSTRUCTION
+        # 覆盖三类典型用户人设：职业、虚构/真实人物、用例人设
+        assert "职业" in _COMPRESSION_INSTRUCTION
+        assert "作家" in _COMPRESSION_INSTRUCTION
+        # 模糊时偏向保留的兜底口径
+        assert "偏向保留" in _COMPRESSION_INSTRUCTION
+
+    def test_examples_are_desensitized(self):
+        """例子用 <Product> / <Vendor> 占位符，避免具体品牌污染下游模型注意力。"""
+        from deep_proxy.optimization.compressor import _COMPRESSION_INSTRUCTION
+        assert "<Product>" in _COMPRESSION_INSTRUCTION
+        assert "<Vendor>" in _COMPRESSION_INSTRUCTION
+        # 不应残留具体品牌名
+        for brand in ("Claude Code", "Qwen Code", "GPT-4", "Anthropic", "OpenAI"):
+            assert brand not in _COMPRESSION_INSTRUCTION, f"具体品牌 {brand!r} 不应出现在 meta-prompt 里"
