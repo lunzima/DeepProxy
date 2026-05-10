@@ -101,7 +101,11 @@ async def _apply_tool_call_minimal_pipeline(body: Dict[str, Any]) -> None:
     append_to_system_message(messages, _date_skill_line(), dedup=True)
 
     # user 末尾双注入（idempotent；与 think_steering 的 inner-OS marker 互不干扰）
-    _inject_tool_call_cn_cot_user_marker(messages)
+    user_injected = _inject_tool_call_cn_cot_user_marker(messages)
+    logger.debug(
+        "tool_call_chinese_cot injected: system_prefix=True user_dual=%s",
+        user_injected,
+    )
 
 
 async def apply_cheap_optimizations(

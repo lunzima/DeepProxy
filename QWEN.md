@@ -139,7 +139,11 @@ D:\deepproxy\
 │       ├── dynamic_baskets.py     # 场景化中文短段注入
 │       ├── silly_priming.py       # 无厘头 expert priming
 │       ├── flash_upgrade.py       # Flash→Pro 升格编排（四层架构）
-│       └── upgrade_router.py      # BertUpgradeRouter（二分类 + 启发式）
+│       ├── upgrade_router.py      # BertUpgradeRouter（二分类 + 启发式）
+│       ├── think_steering.py      # V4 <think> 角色沉浸引导（首/末 user 双注入）
+│       └── tool_call_chinese_cot.py  # tools 场景中文 CoT 双通路锚定
+├── docs/                      # 项目文档 + 设计 spec
+│   └── superpowers/specs/     # superpowers brainstorming 流程产出的 design spec
 ├── router_model/              # 微调后的 BERT 路由器（中文 RoBERTa-small + LoRA）
 │   ├── config.json
 │   ├── model.safetensors
@@ -165,6 +169,8 @@ D:\deepproxy\
 │   ├── test_retry.py              # 重试逻辑测试
 │   ├── test_anthropic_endpoint.py # Anthropic 端点测试
 │   ├── test_streaming_done.py     # 流式结束标记测试
+│   ├── test_think_steering.py     # V4 <think> 引导测试
+│   ├── test_tool_call_chinese_cot.py # tools 场景中文 CoT 锚定测试
 │   └── integration/               # 集成测试（需真实 API key）
 ├── tools/
 │   └── train_bert_router.py      # BERT 路由器训练脚本（LoRA fine-tune）
