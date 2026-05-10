@@ -25,6 +25,7 @@ async def _apply(body, **kwargs):
         "show_math_steps": False, "avoid_fabricated_citations": False,
         "independent_analysis": False, "prefer_multiple_sources": False,
         "reason_genuinely": False, "cot_reset": False,
+        "tool_call_chinese_cot": False,
     }
     defaults.update(kwargs)
     return await apply_cheap_optimizations(body, **defaults)

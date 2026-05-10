@@ -42,8 +42,66 @@ from .skills_transform import (
     _apply_re2,
     extract_cot_output,
 )
+from .tool_call_chinese_cot import (
+    TOOL_CALL_CN_COT_SKILL,
+    inject_user_marker as _inject_tool_call_cn_cot_user_marker,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _is_thinking_disabled(body: Dict[str, Any]) -> bool:
+    """判断 body.thinking.type 是否显式 disabled。
+
+    DeepSeek V4 服务端默认 enabled；字段缺失或 type != "disabled" 时按 enabled 处理。
+    """
+    thinking = body.get("thinking")
+    if not isinstance(thinking, dict):
+        return False
+    return thinking.get("type") == "disabled"
+
+
+async def _apply_tool_call_minimal_pipeline(body: Dict[str, Any]) -> None:
+    """tools 场景的最小化 pipeline —— 中文 CoT 双通路锚定。
+
+    与完整 pipeline 故意不同：
+    - 只激活 instruction_priority + reason_genuinely + cot_reset + 新 skill + inject_date
+    - 不走 LLM 压缩（子集体量小、tools 场景客户端 system 通常更精密）
+    - 不走 D 组消息转换（与 function calling 冲突）
+    - thinking.type=disabled 时整体跳过（无 reasoning 也就没漂移可言）
+
+    详见: docs/superpowers/specs/2026-05-10-tool-call-chinese-cot-design.md
+    """
+    if _is_thinking_disabled(body):
+        return
+
+    messages = body["messages"]
+
+    # system 前缀拼接顺序与现有 A 组语义连贯性一致：
+    # instruction_priority → reason_genuinely → cot_reset → tool_call_chinese_cot
+    skill_lines = [
+        _SKILL_INSTRUCTION_PRIORITY,
+        _SKILL_REASON_GENUINELY,
+        _SKILL_COT_RESET,
+        TOOL_CALL_CN_COT_SKILL,
+    ]
+    skills_text = "\n\n".join(skill_lines)
+
+    sys_idx, user_sys_text, user_sys_compressible = find_system_message(messages)
+    if user_sys_text and user_sys_compressible:
+        combined = f"{skills_text}\n\n{user_sys_text}"
+        messages[sys_idx]["content"] = combined
+    elif sys_idx is not None:
+        # 已有 system 但 content 是非字符串（多模态）—— 不动它，把 skills 插一条新的在前
+        prepend_to_system_message(messages, skills_text)
+    else:
+        prepend_to_system_message(messages, skills_text)
+
+    # inject_date 追加到 system 末尾（dedup，不进缓存键）
+    append_to_system_message(messages, _date_skill_line(), dedup=True)
+
+    # user 末尾双注入（idempotent；与 think_steering 的 inner-OS marker 互不干扰）
+    _inject_tool_call_cn_cot_user_marker(messages)
 
 
 async def apply_cheap_optimizations(
@@ -71,6 +129,8 @@ async def apply_cheap_optimizations(
     re2: bool = True,
     cot_reflection: bool = True,
     readurls: bool = True,
+    # E. tools 场景专项（与上方所有 skills 互斥：has_tools 时只跑这条最小化 pipeline）
+    tool_call_chinese_cot: bool = True,
     # 元功能：LLM-based system prompt 压缩（首次调一次模型，结果磁盘缓存复用）
     compressor: Optional[Any] = None,  # SystemPromptCompressor 实例；None 跳过压缩
     http_client: httpx.AsyncClient | None = None,
@@ -105,12 +165,17 @@ async def apply_cheap_optimizations(
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         return body
-    if has_tools(body):
-        return body
     # 防双重处理（同一 body 多次穿过）
     if body.get("_deepproxy_optimized"):
         return body
     body["_deepproxy_optimized"] = True
+
+    # tools 场景：完整 pipeline 跳过，但走最小化中文 CoT 锚定（如开启）
+    # 详见: docs/superpowers/specs/2026-05-10-tool-call-chinese-cot-design.md
+    if has_tools(body):
+        if tool_call_chinese_cot:
+            await _apply_tool_call_minimal_pipeline(body)
+        return body
 
     # 1. readurls 最前：先把链接展开为内联文本，让后续 skills 能看到 [Content from ...]
     if readurls:

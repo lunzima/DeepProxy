@@ -223,6 +223,8 @@ class DeepProxyRouter:
                 re2=opt.re2,
                 cot_reflection=opt.cot_reflection,
                 readurls=opt.readurls,
+                # E. tools 场景专项
+                tool_call_chinese_cot=opt.tool_call_chinese_cot,
                 # LLM 压缩器（首次慢、后续命中缓存秒返回）
                 compressor=self._compressor,
                 http_client=self._get_http_client(),

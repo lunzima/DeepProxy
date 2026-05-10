@@ -131,6 +131,16 @@ class OptimizationConfig(BaseModel):
                     "非正式语言（如\"我操，用户彻底怒了\"）清空错误推理路径。"
                     "仅作用于思维链内部，不影响输出文本。",
     )
+    tool_call_chinese_cot: bool = Field(
+        default=True,
+        description="[来源: fkyah3/experiment-console 320+ 轮真实复现实验] "
+                    "tools 场景启用中文 CoT 双通路注入（system 前缀 + user 首/末双注入），"
+                    "针对 V4 工具调用场景下 reasoning 从中文漂移到英文的问题。"
+                    "现有 apply_cheap_optimizations 在 has_tools 时整体跳过，所有 skills 在主战场失效；"
+                    "本字段开启后，has_tools 路径走最小化 pipeline："
+                    "instruction_priority + reason_genuinely + cot_reset + 新 skill + inject_date。"
+                    "默认开启；若发现影响 function calling 行为可关闭。",
+    )
 
     # ===========================================================
     # B. 求证 / 反幻觉 skills —— 模型自门控（仅命中条件时激活）

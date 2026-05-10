@@ -304,6 +304,11 @@ class TestRouterIntegration:
         await router.close()
 
     async def test_skipped_when_tools_present(self):
+        """tools 存在时 dynamic_baskets 不参与注入。
+
+        注：tools 路径下仍可能由 tool_call_chinese_cot 产生 system 内容，
+        所以这里只断言 basket 句子不出现，而不是断言无 system。
+        """
         router = DeepProxyRouter(_minimal_config())
         body = {
             "model": "deepseek-v4-flash",
@@ -313,7 +318,17 @@ class TestRouterIntegration:
         out = await router.prepare_request(
             body, sampling_profile=PreciseSamplingConfig(),
         )
-        assert not any(m.get("role") == "system" for m in out["messages"])
+        all_basket_sentences = (
+            sum(CODING_BASKETS.values(), [])
+            + sum(CREATIVE_BASKETS.values(), [])
+            + sum(GENERAL_BASKETS.values(), [])
+        )
+        full_text = "\n".join(
+            m.get("content", "") if isinstance(m.get("content"), str) else ""
+            for m in out["messages"]
+        )
+        for s in all_basket_sentences:
+            assert s.rstrip("。") not in full_text
         await router.close()
 
     async def test_appends_after_user_system(self):

@@ -198,6 +198,11 @@ class TestRouterIntegration:
         await router.close()
 
     async def test_silly_priming_skipped_with_tools(self):
+        """tools 存在时 silly priming 不注入。
+
+        注：tools 路径下仍可能由 tool_call_chinese_cot 产生 system 内容，
+        所以这里只断言 silly priming 池中的句子不出现。
+        """
         router = DeepProxyRouter(_minimal_config(silly=True))
         body = {
             "model": "deepseek-v4-flash",
@@ -205,7 +210,15 @@ class TestRouterIntegration:
             "tools": [{"type": "function", "function": {"name": "x", "parameters": {}}}],
         }
         out = await router.prepare_request(body, sampling_profile=PreciseSamplingConfig())
-        assert not any(m.get("role") == "system" for m in out["messages"])
+        full_text = "\n".join(
+            m.get("content", "") if isinstance(m.get("content"), str) else ""
+            for m in out["messages"]
+        )
+        # silly priming 标志性句子和归因都不应出现
+        assert _AMD_SENTENCE not in full_text
+        assert _AMD_ATTRIBUTION not in full_text
+        for sentence in SILLY_PRIMING_POOL:
+            assert sentence not in full_text
         await router.close()
 
     async def test_silly_priming_works_under_creative_profile(self):

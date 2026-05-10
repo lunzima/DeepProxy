@@ -38,6 +38,7 @@ optimization:
   reason_genuinely: true               # 鼓励深入推理 + 禁虚构时间/进度幻觉
   cot_reset: true                      # 推理出现严重矛盾时允许在思维链中显式重启
   inject_date: true                    # 注入日期 + 时间相对解析
+  tool_call_chinese_cot: true          # [fkyah3/experiment-console] tools 场景中文 CoT 双通路锚定
 
   # B. 求证 / 反幻觉 —— 模型自门控（仅命中条件时激活）
   show_math_steps: true                # 确定性数学题展示推导步骤
