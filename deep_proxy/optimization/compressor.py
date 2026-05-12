@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 # 缓存版本：变更压缩 prompt / 目标模型 / 输出协议时，由用户决定是否 +1 强制重压缩
 _CACHE_VERSION = 1
 
+# 动态 header 剥离模式（计算缓存 key 前归一化，避免同一 prompt 因 session ID 不同反复 miss）
+# Claude Code 每次会话发送不同的 header（billing 头含 session hash）；同类 CLI 工具
+# 也有类似遥测元数据。这些行对下游 LLM 行为无意义，剥离后归一化缓存 key。
+_DYNAMIC_HEADERS_RE = re.compile(
+    r'^x-anthropic-[a-z-]+:.*$',
+    re.MULTILINE | re.IGNORECASE,
+)
+
 _FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n(.*?)\n```$", re.DOTALL)
 
 
@@ -187,7 +195,19 @@ class SystemPromptCompressor:
         except Exception as e:
             logger.warning("写入压缩缓存失败 (%s): %s", self._cache_path, e)
 
-    # --------------------------------------------------------------- Lookup
+    # --------------------------------------------------------------- Cache key normalization
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        """在计算缓存 key 前移除会话动态内容。
+
+        当前剥离（均为编码 CLI 遥测元数据，对下游 LLM 语义无影响）：
+        - `x-anthropic-*` 系列 header — Claude Code 会话级追踪头（含 session hash）
+
+        返回的新字符串只用于 cache key 和 LLM 压缩输入；不改变传递给下游的内容（因为
+        本模块不直接发送请求给 DeepSeek，只输出压缩后的 system prompt 文本）。
+        """
+        return _DYNAMIC_HEADERS_RE.sub("", text)
 
     @staticmethod
     def _key(text: str, model: str) -> str:
@@ -202,10 +222,17 @@ class SystemPromptCompressor:
         - 同一 key 并发到达 → 仅首个触发后台任务，其余请求正常通过
 
         永远不阻塞主请求路径：用户绝不会因为压缩等待 LLM 调用。
+
+        缓存 key 计算前会剥离会话动态元数据（如 Claude Code 的 billing header），
+        确保同一份 prompt 不受 session ID 影响、始终命中同一缓存。
         """
         if not text or not text.strip():
             return text
-        key = self._key(text, self._model)
+
+        # 归一化：剥离会话动态元数据（billing header 等），使不同 session 的同一 prompt
+        # 映射到同一缓存 key。仍保留原始 text 传给下游（本函数不修改请求内容）。
+        cache_text = self._normalize(text)
+        key = self._key(cache_text, self._model)
         key_short = key[:12]
 
         # 1. 内存命中：返回压缩版
@@ -224,7 +251,9 @@ class SystemPromptCompressor:
                 self._inflight.discard(key)
                 logger.debug("compress: 无运行中的 event loop，跳过后台压缩 key=%s", key_short)
                 return text
-            task = loop.create_task(self._background_compress(text, key))
+            # 传给 LLM 的文本也用归一化版本（剥离无用元数据，省 token + 输出不含 header）
+            llm_text = cache_text
+            task = loop.create_task(self._background_compress(llm_text, key))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
             logger.info(
