@@ -26,13 +26,11 @@ logger = logging.getLogger(__name__)
 # 缓存版本：变更压缩 prompt / 目标模型 / 输出协议时，由用户决定是否 +1 强制重压缩
 _CACHE_VERSION = 1
 
-# 动态 header 剥离模式（计算缓存 key 前归一化，避免同一 prompt 因 session ID 不同反复 miss）
-# Claude Code 每次会话发送不同的 header（billing 头含 session hash）；同类 CLI 工具
-# 也有类似遥测元数据。这些行对下游 LLM 行为无意义，剥离后归一化缓存 key。
-_DYNAMIC_HEADERS_RE = re.compile(
-    r'^x-anthropic-[a-z-]+:.*$',
-    re.MULTILINE | re.IGNORECASE,
-)
+# 缓存 key 归一化复用 strip_telemetry 的共享正则——单一来源，避免两处定义漂移。
+# router.prepare_request 在管道早期已对 messages 内消息执行同一剥离；本处作为
+# 双层防御兜底：若上层 strip_client_telemetry 被关闭、或文本来自其它输入路径，
+# 缓存 key 仍能保持稳定。
+from .strip_telemetry import strip_telemetry_from_text as _strip_telemetry
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n(.*?)\n```$", re.DOTALL)
 
@@ -204,10 +202,11 @@ class SystemPromptCompressor:
         当前剥离（均为编码 CLI 遥测元数据，对下游 LLM 语义无影响）：
         - `x-anthropic-*` 系列 header — Claude Code 会话级追踪头（含 session hash）
 
-        返回的新字符串只用于 cache key 和 LLM 压缩输入；不改变传递给下游的内容（因为
-        本模块不直接发送请求给 DeepSeek，只输出压缩后的 system prompt 文本）。
+        与 router.prepare_request 中的 strip_telemetry_from_messages 形成双层防御：
+        前者作用于 request body 整体（影响下游传输），本处作用于压缩 cache key。
+        共享同一正则（strip_telemetry._TELEMETRY_HEADER_RE）保证语义一致。
         """
-        return _DYNAMIC_HEADERS_RE.sub("", text)
+        return _strip_telemetry(text)
 
     @staticmethod
     def _key(text: str, model: str) -> str:
