@@ -21,6 +21,11 @@ deepseek:
 optimization:
   enabled: true
 
+  # 客户端 telemetry 剥离（在 skills / 压缩 / 升格判定之前执行）
+  # 针对 Claude Code 2.1.42+ 在 system prompt 注入的 x-anthropic-billing-header 等
+  # 含 session hash 的伪 header 行（破坏 prefix cache）。默认开启。
+  strip_client_telemetry: true
+
   # 元功能：LLM 压缩 + 持久化磁盘缓存
   # 首次见某组 skills 配置 → 调一次 LLM 压缩到最短同义版 → 写磁盘
   # 后续同配置 0 上游调用，且字节级一致 → 命中 DeepSeek 服务端 prefix cache
