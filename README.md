@@ -172,6 +172,42 @@ precise_sampling:
 
 > 注：FIM (`/v1/completions`) 已下线——DeepSeek 官方 FIM 端点不支持 reasoning，需 FIM 的客户端请直连 DeepSeek `/beta/completions`。
 
+## Windows 一键接入 Claude Code
+
+DeepProxy 暴露 Anthropic 兼容的 `/v1/messages` 端点。在 Windows 上一键配置 Claude Code 所有相关环境变量（用户级永久、无需管理员）：
+
+1. 启动 DeepProxy（双击 `start.bat`）
+2. 双击 `tools\setup_claude_code_env.bat`（或在终端：`tools\setup_claude_code_env.bat`）
+3. 打开**新终端**运行 `claude`
+
+脚本读取 `config.yaml` 的 `host` / `coding_port` / `api_key`，写入以下用户级永久环境变量：
+
+| 变量 | 默认值 |
+|------|--------|
+| `ANTHROPIC_BASE_URL` | `http://127.0.0.1:<coding_port>` |
+| `ANTHROPIC_AUTH_TOKEN` | `config.yaml` 的 `api_key`（缺省 `dummy`） |
+| `ANTHROPIC_MODEL` | `deepseek-v4-pro[1m]` |
+| `ANTHROPIC_SMALL_FAST_MODEL` | `deepseek-v4-flash` |
+| `CLAUDE_CODE_ATTRIBUTION_HEADER` | `false`（从源头关掉 billing header；代理层也独立剥离作为兜底） |
+
+同时主动删除 `ANTHROPIC_API_KEY` 以避免与 `AUTH_TOKEN` 优先级冲突（已设置时会先确认）。
+
+**参数**：
+
+- `-DryRun`：只打印不写
+- `-Uninstall`：删除上述 5 个变量
+- `-Writing`：指向 `writing_port`（默认 coding）
+- `-Force`：跳过 `ANTHROPIC_API_KEY` 覆盖确认（CI 场景）
+
+示例：
+
+```cmd
+tools\setup_claude_code_env.bat -DryRun
+tools\setup_claude_code_env.bat -Uninstall
+```
+
+代理层另独立剥离 `^x-anthropic-[a-z-]+:.*$` 形式的伪 header 行（Claude Code 2.1.42+ 的 billing header 含 session hash，会破坏 prefix cache），由 `optimization.strip_client_telemetry` 控制，默认开启。即便客户端未设置 `CLAUDE_CODE_ATTRIBUTION_HEADER=false`，代理也能保证下游接收稳定的前缀。
+
 ## 提示词优化（Skills Pipeline）
 
 所有优化在请求管道内顺次执行，全 in-process，无额外 LLM 调用（压缩器除外）。

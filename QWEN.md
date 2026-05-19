@@ -141,7 +141,8 @@ D:\deepproxy\
 │       ├── flash_upgrade.py       # Flash→Pro 升格编排（四层架构）
 │       ├── upgrade_router.py      # BertUpgradeRouter（二分类 + 启发式）
 │       ├── think_steering.py      # V4 <think> 角色沉浸引导（首/末 user 双注入）
-│       └── tool_call_chinese_cot.py  # tools 场景中文 CoT 双通路锚定
+│       ├── tool_call_chinese_cot.py  # tools 场景中文 CoT 双通路锚定
+│       └── strip_telemetry.py     # 客户端 telemetry header 行剥离（共享正则供 compressor / router 复用）
 ├── docs/                      # 项目文档 + 设计 spec
 │   └── superpowers/specs/     # superpowers brainstorming 流程产出的 design spec
 ├── router_model/              # 微调后的 BERT 路由器（中文 RoBERTa-small + LoRA）
@@ -173,7 +174,9 @@ D:\deepproxy\
 │   ├── test_tool_call_chinese_cot.py # tools 场景中文 CoT 锚定测试
 │   └── integration/               # 集成测试（需真实 API key）
 ├── tools/
-│   └── train_bert_router.py      # BERT 路由器训练脚本（LoRA fine-tune）
+│   ├── train_bert_router.py      # BERT 路由器训练脚本（LoRA fine-tune）
+│   ├── setup_claude_code_env.ps1 # Windows 一键配置 Claude Code 环境变量（用户级永久）
+│   └── setup_claude_code_env.bat # 双击启动器（调 pwsh / powershell）
 ├── scripts/                   # 工具脚本（.gitignore 排除）
 ├── config.yaml                # 默认配置文件
 ├── config.example.yaml        # 配置模板
@@ -193,14 +196,15 @@ D:\deepproxy\
 每个 `/v1/chat/completions` 请求流经 `router.DeepProxyRouter.prepare_request`，顺序固定：
 
 1. **Legacy alias → V4 + 隐式 thinking** — `deepseek-chat` → `deepseek-v4-flash` + `thinking.type=disabled`；`deepseek-reasoner` → `deepseek-v4-flash` + `thinking.type=enabled`
-2. **`thinking.reasoning_effort=max` 注入** — 仅 V4 且未显式 disabled 时。`reasoning_effort` 是 `thinking` 的子字段
-3. **采样默认值** — 按入站端口选择 profile（forced override）或 fallback 到 creative_sampling
-4. **`strip_unsupported_params`** — 仅移除 `functions` 和 `user`（V4 支持其余全部参数）
-5. **`ensure_reasoning_content_persistence`** — V4 多轮推理内容自愈
-6. **`sanitize_stream_options`** — 清理空 dict
-7. **`apply_cheap_optimizations`** — 内置 skills（见下方 Skills Pipeline）
-8. **动态短段注入** — 在压缩之后执行（避免随机内容破坏缓存）
-9. **无厘头 expert priming** — 最后一步，system 最前插入
+2. **客户端 telemetry header 剥离** — 早期清理 `system` 与首条 `user` 消息中的 `^x-anthropic-[a-z-]+:.*$` 行（Claude Code 2.1.42+ 的 billing header 等含 session hash，会破坏 prefix cache）。受 `optimization.strip_client_telemetry` 控制，默认开启。与 `compressor._normalize` 形成双层防御
+3. **`thinking.reasoning_effort=max` 注入** — 仅 V4 且未显式 disabled 时。`reasoning_effort` 是 `thinking` 的子字段
+4. **采样默认值** — 按入站端口选择 profile（forced override）或 fallback 到 creative_sampling
+5. **`strip_unsupported_params`** — 仅移除 `functions` 和 `user`（V4 支持其余全部参数）
+6. **`ensure_reasoning_content_persistence`** — V4 多轮推理内容自愈
+7. **`sanitize_stream_options`** — 清理空 dict
+8. **`apply_cheap_optimizations`** — 内置 skills（见下方 Skills Pipeline）
+9. **动态短段注入** — 在压缩之后执行（避免随机内容破坏缓存）
+10. **无厘头 expert priming** — 最后一步，system 最前插入
 
 ## Skills Pipeline（提示词优化，in-process）
 
