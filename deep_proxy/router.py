@@ -42,6 +42,7 @@ from .litellm_client import call_litellm, iter_litellm_chunks, _to_litellm_api_b
 from .models_list import build_models_list, fetch_upstream_models
 from .optimization import apply_cheap_optimizations, extract_cot_output, sample_in_range
 from .optimization.compressor import SystemPromptCompressor
+from .optimization.strip_telemetry import strip_telemetry_from_messages
 from .optimization.dynamic_baskets import (
     assemble_paragraphs as _assemble_basket_paragraphs,
     scenario_from_profile as _scenario_from_profile,
@@ -139,7 +140,19 @@ class DeepProxyRouter:
         body["model"] = normalize_model_name(raw_model, self._model_routes_dicts)
         model = body.get("model", "")
 
-        # 0c. Flash→Pro 选择性升格路由（仅 v4-flash + 启用时）
+        # 0c. 客户端 telemetry header 剥离（在升格哈希 / skills / 压缩缓存 key 之前）
+        #     Claude Code 2.1.42+ 在 system 头部注入 `x-anthropic-billing-header: cc_version=...`
+        #     含 session hash，每次新会话破坏 prefix cache。早期清理让所有下游看到稳定文本。
+        #     与 compressor 内部的 _normalize 形成双层防御。
+        if (
+            self.config.optimization.enabled
+            and self.config.optimization.strip_client_telemetry
+        ):
+            messages = body.get("messages")
+            if isinstance(messages, list):
+                strip_telemetry_from_messages(messages)
+
+        # 0d. Flash→Pro 选择性升格路由（仅 v4-flash + 启用时）
         #     在全部后续处理之前改写 model，让 thinking/sampling/skills 走 Pro 路径。
         if (
             self.config.flash_upgrade.enabled
