@@ -219,3 +219,66 @@ class TestEnsureStringContent:
         messages = [{"role": "user", "content": []}]
         result = _ensure_string_content(messages)
         assert result[0]["content"] == ""
+
+
+class TestTelemetryStripping:
+    """验证 router.prepare_request 早期 telemetry header 剥离。"""
+
+    async def test_billing_header_stripped_from_system(self, router: DeepProxyRouter):
+        body = {
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "system", "content": (
+                    "x-anthropic-billing-header: cc_version=2.1.42.abc;"
+                    " cc_entrypoint=claude-code; cch=0;\n"
+                    "You are Claude Code."
+                )},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        p = await router.prepare_request(body)
+        sys_content = p["messages"][0]["content"]
+        assert "x-anthropic-billing-header" not in sys_content
+        assert "You are Claude Code." in sys_content
+
+    async def test_first_user_message_also_stripped(self, router: DeepProxyRouter):
+        body = {
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "user", "content": (
+                    "x-anthropic-foo: telemetry\nactual question"
+                )},
+            ],
+        }
+        p = await router.prepare_request(body)
+        # 找到第一条 user 消息（pipeline 可能在前面追加 system）
+        first_user = next(m for m in p["messages"] if m.get("role") == "user")
+        assert "x-anthropic-foo" not in first_user["content"]
+        assert "actual question" in first_user["content"]
+
+    async def test_disabled_by_config(self, cfg: ProxyConfig):
+        """关闭开关后 header 透传。"""
+        cfg.optimization.strip_client_telemetry = False
+        local_router = DeepProxyRouter(cfg)
+        body = {
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "system", "content": "x-anthropic-foo: keep\nbase"},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        p = await local_router.prepare_request(body)
+        assert "x-anthropic-foo: keep" in p["messages"][0]["content"]
+
+    async def test_no_op_when_no_telemetry(self, router: DeepProxyRouter):
+        """普通请求无 header 时，messages 内容除其它 skills 注入外保持稳定。"""
+        body = {
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "system", "content": "Plain system."},
+                {"role": "user", "content": "hello"},
+            ],
+        }
+        p = await router.prepare_request(body)
+        # 不抛、不丢失原文（注：其它 skills 可能在 system 头/尾追加，但保留 'Plain system.'）
+        assert "Plain system." in p["messages"][0]["content"]
