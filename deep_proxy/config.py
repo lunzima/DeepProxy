@@ -36,6 +36,16 @@ class OptimizationConfig(BaseModel):
     # 主开关
     enabled: bool = Field(default=True, description="是否启用提示词优化")
 
+    # 客户端 telemetry 剥离（独立于其它 skills 的清理步骤）
+    strip_client_telemetry: bool = Field(
+        default=True,
+        description="剥离客户端在 system / 首条 user 消息中嵌入的 telemetry header 行"
+                    "（如 Claude Code 2.1.42+ 的 x-anthropic-billing-header）。"
+                    "这些行含 session hash，每次新会话变化，破坏 DeepSeek prefix cache。"
+                    "默认开启；与 optimization.enabled 独立——即便其它 skills 全部关闭，"
+                    "本步骤仍可单独执行（仅依赖 enabled 主开关与本字段同时为 true）。",
+    )
+
     # ===========================================================
     # 元功能：LLM-based system prompt 压缩（首次调一次 LLM，结果持久化到磁盘）
     # ===========================================================
