@@ -400,11 +400,24 @@ class ModelRoute(BaseModel):
 def normalize_legacy_config(raw: dict) -> dict:
     """老格式 config.yaml → 新格式（providers + ports）的加载期 normalize。
 
-    检测：raw 不含 providers 或 ports → 老格式 → 注入双端口都走 deepseek 的默认值。
-    新格式直接 passthrough。
+    检测：
+    - 同时含 providers + ports → 新格式，原样返回（不修改 raw）
+    - 都不含 → 老格式，注入双端口都走 deepseek 的默认值（mutates raw in place）
+    - 仅含其中一个 → 半新格式，无法判断意图，抛 ValueError
+
+    幂等性：首次调用注入 providers/ports 后，再次调用走 passthrough，无副作用。
     """
-    if "providers" in raw and "ports" in raw:
+    has_providers = "providers" in raw
+    has_ports = "ports" in raw
+    if has_providers and has_ports:
         return raw
+    if has_providers != has_ports:
+        missing = "ports" if has_providers else "providers"
+        present = "providers" if has_providers else "ports"
+        raise ValueError(
+            f"config 含 {present} 但缺少 {missing}；"
+            f"新格式需要同时提供 providers + ports。"
+        )
 
     deepseek_legacy = raw.get("deepseek") or {}
     raw["providers"] = {

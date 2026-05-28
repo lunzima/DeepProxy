@@ -121,3 +121,16 @@ def test_normalize_legacy_config_passthrough_when_new_format():
     }
     normalized = normalize_legacy_config(raw)
     assert normalized is raw  # 已是新格式，原样返回
+
+
+def test_normalize_legacy_config_rejects_providers_without_ports():
+    raw = {"providers": {"x": {"name": "x", "api_base": "y", "api_key": "z",
+                               "litellm_prefix": "deepseek/", "flash_model": "a", "pro_model": "b"}}}
+    with pytest.raises(ValueError, match="缺少 ports"):
+        normalize_legacy_config(raw)
+
+
+def test_normalize_legacy_config_rejects_ports_without_providers():
+    raw = {"ports": [{"port": 8000, "provider": "x", "sampling": "precise"}]}
+    with pytest.raises(ValueError, match="缺少 providers"):
+        normalize_legacy_config(raw)
