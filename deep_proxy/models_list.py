@@ -28,6 +28,7 @@ from .clone_models import CLONE_MODELS
 from .deepseek_models import DEEPSEEK_MODELS, V4_MODELS, V4_MODELS_1M
 from .deepseek_pricing import _V4_CONTEXT_WINDOW, _V4_MAX_OUTPUT, model_pricing
 from .litellm_client import _to_litellm_api_base
+from .providers import Provider
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ def _build_display_name(model_id: str) -> str:
     return " ".join(parts)
 
 
-def normalize_model_entry(entry: Dict[str, Any], *, provider: Any = None) -> Dict[str, Any]:
+def normalize_model_entry(entry: Dict[str, Any], *, provider: Provider | None = None) -> Dict[str, Any]:
     """统一模型条目（同时覆盖 OpenAI / OpenRouter / Anthropic 三种生态字段）。
 
     provider 给定时使用该 provider 的默认上下文/输出/owned_by/pricing；否则走 DeepSeek 默认。
@@ -190,7 +191,7 @@ def build_models_list(
     *,
     expose_legacy_models: bool = False,
     model_routes: list[Dict[str, Any]] | None = None,
-    provider: Any = None,
+    provider: Provider | None = None,
 ) -> list[Dict[str, Any]]:
     """按 provider 派发模型列表。
 
@@ -202,7 +203,8 @@ def build_models_list(
     同时携带 OpenAI/OpenRouter 与 Anthropic 两套字段。
     """
     if provider is not None and provider.name == "mimo":
-        return _build_mimo_models_list()
+        from .mimo_models import MIMO_MODELS
+        return [normalize_model_entry(m, provider=provider) for m in MIMO_MODELS.values()]
 
     # DeepSeek path: 现有逻辑，provider 透传到每个 normalize 调用
     if not raw:
@@ -245,19 +247,3 @@ def build_models_list(
             seen.add(model_name)
 
     return models
-
-
-def _build_mimo_models_list() -> list[Dict[str, Any]]:
-    """MiMo 模型列表：仅真实模型 + 上下文/定价元数据，不混合仿冒别名。"""
-    from .mimo_models import MIMO_MODELS
-    from .providers import Provider
-    mimo_provider = Provider(
-        name="mimo",
-        api_base="",
-        api_key="",
-        litellm_prefix="openai/",
-        flash_model="mimo-v2.5",
-        pro_model="mimo-v2.5-pro",
-        max_output_tokens=128_000,
-    )
-    return [normalize_model_entry(m, provider=mimo_provider) for m in MIMO_MODELS.values()]

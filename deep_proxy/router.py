@@ -37,6 +37,7 @@ from .compatibility.reasoning_handler import (
     process_reasoning_response,
 )
 from .config import ProxyConfig, CreativeSamplingConfig
+from .providers import Provider
 from .utils import SSE_DONE, append_to_system_message, prepend_to_system_message
 from .litellm_client import call_litellm, iter_litellm_chunks, _to_litellm_api_base
 from .models_list import build_models_list, fetch_upstream_models
@@ -116,7 +117,7 @@ class DeepProxyRouter:
         body: dict[str, Any],
         *,
         sampling_profile: Any = None,
-        provider: Any = None,  # Provider 或 None；None 时走 deepseek 兼容行为
+        provider: Provider | None = None,  # None 时走 deepseek 兼容行为
     ) -> dict[str, Any]:
         """聊天补全请求预处理管道。
 
@@ -316,10 +317,7 @@ class DeepProxyRouter:
         #     使角色的情感推理真实化，输出自然带体温。
         #     注入位置：最后一条 user 消息末尾（与 V4 训练时的注入位置一致）。
         #     idempotent：已有 marker 则跳过。
-        is_deepseek_path = (
-            provider is None  # 老路径默认 deepseek
-            or (provider is not None and provider.name == "deepseek")
-        )
+        is_deepseek_path = provider is None or provider.name == "deepseek"
         if (
             is_deepseek_path
             and self.config.optimization.enabled
@@ -342,7 +340,6 @@ class DeepProxyRouter:
             if messages:
                 body = ensure_reasoning_content_persistence(
                     messages, body, cache=self._reasoning_cache,
-                    has_reasoning_content=True,
                 )
 
         # 9. Cross-Consult 工具注入（在所有 skills 之后，避免改变 has_tools 影响其它步骤）
@@ -411,7 +408,7 @@ class DeepProxyRouter:
         self,
         body: dict[str, Any],
         *,
-        provider: Any = None,
+        provider: Provider | None = None,
     ) -> None:
         """Flash→Pro 升格路由主逻辑（Layer 0–3，全部 upfront）。
 
@@ -516,14 +513,14 @@ class DeepProxyRouter:
             self._stash_pending_upgrade(body, messages, cfg.persist_turns, provider_name=provider_name)
 
     def process_response(
-        self, response: dict[str, Any], *, provider: Any = None,
+        self, response: dict[str, Any], *, provider: Provider | None = None,
     ) -> dict[str, Any]:
         has_rc = (
             provider.has_reasoning_content if provider is not None
             else self.config.deepseek.enable_reasoning
         )
         if has_rc:
-            response = process_reasoning_response(response, has_reasoning_content=True)
+            response = process_reasoning_response(response)
         return response
 
     # ------------------------------------------------------------------
@@ -531,7 +528,7 @@ class DeepProxyRouter:
     # ------------------------------------------------------------------
 
     async def chat_completions(
-        self, body: dict[str, Any], *, provider: Any = None,
+        self, body: dict[str, Any], *, provider: Provider | None = None,
     ) -> dict[str, Any]:
         request_messages = list(body.get("messages") or [])
         # 是否需要剥离 CoT Reflection 标签（由 apply_cheap_optimizations 在 prepare_request 时打的标）
@@ -563,7 +560,7 @@ class DeepProxyRouter:
         return result
 
     async def iter_chat_chunks(
-        self, body: dict[str, Any], *, provider: Any = None,
+        self, body: dict[str, Any], *, provider: Provider | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """业务层流式 chunk 流（dict 形态）。
 
@@ -677,7 +674,7 @@ class DeepProxyRouter:
                 self._commit_pending_upgrade(body)
 
     async def chat_completions_stream(
-        self, body: dict[str, Any], *, provider: Any = None,
+        self, body: dict[str, Any], *, provider: Provider | None = None,
     ) -> AsyncGenerator[str, None]:
         """OpenAI 协议层流式输出：iter_chat_chunks → SSE 字符串。
 
@@ -690,7 +687,7 @@ class DeepProxyRouter:
                 return
         yield SSE_DONE
 
-    async def list_models(self, *, provider: Any = None) -> dict[str, Any]:
+    async def list_models(self, *, provider: Provider | None = None) -> dict[str, Any]:
         """列出可用模型（同时兼容 OpenAI / OpenRouter / Anthropic 三种生态）。
 
         provider 给定时按 provider 派发列表：

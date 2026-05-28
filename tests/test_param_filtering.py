@@ -1,4 +1,4 @@
-"""测试 strip_unsupported_params + deepseek_specific_adjustments。
+"""测试 strip_unsupported_params。
 
 注：经核对官方文档，V4 全面支持 temperature/top_p/.../response_format，
 不再按 thinking 模式做特殊剥离。

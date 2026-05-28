@@ -28,6 +28,7 @@ from .compatibility.reasoning_handler import (
 )
 from .compatibility.error_mapper import map_litellm_error
 from .config import ProxyConfig
+from .providers import Provider
 from .utils import retry_async, strip_api_version
 
 logger = logging.getLogger(__name__)
@@ -109,8 +110,8 @@ def _ensure_string_content(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
     return out
 
 
-def _clean_response_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """清理非标准/null 字段，避免严格 schema 校验报错。
+def _clean_response_payload(payload: Dict[str, Any]) -> None:
+    """原地清理非标准/null 字段，避免严格 schema 校验报错。
 
     LiteLLM 输出常见问题：
     - 顶层 `provider_specific_fields` / `citations` / `service_tier` 等非标准字段
@@ -120,7 +121,7 @@ def _clean_response_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     - 流式 delta 偶尔出现 `role: null` / `content: null`
     """
     if not isinstance(payload, dict):
-        return payload
+        return
     # 顶层非标准字段一律去掉
     for k in _NON_STANDARD_TOP_FIELDS:
         payload.pop(k, None)
@@ -140,7 +141,6 @@ def _clean_response_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                     if slot_key == "message" and k == "content":
                         continue
                     slot.pop(k, None)
-    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +161,7 @@ def _assemble_litellm_body(
     config: ProxyConfig,
     *,
     stream: bool = False,
-    provider: Any = None,
+    provider: Provider | None = None,
 ) -> Dict[str, Any]:
     """从业务 body 组装 LiteLLM 调用参数（共享于流式/非流式路径）。
 
@@ -218,7 +218,7 @@ async def call_litellm(
     config: ProxyConfig,
     body: Dict[str, Any],
     *,
-    provider: Any = None,
+    provider: Provider | None = None,
 ) -> Dict[str, Any]:
     """非流式 LiteLLM 调用 + 重试 + 响应清理。"""
     import litellm
@@ -253,7 +253,7 @@ async def iter_litellm_chunks(
     body: Dict[str, Any],
     *,
     _accumulator: StreamingReasoningAccumulator | None = None,
-    provider: Any = None,
+    provider: Provider | None = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """业务层流式产出 dict 流。
 
@@ -283,7 +283,11 @@ async def iter_litellm_chunks(
         yield {"error": _build_error_dict(e)}
         return
 
-    enable_reasoning = config.deepseek.enable_reasoning
+    # provider 给定时按 provider.has_reasoning_content；否则 fallback 到老 config 字段
+    enable_reasoning = (
+        provider.has_reasoning_content if provider is not None
+        else config.deepseek.enable_reasoning
+    )
     try:
         async for chunk in response:
             chunk_dict = chunk.model_dump() if hasattr(chunk, "model_dump") else dict(chunk)

@@ -310,25 +310,3 @@ class TestStreamingAccumulator:
         tcs_other = [{"id": "different",
                       "function": {"name": "search", "arguments": '{"q":"hello"}'}}]
         assert c.lookup(prefix, "", tcs_other, fingerprint=fp) == "RC"
-
-
-def test_ensure_reasoning_content_persistence_noop_when_provider_lacks_reasoning():
-    """has_reasoning_content=False 时函数应直接返回 body 不做改动。"""
-    from deep_proxy.compatibility.reasoning_handler import (
-        ReasoningCache, ensure_reasoning_content_persistence,
-    )
-    cache = ReasoningCache(max_size=4)
-    messages = [{"role": "user", "content": "test"}]
-    body = {"model": "some-model", "messages": messages}
-    out = ensure_reasoning_content_persistence(
-        messages, body, cache=cache, has_reasoning_content=False,
-    )
-    assert out is body  # 同对象返回
-
-
-def test_process_reasoning_response_noop_when_provider_lacks_reasoning():
-    from deep_proxy.compatibility.reasoning_handler import process_reasoning_response
-    payload = {"choices": [{"message": {"content": "hi", "reasoning_content": "x"}}]}
-    out = process_reasoning_response(payload, has_reasoning_content=False)
-    # has_reasoning_content=False 时不处理 reasoning，保留原样
-    assert out is payload

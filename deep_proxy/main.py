@@ -67,8 +67,10 @@ async def lifespan(app: FastAPI):
             cache_abs = _P(config.optimization.compressor_cache_path).resolve()
             logger.info("压缩缓存文件路径: %s", cache_abs)
 
-    if not config.deepseek.api_key:
-        logger.warning("未设置 DEEPSEEK_API_KEY！请通过环境变量或配置文件设置。")
+    # 检查每个配置的 provider 是否有 api_key（多 provider 路径）
+    for name, prov in config.providers.items():
+        if not prov.api_key:
+            logger.warning("provider %s 未设置 api_key！请通过 config.yaml 或环境变量配置。", name)
 
     logger.info(
         "DeepProxy 启动完成 — 监听 %s:%s (coding/precise) + %s:%s (writing/creative, basket=%s)",
@@ -86,7 +88,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="DeepProxy",
-    description="提升 DeepSeek 官方 API 兼容性的代理服务器",
+    description="多 provider FastAPI 代理（DeepSeek + MiMo + cross_consult）",
     version="0.1.0",
     lifespan=lifespan,
 )
