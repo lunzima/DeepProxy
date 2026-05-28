@@ -263,3 +263,139 @@ async def test_resend_loop_forces_stream_false_even_when_body_has_stream_true(cf
             f"resend body assembled with stream={c['stream_in_assembled']} "
             f"(body had stream={c['stream_in_body']}); C2 not fixed"
         )
+
+
+async def test_loop_calls_process_response_on_each_iteration(cfg_cross):
+    """C3 regression: 每次重发响应都应过 process_response 再 append 到 history。"""
+    from deep_proxy.cross_consult.interceptor import execute_cross_consult_loop
+    import json
+
+    process_calls = []
+
+    def fake_process_response(resp, *, provider=None):
+        process_calls.append(resp)
+        return resp
+
+    main_responses = [
+        {  # second response after consult: another cross_consult call
+            "choices": [{
+                "message": {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{
+                        "id": "tc2", "type": "function",
+                        "function": {"name": "cross_consult",
+                                     "arguments": json.dumps({"question": "q2"})},
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+        },
+        {  # final
+            "choices": [{
+                "message": {"role": "assistant", "content": "done"},
+                "finish_reason": "stop",
+            }],
+        },
+    ]
+
+    async def fake_call(config, body, *, provider=None):
+        return main_responses.pop(0)
+
+    async def fake_consult(*args, **kwargs):
+        return "external"
+
+    initial = {  # first response: cross_consult call
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{
+                    "id": "tc1", "type": "function",
+                    "function": {"name": "cross_consult",
+                                 "arguments": json.dumps({"question": "q1"})},
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+    }
+
+    from unittest.mock import patch
+    with patch("deep_proxy.cross_consult.interceptor.execute_consult",
+               side_effect=fake_consult):
+        body = {"model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "go"}],
+                "stream": False}
+        await execute_cross_consult_loop(
+            body=body,
+            initial_response=initial,
+            source_provider=cfg_cross.providers["deepseek"],
+            config=cfg_cross,
+            cc_config=cfg_cross.cross_consult,
+            call_litellm_fn=fake_call,
+            process_response_fn=fake_process_response,
+        )
+
+    # fake_process_response should be called on each re-call response (2 re-calls)
+    assert len(process_calls) == 2, f"expected 2 process_response invocations, got {len(process_calls)}"
+
+
+async def test_streaming_final_chunk_includes_reasoning_content_when_present(cfg_cross):
+    """I4 regression: 流式 cross_consult 合成 chunk 应保留 reasoning_content。"""
+    from deep_proxy.router import DeepProxyRouter
+    import json
+    from unittest.mock import AsyncMock, patch
+
+    router = DeepProxyRouter(cfg_cross)
+    provider = cfg_cross.providers["deepseek"]
+
+    stream_chunks = [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [{
+            "index": 0, "id": "tc1", "type": "function",
+            "function": {"name": "cross_consult", "arguments": '{"question":"q"}'},
+        }]}, "finish_reason": None}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+
+    async def fake_iter(*args, **kwargs):
+        for c in stream_chunks:
+            yield c
+
+    final_with_reasoning = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "final content",
+                "reasoning_content": "step by step thinking",
+            },
+            "finish_reason": "stop",
+        }],
+    }
+
+    async def fake_call(config, body, *, provider=None):
+        return final_with_reasoning
+
+    async def fake_consult_call(*args, **kwargs):
+        return final_with_reasoning
+
+    with patch("deep_proxy.router.iter_litellm_chunks", new=fake_iter), \
+         patch("deep_proxy.router.call_litellm", new=AsyncMock(side_effect=fake_call)), \
+         patch("deep_proxy.cross_consult.executor.call_litellm",
+               new=AsyncMock(return_value=final_with_reasoning)):
+        body = {"model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "go"}],
+                "stream": True}
+        body = await router.prepare_request(
+            body, sampling_profile=cfg_cross.precise_sampling, provider=provider,
+        )
+        out_chunks = []
+        async for chunk in router.iter_chat_chunks(body, provider=provider):
+            out_chunks.append(chunk)
+
+    # 最终 chunk 应包含 reasoning_content
+    reasoning_emitted = False
+    for c in out_chunks:
+        for ch in c.get("choices") or []:
+            d = ch.get("delta") or {}
+            if d.get("reasoning_content") == "step by step thinking":
+                reasoning_emitted = True
+    assert reasoning_emitted, "streaming final chunk dropped reasoning_content"

@@ -551,6 +551,7 @@ class DeepProxyRouter:
                 config=self.config,
                 cc_config=self.config.cross_consult,
                 call_litellm_fn=call_litellm,
+                process_response_fn=self.process_response,
             )
             result = self.process_response(result, provider=provider)
         if strip_cot:
@@ -655,13 +656,20 @@ class DeepProxyRouter:
                         source_provider=provider, config=self.config,
                         cc_config=self.config.cross_consult,
                         call_litellm_fn=call_litellm,
+                        process_response_fn=self.process_response,
                     )
                     final_result = self.process_response(final_result, provider=provider)
                     msg = (final_result.get("choices") or [{}])[0].get("message") or {}
+                    delta = {"role": "assistant", "content": msg.get("content", "")}
+                    if msg.get("reasoning_content"):
+                        delta["reasoning_content"] = msg["reasoning_content"]
+                        delta["reasoning"] = msg["reasoning_content"]
+                    if msg.get("tool_calls"):
+                        delta["tool_calls"] = msg["tool_calls"]
                     yield {
                         "choices": [{
                             "index": 0,
-                            "delta": {"role": "assistant", "content": msg.get("content", "")},
+                            "delta": delta,
                             "finish_reason": "stop",
                         }],
                     }

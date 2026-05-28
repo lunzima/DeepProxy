@@ -105,6 +105,7 @@ async def execute_cross_consult_loop(
     config: ProxyConfig,
     cc_config: CrossConsultConfig,
     call_litellm_fn,
+    process_response_fn=None,  # 可选：每次重发响应过 process_response 再继续
 ) -> dict[str, Any]:
     """响应路径循环（非流式）。
 
@@ -178,6 +179,8 @@ async def execute_cross_consult_loop(
 
         # 重发原 provider
         response = await call_litellm_fn(config, body, provider=source_provider)
+        if process_response_fn is not None:
+            response = process_response_fn(response, provider=source_provider)
 
     # 达到硬上限（防无限循环）——返回最后一次响应
     logger.warning(
