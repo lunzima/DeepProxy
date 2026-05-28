@@ -165,6 +165,9 @@ class UpgradeTracker:
         `len_now <= last_len`，counter 永远不递减，对话锁死在 Pro。
       - last user 消息 hash 只反映"是否进入下一轮"，对结构变化稳健。
 
+    存储键为 (fingerprint, last_user_hash, provider)，provider 维度确保同一对话
+    在不同 provider（deepseek / mimo）下的升格状态互不干扰。
+
     Examples:
         >>> tracker = UpgradeTracker()
         >>> msgs = [{"role": "user", "content": "写个排序算法"}]
@@ -178,45 +181,64 @@ class UpgradeTracker:
     """
 
     def __init__(self, max_size: int = 512):
-        # value = (remaining_turns, last_user_hash)
-        self._sessions: OrderedDict[str, Tuple[int, str]] = OrderedDict()
+        # key = (fingerprint, last_user_hash, provider)
+        # value = remaining_turns
+        self._sessions: OrderedDict[Tuple[str, str, str], int] = OrderedDict()
         self._max = max_size
 
     # -- 公开 API --
 
-    def clear(self, messages: List[Dict[str, Any]]) -> None:
+    def clear(self, messages: List[Dict[str, Any]], *, provider: str = "deepseek") -> None:
         """主动清除当前对话的升格状态（throttle 触发时同步调用）。
 
         必要性：throttle 在 router._maybe_upgrade Step 5 触发，但 Step 2
         cache hit 早于 Step 5，下一轮 is_upgraded() 会越过 throttle 直走 Pro。
         清掉 entry 让 throttle 的 cooldown 真正生效。
         """
-        fp = conversation_fingerprint(messages)
-        self._sessions.pop(fp, None)
+        fp, last_h = conversation_fingerprint(messages), _last_user_hash(messages)
+        key = (fp, last_h, provider)
+        self._sessions.pop(key, None)
 
-    def is_upgraded(self, messages: List[Dict[str, Any]]) -> bool:
+    def is_upgraded(self, messages: List[Dict[str, Any]], *, provider: str = "deepseek") -> bool:
         """当前对话是否处于升格状态。
 
         副作用：如果这是新轮次（最后 user 消息发生变化），消耗 1 轮剩余额度。
         """
         fp = conversation_fingerprint(messages)
-        entry = self._sessions.get(fp)
-        if entry is None:
+        current_hash = _last_user_hash(messages)
+
+        # 先检查当前 last_user_hash 的 key
+        key = (fp, current_hash, provider)
+        if key in self._sessions:
+            remaining = self._sessions[key]
+            if remaining <= 0:
+                del self._sessions[key]
+                return False
+            return True
+
+        # 检查是否存在同一 fp + provider 但 last_hash 不同的 entry（新轮次）
+        # 遍历所有 key 找匹配 fp + provider
+        stale_key = None
+        for k in list(self._sessions.keys()):
+            if k[0] == fp and k[2] == provider and k[1] != current_hash:
+                stale_key = k
+                break
+
+        if stale_key is None:
             return False
 
-        remaining, last_hash = entry
-        current_hash = _last_user_hash(messages)
-        is_new_turn = current_hash != last_hash
-        if is_new_turn:
-            remaining -= 1
+        remaining = self._sessions[stale_key] - 1  # 新轮次消耗 1
+        del self._sessions[stale_key]
         if remaining <= 0:
-            del self._sessions[fp]
             return False
-        if is_new_turn:
-            self._sessions[fp] = (remaining, current_hash)
+        # 写入新的 last_user_hash key
+        new_key = (fp, current_hash, provider)
+        self._sessions[new_key] = remaining
+        while len(self._sessions) > self._max:
+            self._sessions.popitem(last=False)
         return True
 
-    def set_remaining(self, messages: List[Dict[str, Any]], turns: int) -> None:
+    def set_remaining(self, messages: List[Dict[str, Any]], turns: int, *, provider: str = "deepseek") -> None:
         """升格触发后记录剩余 Pro 轮次。
 
         Args:
@@ -227,10 +249,11 @@ class UpgradeTracker:
             conversation_fingerprint(messages),
             _last_user_hash(messages),
             turns,
+            provider=provider,
         )
 
     def set_remaining_by_key(
-        self, fingerprint: str, last_user_hash: str, turns: int
+        self, fingerprint: str, last_user_hash: str, turns: int, *, provider: str = "deepseek"
     ) -> None:
         """低层入口：用预计算的 fingerprint + last_user_hash 写入。
 
@@ -238,7 +261,8 @@ class UpgradeTracker:
         待上游成功后用这两个键提交，避免 messages 在 skills 阶段被改写
         后键失配。
         """
-        self._sessions[fingerprint] = (turns, last_user_hash)
+        key = (fingerprint, last_user_hash, provider)
+        self._sessions[key] = turns
         while len(self._sessions) > self._max:
             self._sessions.popitem(last=False)
 
@@ -247,13 +271,12 @@ class UpgradeTracker:
         """计算 (fingerprint, last_user_hash) 二元组，供延迟提交场景使用。"""
         return conversation_fingerprint(messages), _last_user_hash(messages)
 
-    def remaining(self, messages: List[Dict[str, Any]]) -> int:
+    def remaining(self, messages: List[Dict[str, Any]], *, provider: str = "deepseek") -> int:
         """查询剩余 Pro 轮次（只读，不消耗）。"""
         fp = conversation_fingerprint(messages)
-        entry = self._sessions.get(fp)
-        if entry is None:
-            return 0
-        return entry[0]
+        current_hash = _last_user_hash(messages)
+        key = (fp, current_hash, provider)
+        return self._sessions.get(key, 0)
 
     # -- 管理 --
 

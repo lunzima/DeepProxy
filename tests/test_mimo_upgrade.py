@@ -44,3 +44,21 @@ async def test_maybe_upgrade_uses_provider_pro_model(
     )
     # sentinel 应将其升格到 mimo-v2.5-pro（而不是 deepseek-v4-pro）
     assert body["model"] == provider_mimo.pro_model, f"unexpected model: {body['model']}"
+
+
+async def test_upgrade_state_isolated_across_providers(
+    router_dual, provider_deepseek, provider_mimo,
+):
+    """同一对话指纹在 deepseek 升格后，切到 mimo 时不应残留升格状态。"""
+    msgs = [{"role": "user", "content": "复杂任务" * 200}]
+
+    # 1) 在 deepseek 名下注入升格状态
+    fp, last_h = router_dual._upgrade_tracker.snapshot_keys(msgs)
+    router_dual._upgrade_tracker.set_remaining_by_key(
+        fp, last_h, 2, provider="deepseek",
+    )
+
+    # 2) 切到 mimo 同样的 msgs：升格 tracker 不应命中
+    assert not router_dual._upgrade_tracker.is_upgraded(msgs, provider="mimo")
+    # deepseek 那边仍命中
+    assert router_dual._upgrade_tracker.is_upgraded(msgs, provider="deepseek")

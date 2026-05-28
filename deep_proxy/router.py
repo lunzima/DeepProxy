@@ -350,7 +350,8 @@ class DeepProxyRouter:
         return create_router("rule")
 
     def _stash_pending_upgrade(
-        self, body: dict[str, Any], messages: list[dict[str, Any]], turns: int
+        self, body: dict[str, Any], messages: list[dict[str, Any]], turns: int,
+        *, provider_name: str = "deepseek",
     ) -> None:
         """快照 fingerprint + last_user_hash，等上游成功后再 commit。
 
@@ -366,6 +367,7 @@ class DeepProxyRouter:
             "fingerprint": fp,
             "last_user_hash": last_user_h,
             "turns": turns,
+            "provider": provider_name,
         }
 
     def _commit_pending_upgrade(self, body: dict[str, Any]) -> None:
@@ -375,6 +377,7 @@ class DeepProxyRouter:
             return
         self._upgrade_tracker.set_remaining_by_key(
             pending["fingerprint"], pending["last_user_hash"], pending["turns"],
+            provider=pending.get("provider", "deepseek"),
         )
 
     def _maybe_upgrade(
@@ -406,11 +409,13 @@ class DeepProxyRouter:
         if provider is not None:
             pro_model = provider.pro_model
             flash_model = provider.flash_model
+            provider_name = provider.name
             router_thr = cfg.threshold_for_provider(provider.name, "router_threshold")
             heur_thr = cfg.threshold_for_provider(provider.name, "heuristic_threshold")
         else:
             pro_model = V4_PRO
             flash_model = V4_FLASH
+            provider_name = "deepseek"
             router_thr = cfg.router_threshold
             heur_thr = cfg.heuristic_threshold
 
@@ -418,7 +423,7 @@ class DeepProxyRouter:
         if has_upgrade_sentinel(messages) or extra_body_requests_upgrade(body):
             logger.info("Sentinel 强制升格 → %s", pro_model)
             body["model"] = pro_model
-            self._stash_pending_upgrade(body, messages, cfg.persist_turns)
+            self._stash_pending_upgrade(body, messages, cfg.persist_turns, provider_name=provider_name)
             return
 
         # ── Step 2: 对话已处于升格状态（Layer 3 持久化） ──
@@ -426,12 +431,12 @@ class DeepProxyRouter:
         # 不能让 persist cache 越过 throttle。
         if self._upgrade_throttle.in_cooldown(messages):
             self._upgrade_throttle.should_throttle(messages, False)  # 推进冷却计数
-            self._upgrade_tracker.clear(messages)
+            self._upgrade_tracker.clear(messages, provider=provider_name)
             logger.info("升格限流冷却中 → 强制 %s", flash_model)
             return
 
-        if self._upgrade_tracker.is_upgraded(messages):
-            remaining = self._upgrade_tracker.remaining(messages)
+        if self._upgrade_tracker.is_upgraded(messages, provider=provider_name):
+            remaining = self._upgrade_tracker.remaining(messages, provider=provider_name)
             logger.info("持久升格命中 → %s（剩余 %d 轮）", pro_model, remaining)
             body["model"] = pro_model
             return
@@ -453,7 +458,7 @@ class DeepProxyRouter:
                     "Router 升格: score=%.3f >= threshold=%.2f provider=%s"
                     "(heuristic=%.1f/10, user_msgs=%d, user_chars=%d)",
                     router_score, router_thr,
-                    (provider.name if provider is not None else "deepseek"),
+                    provider_name,
                     heuristic_result.score, heuristic_result.user_msg_count, len(heuristic_result.user_text),
                 )
                 did_upgrade = True
@@ -471,7 +476,7 @@ class DeepProxyRouter:
                 did_upgrade = False
                 # 同步清掉持久升格 entry，否则下一轮 Step 2 会越过 throttle
                 # 直接走 Pro，使 cooldown 失效。
-                self._upgrade_tracker.clear(messages)
+                self._upgrade_tracker.clear(messages, provider=provider_name)
                 logger.info(
                     "升格限流: 连续 %d 次触发 → 强制 Flash（冷却 %d 轮）",
                     self._upgrade_throttle._max, self._upgrade_throttle._cooldown,
@@ -481,7 +486,7 @@ class DeepProxyRouter:
 
         if did_upgrade:
             body["model"] = pro_model
-            self._stash_pending_upgrade(body, messages, cfg.persist_turns)
+            self._stash_pending_upgrade(body, messages, cfg.persist_turns, provider_name=provider_name)
 
     def process_response(
         self, response: dict[str, Any], *, provider: Any = None,
