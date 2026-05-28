@@ -23,14 +23,17 @@
 客户端 (OpenAI SDK / Anthropic SDK) ──→ DeepProxy (:8000 / :8001)
   ├─ [兼容层] 参数过滤 / 老模型别名 / reasoning / 错误映射 / Anthropic↔OpenAI 翻译
   ├─ [模型层] 三生态 /v1/models（OpenAI/OpenRouter/Anthropic 同条目共存：定价 / 上下文长度 / display_name / 仿冒别名）
-  ├─ [升格层] Flash→Pro 选择路由器（BERT 二分类 + 启发式快速路径）
+  ├─ [升格层] Flash→Pro 选择路由器（BERT 二分类 + 启发式快速路径，per-provider 阈值）
   ├─ [优化层] In-process 提示词 skills（0 额外 LLM 调用）
-  └─ [路由层] LiteLLM ──→ DeepSeek API (api.deepseek.com)
+  └─ [路由层] LiteLLM ──┬──→ DeepSeek API (api.deepseek.com)        # :8000 coding/precise
+                        └──→ MiMo API (token-plan-cn.xiaomimimo.com) # :8001 writing/creative
 ```
 
 DeepProxy 绑定**两个端口**，共享同一个 FastAPI app 实例：
 - **coding_port** (默认 `8000`) → `PreciseSamplingConfig`（高确定性，code/math/逻辑）
 - **writing_port** (默认 `8001`) → `CreativeSamplingConfig`（高多样性，RP/创作/写作）
+
+**多 provider 路由**（v0.2+）：每个 port 在配置中绑定一个 provider；coding_port 走 DeepSeek，writing_port 走 MiMo (`mimo-v2.5` / `mimo-v2.5-pro`)。flash_upgrade 路由复用同一 BERT checkpoint，按 per-provider 阈值与 `pro_model` 工作。`/v1/models` 每个 port 仅返回该 port 绑定 provider 的模型列表。老 `config.yaml` 不写 `providers`/`ports` 时通过 `normalize_legacy_config` 自动迁移到新结构（双端口都打 DeepSeek，向后兼容）。
 
 ## Building and Running
 
@@ -124,10 +127,15 @@ D:\deepproxy\
 │   ├── deepseek_models.py     # 真实模型列表 + 仿冒别名映射
 │   ├── deepseek_pricing.py    # USD / CNY 定价数据
 │   ├── clone_models.py        # 仿冒模型条目生成
+│   ├── mimo_models.py         # MiMo 真实模型列表（self-contained）
+│   ├── mimo_pricing.py        # MiMo USD/CNY 定价表（self-contained）
+│   ├── providers.py           # Provider / PortBinding pydantic 模型
 │   ├── utils.py               # 共享工具函数（8 个）
 │   ├── compatibility/
 │   │   ├── __init__.py
+│   │   ├── base.py                # 跨 provider 共享规范化（sanitize_stream_options 等）
 │   │   ├── deepseek_fixes.py      # 模型名规范化/别名映射/stream_options
+│   │   ├── mimo_fixes.py          # MiMo 顶层 reasoning_effort 注入
 │   │   ├── reasoning_handler.py   # reasoning_content 处理 + 缓存
 │   │   ├── error_mapper.py        # 参数过滤 + 错误映射
 │   │   └── anthropic_translator.py # Anthropic Messages API ↔ OpenAI 翻译层
