@@ -478,6 +478,23 @@ class ProxyConfig(BaseModel):
         description="端口绑定列表。空时退回 coding_port/writing_port 老格式（双端口都走 deepseek）。",
     )
 
+    def provider_for_port(self, port: int) -> Provider | None:
+        """按入站端口查找绑定的 Provider；端口未配置返回 None。"""
+        for binding in self.ports:
+            if binding.port == port:
+                return self.providers.get(binding.provider)
+        return None
+
+    def sampling_profile_for_port(self, port: int):
+        """按入站端口查找 sampling profile（precise 或 creative）；未配置返回 None。"""
+        for binding in self.ports:
+            if binding.port == port:
+                if binding.sampling == "precise":
+                    return self.precise_sampling
+                if binding.sampling == "creative":
+                    return self.creative_sampling
+        return None
+
     @classmethod
     def discover_and_load(cls) -> "ProxyConfig":
         """按优先级搜索标准路径加载配置。

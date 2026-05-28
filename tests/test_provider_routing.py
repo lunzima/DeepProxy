@@ -134,3 +134,30 @@ def test_normalize_legacy_config_rejects_ports_without_providers():
     raw = {"ports": [{"port": 8000, "provider": "x", "sampling": "precise"}]}
     with pytest.raises(ValueError, match="缺少 providers"):
         normalize_legacy_config(raw)
+
+
+def test_proxyconfig_provider_for_port():
+    cfg = ProxyConfig.model_validate(normalize_legacy_config({
+        "coding_port": 8000,
+        "writing_port": 8001,
+        "deepseek": {"api_key": "sk"},
+    }))
+    p_coding = cfg.provider_for_port(8000)
+    assert p_coding is not None
+    assert p_coding.name == "deepseek"
+    p_writing = cfg.provider_for_port(8001)
+    assert p_writing.name == "deepseek"
+    assert cfg.provider_for_port(9999) is None
+
+
+def test_proxyconfig_sampling_profile_for_port():
+    cfg = ProxyConfig.model_validate(normalize_legacy_config({
+        "coding_port": 8000,
+        "writing_port": 8001,
+        "deepseek": {"api_key": "sk"},
+    }))
+    sp = cfg.sampling_profile_for_port(8000)
+    assert sp is cfg.precise_sampling
+    sw = cfg.sampling_profile_for_port(8001)
+    assert sw is cfg.creative_sampling
+    assert cfg.sampling_profile_for_port(9999) is None
