@@ -124,6 +124,29 @@ def main():
             "output_cost_per_token": _p["completion"] / 1_000_000,
         })
 
+    # -----------------------------------------------------------------------
+    # 注册 MiMo 模型到 LiteLLM 计价表（与 deepseek 注册相互独立）
+    # 消除 "This model isn't mapped yet" 错误警告
+    # -----------------------------------------------------------------------
+    from .mimo_pricing import (
+        _MIMO_PRICING as _MP,
+        _MIMO_CONTEXT_WINDOW as _MIMO_CTX,
+        _MIMO_MAX_OUTPUT as _MIMO_MXO,
+    )
+
+    for _model_name, _p in _MP.items():
+        # LiteLLM 用 provider/ 前缀做识别；MiMo 走 openai/ 前缀
+        full_name = f"openai/{_model_name}"
+        litellm.model_cost.setdefault(full_name, {
+            "max_tokens": _MIMO_MXO,
+            "max_input_tokens": _MIMO_CTX,
+            "max_output_tokens": _MIMO_MXO,
+            "litellm_provider": "openai",
+            "mode": "chat",
+            "input_cost_per_token": _p["prompt"] / 1_000_000,
+            "output_cost_per_token": _p["completion"] / 1_000_000,
+        })
+
     asyncio.run(_serve_both(
         host=config.host,
         coding_port=config.coding_port,
