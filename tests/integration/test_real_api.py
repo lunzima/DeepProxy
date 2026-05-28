@@ -108,5 +108,6 @@ class TestStreaming:
             chunks.append(chunk)
         assert chunks
         # 至少有一个 chunk 包含 reasoning_content（V4-Pro thinking）
-        joined = b"".join(chunks).decode("utf-8", errors="replace")
+        # chat_completions_stream 直接 yield SSE 文本（"data: {...}\n\n"），不是 bytes
+        joined = "".join(chunks)
         assert "reasoning_content" in joined or "reasoning" in joined
