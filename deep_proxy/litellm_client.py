@@ -43,25 +43,30 @@ _NON_STANDARD_TOP_FIELDS = ("provider_specific_fields", "citations", "service_ti
 _NULL_TO_OMIT_SLOT_FIELDS = ("tool_calls", "function_call", "role", "content")
 
 
-def _to_litellm_api_base(api_base: str) -> str:
+def _to_litellm_api_base(api_base: str, *, already_versioned: bool = False) -> str:
     """LiteLLM 的 deepseek provider 会做 `api_base + "/chat/completions"`；
     若 api_base 没有 `/v1` 或 `/beta` 后缀，最终 URL 会落在不存在的根路径上
     （governor 返回 401）。这里补齐到 `/v1`。
+
+    already_versioned=True 时跳过补齐，适用于已显式带 /v1 的 provider api_base。
     """
     if not api_base:
+        return api_base
+    if already_versioned:
         return api_base
     base = strip_api_version(api_base)
     return f"{base}/v1"
 
 
-def _to_litellm_model(model: str) -> str:
-    """LiteLLM 需要 `deepseek/<name>` 前缀来路由 provider；HTTP 调用前 SDK 会自动 strip。
+def _to_litellm_model(model: str, *, prefix: str = "deepseek/") -> str:
+    """LiteLLM 需要 provider 前缀来路由；HTTP 调用前 SDK 会自动 strip。
 
     我们内部 (cache / list_models / normalize) 都使用裸名，仅在调 LiteLLM 时附加前缀。
+    prefix 默认 "deepseek/"，可按 provider 覆盖（例如 "openai/"）。
     """
     if not model or "/" in model:
         return model
-    return f"deepseek/{model}"
+    return f"{prefix}{model}"
 
 
 def _is_retryable_litellm(exc: Exception) -> bool:
@@ -156,20 +161,39 @@ def _assemble_litellm_body(
     config: ProxyConfig,
     *,
     stream: bool = False,
+    provider: Any = None,
 ) -> Dict[str, Any]:
-    """从业务 body 组装 LiteLLM 调用参数（共享于流式/非流式路径）。"""
+    """从业务 body 组装 LiteLLM 调用参数（共享于流式/非流式路径）。
+
+    provider 给定时按该 provider 的 api_base/api_key/prefix 路由；
+    provider=None 时退回 config.deepseek.*（向后兼容老调用点与压缩器）。
+    """
     call_body = _strip_sentinels(body)
     if stream:
         call_body["stream"] = True
     call_body["messages"] = _ensure_string_content(call_body.get("messages", []))
-    call_body["model"] = _to_litellm_model(call_body.get("model", ""))
-    # 注：必须以 kwarg 形式传递 api_base —— LiteLLM 的 deepseek provider
-    # 忽略全局 `litellm.api_base`，无 kwarg 时回退到硬编码 `/beta`，导致
-    # URL 错位（governor 401）。
-    if config.deepseek.api_key:
-        call_body["api_key"] = config.deepseek.api_key
-    if config.deepseek.api_base:
-        call_body["api_base"] = _to_litellm_api_base(config.deepseek.api_base)
+
+    if provider is not None:
+        call_body["model"] = _to_litellm_model(
+            call_body.get("model", ""), prefix=provider.litellm_prefix,
+        )
+        if provider.api_key:
+            call_body["api_key"] = provider.api_key
+        if provider.api_base:
+            # api_base 已显式带 /v1 或 /beta 时跳过补齐
+            already = provider.api_base.rstrip("/").endswith(("/v1", "/beta"))
+            call_body["api_base"] = _to_litellm_api_base(
+                provider.api_base, already_versioned=already,
+            )
+    else:
+        # 注：必须以 kwarg 形式传递 api_base —— LiteLLM 的 deepseek provider
+        # 忽略全局 `litellm.api_base`，无 kwarg 时回退到硬编码 `/beta`，导致
+        # URL 错位（governor 401）。
+        call_body["model"] = _to_litellm_model(call_body.get("model", ""))
+        if config.deepseek.api_key:
+            call_body["api_key"] = config.deepseek.api_key
+        if config.deepseek.api_base:
+            call_body["api_base"] = _to_litellm_api_base(config.deepseek.api_base)
     return call_body
 
 
@@ -178,11 +202,16 @@ def _build_error_dict(e: Exception) -> dict:
     return map_litellm_error(e).detail.get("error", {"message": str(e)})
 
 
-async def call_litellm(config: ProxyConfig, body: Dict[str, Any]) -> Dict[str, Any]:
+async def call_litellm(
+    config: ProxyConfig,
+    body: Dict[str, Any],
+    *,
+    provider: Any = None,
+) -> Dict[str, Any]:
     """非流式 LiteLLM 调用 + 重试 + 响应清理。"""
     import litellm
 
-    call_body = _assemble_litellm_body(body, config)
+    call_body = _assemble_litellm_body(body, config, provider=provider)
 
     async def _do() -> Any:
         response = await litellm.acompletion(**call_body)
@@ -212,6 +241,7 @@ async def iter_litellm_chunks(
     body: Dict[str, Any],
     *,
     _accumulator: StreamingReasoningAccumulator | None = None,
+    provider: Any = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """业务层流式产出 dict 流。
 
@@ -222,7 +252,7 @@ async def iter_litellm_chunks(
     """
     import litellm
 
-    call_body = _assemble_litellm_body(body, config, stream=True)
+    call_body = _assemble_litellm_body(body, config, stream=True, provider=provider)
 
     # 连接建立期可重试（尚未开始向客户端 yield 任何 chunk）
     async def _open() -> Any:

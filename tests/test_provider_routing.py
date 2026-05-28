@@ -161,3 +161,39 @@ def test_proxyconfig_sampling_profile_for_port():
     sw = cfg.sampling_profile_for_port(8001)
     assert sw is cfg.creative_sampling
     assert cfg.sampling_profile_for_port(9999) is None
+
+
+def test_assemble_litellm_body_uses_provider_when_given():
+    from deep_proxy.config import ProxyConfig, normalize_legacy_config
+    from deep_proxy.providers import Provider
+    from deep_proxy.litellm_client import _assemble_litellm_body
+
+    cfg = ProxyConfig.model_validate(normalize_legacy_config({
+        "deepseek": {"api_key": "sk-default", "api_base": "https://api.deepseek.com"},
+    }))
+    mimo = Provider(
+        name="mimo",
+        api_base="https://token-plan-cn.xiaomimimo.com/v1",
+        api_key="tp-mimo",
+        litellm_prefix="openai/",
+        flash_model="mimo-v2.5",
+        pro_model="mimo-v2.5-pro",
+    )
+    body = {"model": "mimo-v2.5", "messages": [{"role": "user", "content": "hi"}]}
+    call_body = _assemble_litellm_body(body, cfg, provider=mimo)
+    assert call_body["api_key"] == "tp-mimo"
+    assert call_body["api_base"] == "https://token-plan-cn.xiaomimimo.com/v1"
+    assert call_body["model"] == "openai/mimo-v2.5"
+
+
+def test_assemble_litellm_body_falls_back_to_deepseek_when_no_provider():
+    from deep_proxy.config import ProxyConfig, normalize_legacy_config
+    from deep_proxy.litellm_client import _assemble_litellm_body
+
+    cfg = ProxyConfig.model_validate(normalize_legacy_config({
+        "deepseek": {"api_key": "sk-default", "api_base": "https://api.deepseek.com"},
+    }))
+    body = {"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "hi"}]}
+    call_body = _assemble_litellm_body(body, cfg, provider=None)
+    assert call_body["api_key"] == "sk-default"
+    assert call_body["model"] == "deepseek/deepseek-v4-flash"
