@@ -51,3 +51,38 @@ def test_cross_consult_config_has_default_system_prompt():
     c = CrossConsultConfig()
     assert "顾问" in c.consult_system_prompt
     assert "self-contained" in c.consult_system_prompt or "上下文" in c.consult_system_prompt
+
+
+def test_proxyconfig_has_cross_consult_default_disabled():
+    from deep_proxy.config import ProxyConfig, normalize_legacy_config
+    cfg = ProxyConfig.model_validate(normalize_legacy_config({
+        "deepseek": {"api_key": "sk"},
+    }))
+    assert cfg.cross_consult.enabled is False
+    assert cfg.cross_consult.pair_for("deepseek") is None
+
+
+def test_proxyconfig_loads_cross_consult_from_yaml():
+    from deep_proxy.config import ProxyConfig
+    raw = {
+        "providers": {
+            "deepseek": {"name": "deepseek", "api_base": "x", "api_key": "y",
+                         "litellm_prefix": "deepseek/", "flash_model": "a", "pro_model": "b"},
+            "mimo": {"name": "mimo", "api_base": "x", "api_key": "y",
+                     "litellm_prefix": "openai/", "flash_model": "m", "pro_model": "mp"},
+        },
+        "ports": [
+            {"port": 8000, "provider": "deepseek", "sampling": "precise"},
+            {"port": 8001, "provider": "mimo", "sampling": "creative"},
+        ],
+        "deepseek": {"api_key": "y"},
+        "cross_consult": {
+            "enabled": True,
+            "pairs": {"deepseek": "mimo", "mimo": "deepseek"},
+            "max_calls_per_request": 2,
+        },
+    }
+    cfg = ProxyConfig.model_validate(raw)
+    assert cfg.cross_consult.enabled is True
+    assert cfg.cross_consult.pair_for("deepseek") == "mimo"
+    assert cfg.cross_consult.max_calls_per_request == 2

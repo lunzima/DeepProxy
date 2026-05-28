@@ -10,6 +10,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from .providers import Provider, PortBinding
+from .cross_consult import CrossConsultConfig
 
 
 class DeepSeekConfig(BaseModel):
@@ -488,6 +489,11 @@ class ProxyConfig(BaseModel):
     ports: list[PortBinding] = Field(
         default_factory=list,
         description="端口绑定列表。空时退回 coding_port/writing_port 老格式（双端口都走 deepseek）。",
+    )
+    cross_consult: CrossConsultConfig = Field(
+        default_factory=CrossConsultConfig,
+        description="Cross-Consult 虚拟工具配置（默认 disabled）。"
+                    "见 docs/mimo_integration.md §12。",
     )
 
     def provider_for_port(self, port: int) -> Provider | None:
