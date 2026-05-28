@@ -139,13 +139,25 @@ class DeepProxyRouter:
             if implicit is not None:
                 body["thinking"] = {"type": implicit}
 
-        # 0b. 模型名称规范化（reasoner/chat 都会被映射到 v4-flash）
-        #     provider 给定时：若 raw_model 是 provider 自身的 flash/pro 模型名，
-        #     直接保留（避免 normalize_model_name 的"未知名兜底到 v4-flash"误转）。
-        if provider is not None and raw_model in (provider.flash_model, provider.pro_model):
-            model = raw_model  # provider 自身模型名不经 DeepSeek normalize
+        # 0b. 模型名称规范化
+        #     - provider 已绑定且为非 deepseek：强制使用 provider 自家模型名
+        #       （客户端可能传 deepseek-chat / claude-* / gpt-* 等任意名称；按 spec §7
+        #        "port 决定一切"，这些都应路由到当前 provider 的 flash 档，由后续
+        #        flash_upgrade 决定是否切 pro）。跳过 normalize_model_name，因为
+        #        normalize 表是 DeepSeek 特定的。
+        #     - provider 是 deepseek 或未绑定：保持老行为，走 normalize_model_name
+        #       完成 legacy alias / clone alias 解析
+        if provider is not None and provider.name != "deepseek":
+            if raw_model in (provider.flash_model, provider.pro_model):
+                body["model"] = raw_model
+            else:
+                body["model"] = provider.flash_model
+            model = body["model"]
         else:
-            body["model"] = normalize_model_name(raw_model, self._model_routes_dicts)
+            if provider is not None and raw_model in (provider.flash_model, provider.pro_model):
+                body["model"] = raw_model
+            else:
+                body["model"] = normalize_model_name(raw_model, self._model_routes_dicts)
             model = body.get("model", "")
 
         # 0c. 客户端 telemetry header 剥离（在升格哈希 / skills / 压缩缓存 key 之前）

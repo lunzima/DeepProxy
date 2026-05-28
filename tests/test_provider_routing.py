@@ -275,3 +275,86 @@ def test_assemble_litellm_body_no_extra_body_for_deepseek():
     # DeepSeek path: thinking 保留在顶层（deepseek provider 原生接受）
     assert call_body["thinking"] == {"type": "enabled", "reasoning_effort": "max"}
     assert "extra_body" not in call_body
+
+
+async def test_prepare_request_force_mimo_model_when_client_sends_alien_name(
+    router_dual, provider_mimo,
+):
+    """spec §7: 写作 port 上无论客户端传什么 model 名，都应映射到 provider.flash_model。"""
+    body = {
+        "model": "deepseek-chat",  # alien for MiMo provider
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    out = await router_dual.prepare_request(
+        body, sampling_profile=router_dual.config.creative_sampling, provider=provider_mimo,
+    )
+    # MiMo provider 必须看到自家模型名，不能是 deepseek-v4-flash
+    assert out["model"] in (provider_mimo.flash_model, provider_mimo.pro_model)
+
+
+async def test_prepare_request_force_mimo_model_when_client_sends_claude_name(
+    router_dual, provider_mimo,
+):
+    body = {
+        "model": "claude-opus-4-7",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    out = await router_dual.prepare_request(
+        body, sampling_profile=router_dual.config.creative_sampling, provider=provider_mimo,
+    )
+    assert out["model"] in (provider_mimo.flash_model, provider_mimo.pro_model)
+
+
+async def test_prepare_request_force_mimo_model_when_client_sends_gpt_name(
+    router_dual, provider_mimo,
+):
+    body = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    out = await router_dual.prepare_request(
+        body, sampling_profile=router_dual.config.creative_sampling, provider=provider_mimo,
+    )
+    assert out["model"] in (provider_mimo.flash_model, provider_mimo.pro_model)
+
+
+async def test_prepare_request_preserves_mimo_own_model_name(
+    router_dual, provider_mimo,
+):
+    """已经是 provider 自家模型名时保持不变。"""
+    body = {
+        "model": "mimo-v2.5",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    out = await router_dual.prepare_request(
+        body, sampling_profile=router_dual.config.creative_sampling, provider=provider_mimo,
+    )
+    assert out["model"] == "mimo-v2.5"
+
+
+async def test_prepare_request_preserves_mimo_pro_name(
+    router_dual, provider_mimo,
+):
+    body = {
+        "model": "mimo-v2.5-pro",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    out = await router_dual.prepare_request(
+        body, sampling_profile=router_dual.config.creative_sampling, provider=provider_mimo,
+    )
+    assert out["model"] == "mimo-v2.5-pro"
+
+
+async def test_prepare_request_deepseek_provider_still_normalizes_legacy_alias(
+    router_dual, provider_deepseek,
+):
+    """DeepSeek 路径行为不变：legacy alias 仍走 normalize_model_name → v4-flash。"""
+    body = {
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    out = await router_dual.prepare_request(
+        body, sampling_profile=router_dual.config.precise_sampling, provider=provider_deepseek,
+    )
+    # DeepSeek 路径 deepseek-chat 应被规范化为 v4-flash
+    assert out["model"] == "deepseek-v4-flash"
