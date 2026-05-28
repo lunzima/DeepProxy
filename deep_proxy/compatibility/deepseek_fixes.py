@@ -99,13 +99,17 @@ def normalize_model_name(model: str, model_routes: Optional[List[Dict]] = None) 
 
 
 def is_v4_model(model: str) -> bool:
-    """是否是 DeepSeek V4 系列模型（deepseek-v4-flash / deepseek-v4-pro）。
+    """是否解析为 DeepSeek V4 系列调用。
 
-    仅识别 deepseek-v4-* 命名及其官方别名（含 [1m] 后缀变体、仿冒模型）。
-    其它 provider（如 MiMo）即使有 thinking 协议，也不算 V4——它们的协议差异
-    由各自 *_fixes.py 处理。
+    包括所有会被 normalize_model_name 映射到 v4-flash/v4-pro 的别名：
+    - 直接名称：deepseek-v4-flash / deepseek-v4-pro
+    - 1M 变体：deepseek-v4-flash[1m] / deepseek-v4-pro[1m]
+    - DeepSeek 老别名：deepseek-chat / deepseek-reasoner
+    - 仿冒 alias（clone）：claude-opus-4.7 / gpt-5.5-pro 等（CLONE_MODEL_ALIASES）
 
-    使用完整全集进行精确匹配，避免子串误判。
+    本函数的真实用途是判断"该调用是否走 DeepSeek V4 后端"（决定是否注入
+    thinking.reasoning_effort=max）。其它 provider（如 MiMo）的模型即使带
+    thinking 协议也不归类于此——它们的协议差异由各自 *_fixes.py 处理。
     """
     return model in v4_model_full_set()
 

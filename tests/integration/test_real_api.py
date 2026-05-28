@@ -30,8 +30,9 @@ class TestThinkingDisabled:
     async def test_basic_completion(self, router_real: DeepProxyRouter):
         body = {
             "model": "deepseek-v4-flash",
+            "thinking": {"type": "disabled"},
             "messages": [{"role": "user", "content": "回答一个字: 是"}],
-            "max_tokens": 5,
+            "max_tokens": 2000,
         }
         prepared = await router_real.prepare_request(body)
         result = await router_real.chat_completions(prepared)
@@ -67,7 +68,7 @@ class TestMultiTurnReasoningPersistence:
             "model": "deepseek-v4-pro",
             "thinking": {"type": "enabled"},
             "messages": [{"role": "user", "content": "记住数字 7"}],
-            "max_tokens": 30,
+            "max_tokens": 2000,
         }
         prepared = await router_real.prepare_request(body1)
         r1 = await router_real.chat_completions(prepared)
@@ -82,7 +83,7 @@ class TestMultiTurnReasoningPersistence:
                 {**msg1},
                 {"role": "user", "content": "你刚才记住的是哪个数字？"},
             ],
-            "max_tokens": 30,
+            "max_tokens": 2000,
         }
         prepared2 = await router_real.prepare_request(body2)
         # 不应抛 400
@@ -98,7 +99,7 @@ class TestStreaming:
             "model": "deepseek-v4-pro",
             "thinking": {"type": "enabled"},
             "messages": [{"role": "user", "content": "say hi"}],
-            "max_tokens": 20,
+            "max_tokens": 2000,
             "stream": True,
         }
         prepared = await router_real.prepare_request(body)

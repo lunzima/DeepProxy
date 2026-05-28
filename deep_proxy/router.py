@@ -485,7 +485,7 @@ class DeepProxyRouter:
             router_score = self._upgrade_router.score(messages, body=body)
             if router_score >= router_thr:
                 logger.info(
-                    "Router 升格: score=%.3f >= threshold=%.2f provider=%s"
+                    "Router 升格: score=%.3f >= threshold=%.2f provider=%s "
                     "(heuristic=%.1f/10, user_msgs=%d, user_chars=%d)",
                     router_score, router_thr,
                     provider_name,
