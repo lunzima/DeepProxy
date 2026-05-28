@@ -109,3 +109,61 @@ flash_upgrade:
   router_threshold: 0.65                # BERT score >= 此值 → 升格 Pro（偏保守）
   heuristic_threshold: 8.0              # 启发式 score >= 此值 → 直接升格（跳过 BERT）
   persist_turns: 1                      # 升格后保持 Pro 额外 N 轮
+
+# ============================================================
+# 多 provider + per-port 路由（新格式，可选）
+# ============================================================
+# 启用新格式后，coding_port / writing_port / deepseek.* 等顶层字段
+# 会被忽略，全部以 providers + ports 为准。老 config.yaml 不写
+# providers/ports 则继续走兼容路径（双端口都走 DeepSeek）。
+#
+# providers:
+#   deepseek:
+#     name: deepseek
+#     api_base: https://api.deepseek.com
+#     api_key: sk-...
+#     litellm_prefix: deepseek/
+#     flash_model: deepseek-v4-flash
+#     pro_model: deepseek-v4-pro
+#     legacy_aliases:
+#       deepseek-chat: {thinking: {type: disabled}}
+#       deepseek-reasoner: {thinking: {type: enabled}}
+#     has_reasoning_content: true
+#     has_thinking_param: true
+#     reasoning_effort_field: thinking.reasoning_effort
+#     reasoning_effort_value: max
+#     max_output_tokens: 384000
+#     context_window: 1000000
+#
+#   mimo:
+#     name: mimo
+#     api_base: https://token-plan-cn.xiaomimimo.com/v1
+#     api_key: tp-...
+#     litellm_prefix: openai/
+#     flash_model: mimo-v2.5
+#     pro_model: mimo-v2.5-pro
+#     has_reasoning_content: true
+#     has_thinking_param: true
+#     reasoning_effort_field: reasoning_effort
+#     reasoning_effort_value: high
+#     max_output_tokens: 128000
+#     context_window: 1000000
+#
+# ports:
+#   - port: 8000
+#     provider: deepseek
+#     sampling: precise
+#   - port: 8001
+#     provider: mimo
+#     sampling: creative
+#
+# flash_upgrade:
+#   enabled: true
+#   router_type: bert
+#   bert_checkpoint: router_model
+#   router_threshold: 0.60
+#   heuristic_threshold: 7.5
+#   persist_turns: 2
+#   per_provider:
+#     mimo:
+#       router_threshold: 0.65   # MiMo 起步保守，少升格
