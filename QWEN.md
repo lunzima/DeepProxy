@@ -35,6 +35,8 @@ DeepProxy 绑定**两个端口**，共享同一个 FastAPI app 实例：
 
 **多 provider 路由**（v0.2+）：每个 port 在配置中绑定一个 provider；coding_port 走 DeepSeek，writing_port 走 MiMo (`mimo-v2.5` / `mimo-v2.5-pro`)。flash_upgrade 路由复用同一 BERT checkpoint，按 per-provider 阈值与 `pro_model` 工作。`/v1/models` 每个 port 仅返回该 port 绑定 provider 的模型列表。老 `config.yaml` 不写 `providers`/`ports` 时通过 `normalize_legacy_config` 自动迁移到新结构（双端口都打 DeepSeek，向后兼容）。
 
+**Cross-Consult**（可选 v0.3+）：启用后向请求注入虚拟工具 `cross_consult`，agent 可调用它向异家族 provider 的 pro 模型请求第二视角；DeepProxy 在响应路径拦截 tool_use、代为执行、把结果以 tool_result 注入会话后重发原 provider。`pairs` map 双向声明对偶关系（无主副层级）。默认 disabled，须显式开启。见 `docs/mimo_integration.md` §12 与 `docs/superpowers/plans/2026-05-28-cross-consult.md`。
+
 ## Building and Running
 
 ### 安装
@@ -139,6 +141,12 @@ D:\deepproxy\
 │   │   ├── reasoning_handler.py   # reasoning_content 处理 + 缓存
 │   │   ├── error_mapper.py        # 参数过滤 + 错误映射
 │   │   └── anthropic_translator.py # Anthropic Messages API ↔ OpenAI 翻译层
+│   ├── cross_consult/
+│   │   ├── __init__.py
+│   │   ├── config.py            # CrossConsultConfig pydantic
+│   │   ├── schema.py            # 工具 JSON schema + system prompt 增量
+│   │   ├── executor.py          # 单次目标 provider 调用
+│   │   └── interceptor.py       # 请求注入 + 响应拦截/重发循环
 │   └── optimization/
 │       ├── __init__.py            # 编排入口（apply_cheap_optimizations）
 │       ├── compressor.py          # LLM-based system prompt 压缩器

@@ -167,3 +167,20 @@ flash_upgrade:
 #   per_provider:
 #     mimo:
 #       router_threshold: 0.65   # MiMo 起步保守，少升格
+
+# ============================================================
+# Cross-Consult 虚拟工具（可选；默认 disabled）
+# ============================================================
+# 让任意 port 临时调用异家族 provider 的 pro 模型获取第二视角。
+# 见 docs/mimo_integration.md §12。
+#
+# cross_consult:
+#   enabled: true
+#   tool_name: cross_consult            # 工具暴露给 agent 的名字
+#   pairs:                              # 双向声明，无主副层级
+#     deepseek: mimo
+#     mimo: deepseek
+#   max_calls_per_request: 3            # 单次 client 请求内 consult 次数上限
+#   call_timeout_seconds: 30            # 单次 consult 超时
+#   max_input_chars: 32000              # question + context 字符上限
+#   max_output_tokens: 4096             # consult 调用 max_tokens
