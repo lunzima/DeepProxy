@@ -24,6 +24,13 @@ class TestIsV4Model:
         assert is_v4_model("") is False
         assert is_v4_model("deepseek-coder") is False  # 不在别名里
 
+    def test_is_v4_model_unchanged(self):
+        """is_v4_model 仍是 DeepSeek-only，识别 v4-flash/v4-pro。"""
+        assert is_v4_model("deepseek-v4-flash") is True
+        assert is_v4_model("deepseek-v4-pro") is True
+        assert is_v4_model("mimo-v2.5") is False  # MiMo 不算 V4
+        assert is_v4_model("") is False
+
 
 class TestNormalizeModelName:
     def test_v4_passthrough(self):

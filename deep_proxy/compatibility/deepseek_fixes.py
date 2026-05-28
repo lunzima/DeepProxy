@@ -99,7 +99,11 @@ def normalize_model_name(model: str, model_routes: Optional[List[Dict]] = None) 
 
 
 def is_v4_model(model: str) -> bool:
-    """精确判断是否为 DeepSeek V4 系列模型。
+    """是否是 DeepSeek V4 系列模型（deepseek-v4-flash / deepseek-v4-pro）。
+
+    仅识别 deepseek-v4-* 命名及其官方别名（含 [1m] 后缀变体、仿冒模型）。
+    其它 provider（如 MiMo）即使有 thinking 协议，也不算 V4——它们的协议差异
+    由各自 *_fixes.py 处理。
 
     使用完整全集进行精确匹配，避免子串误判。
     """
