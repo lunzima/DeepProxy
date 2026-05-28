@@ -140,8 +140,13 @@ class DeepProxyRouter:
                 body["thinking"] = {"type": implicit}
 
         # 0b. 模型名称规范化（reasoner/chat 都会被映射到 v4-flash）
-        body["model"] = normalize_model_name(raw_model, self._model_routes_dicts)
-        model = body.get("model", "")
+        #     provider 给定时：若 raw_model 是 provider 自身的 flash/pro 模型名，
+        #     直接保留（避免 normalize_model_name 的"未知名兜底到 v4-flash"误转）。
+        if provider is not None and raw_model in (provider.flash_model, provider.pro_model):
+            model = raw_model  # provider 自身模型名不经 DeepSeek normalize
+        else:
+            body["model"] = normalize_model_name(raw_model, self._model_routes_dicts)
+            model = body.get("model", "")
 
         # 0c. 客户端 telemetry header 剥离（在升格哈希 / skills / 压缩缓存 key 之前）
         #     Claude Code 2.1.42+ 在 system 头部注入 `x-anthropic-billing-header: cc_version=...`
@@ -155,13 +160,13 @@ class DeepProxyRouter:
             if isinstance(messages, list):
                 strip_telemetry_from_messages(messages)
 
-        # 0d. Flash→Pro 选择性升格路由（仅 v4-flash + 启用时）
+        # 0d. Flash→Pro 选择性升格路由（仅 flash_model + 启用时）
         #     在全部后续处理之前改写 model，让 thinking/sampling/skills 走 Pro 路径。
-        if (
-            self.config.flash_upgrade.enabled
-            and model == V4_FLASH
-        ):
-            self._maybe_upgrade(body)
+        #     provider 给定时按 provider.flash_model 触发（支持 MiMo 等非 DeepSeek provider）；
+        #     provider=None 时退回老路径（仅匹配硬编码 V4_FLASH）。
+        upgrade_target = provider.flash_model if provider is not None else V4_FLASH
+        if self.config.flash_upgrade.enabled and model == upgrade_target:
+            self._maybe_upgrade(body, provider=provider)
             model = body.get("model", "")
 
         # 1. 默认 reasoning_effort 注入（仅当未显式 disabled 且未指定）
@@ -375,6 +380,8 @@ class DeepProxyRouter:
     def _maybe_upgrade(
         self,
         body: dict[str, Any],
+        *,
+        provider: Any = None,
     ) -> None:
         """Flash→Pro 升格路由主逻辑（Layer 0–3，全部 upfront）。
 
@@ -386,14 +393,31 @@ class DeepProxyRouter:
 
         持久化记账（set_remaining）通过 _stash_pending_upgrade 延迟到上游
         成功后由调用方 commit，避免失败请求白扣 Pro 槽位。
+
+        Args:
+            provider: Provider 实例或 None。给定时使用 provider.pro_model /
+                provider.flash_model 以及 per-provider 阈值覆盖；None 时退回
+                硬编码 V4_PRO / V4_FLASH（向后兼容）。
         """
         cfg = self.config.flash_upgrade
         messages = body.get("messages", [])
 
+        # 取目标 pro_model / flash_model 与阈值（per-provider 覆盖优先）
+        if provider is not None:
+            pro_model = provider.pro_model
+            flash_model = provider.flash_model
+            router_thr = cfg.threshold_for_provider(provider.name, "router_threshold")
+            heur_thr = cfg.threshold_for_provider(provider.name, "heuristic_threshold")
+        else:
+            pro_model = V4_PRO
+            flash_model = V4_FLASH
+            router_thr = cfg.router_threshold
+            heur_thr = cfg.heuristic_threshold
+
         # ── Step 1: Sentinel / extra_body 强制升格 ──
         if has_upgrade_sentinel(messages) or extra_body_requests_upgrade(body):
-            logger.info("Sentinel 强制升格 → %s", V4_PRO)
-            body["model"] = V4_PRO
+            logger.info("Sentinel 强制升格 → %s", pro_model)
+            body["model"] = pro_model
             self._stash_pending_upgrade(body, messages, cfg.persist_turns)
             return
 
@@ -403,39 +427,40 @@ class DeepProxyRouter:
         if self._upgrade_throttle.in_cooldown(messages):
             self._upgrade_throttle.should_throttle(messages, False)  # 推进冷却计数
             self._upgrade_tracker.clear(messages)
-            logger.info("升格限流冷却中 → 强制 %s", V4_FLASH)
+            logger.info("升格限流冷却中 → 强制 %s", flash_model)
             return
 
         if self._upgrade_tracker.is_upgraded(messages):
             remaining = self._upgrade_tracker.remaining(messages)
-            logger.info("持久升格命中 → %s（剩余 %d 轮）", V4_PRO, remaining)
-            body["model"] = V4_PRO
+            logger.info("持久升格命中 → %s（剩余 %d 轮）", pro_model, remaining)
+            body["model"] = pro_model
             return
 
         # ── Step 3: 启发式快速路径（Layer 1） ──
         heuristic_result = compute_complexity_score(messages)
         did_upgrade = False
-        if heuristic_result.score >= cfg.heuristic_threshold:
+        if heuristic_result.score >= heur_thr:
             did_upgrade = True
             logger.info("启发式升格: score=%s >= threshold=%s",
-                        heuristic_result.score, cfg.heuristic_threshold)
+                        heuristic_result.score, heur_thr)
 
         # ── Step 4: Router 决策（Layer 0） ──
         # 注：v4-flash 处理简单编码任务效果已极好，不再对 coding_port 做阈值优惠。
         if not did_upgrade:
             router_score = self._upgrade_router.score(messages, body=body)
-            if router_score >= cfg.router_threshold:
+            if router_score >= router_thr:
                 logger.info(
-                    "Router 升格: score=%.3f >= threshold=%.2f "
+                    "Router 升格: score=%.3f >= threshold=%.2f provider=%s"
                     "(heuristic=%.1f/10, user_msgs=%d, user_chars=%d)",
-                    router_score, cfg.router_threshold,
+                    router_score, router_thr,
+                    (provider.name if provider is not None else "deepseek"),
                     heuristic_result.score, heuristic_result.user_msg_count, len(heuristic_result.user_text),
                 )
                 did_upgrade = True
             else:
                 logger.info(
                     "保留 Flash: score=%.3f < threshold=%.2f (heuristic=%.1f/10) → %s",
-                    router_score, cfg.router_threshold, heuristic_result.score, V4_FLASH,
+                    router_score, router_thr, heuristic_result.score, flash_model,
                 )
 
         # ── Step 5: 防重复刷屏（Layer 2） ──
@@ -455,7 +480,7 @@ class DeepProxyRouter:
             self._upgrade_throttle.should_throttle(messages, False)
 
         if did_upgrade:
-            body["model"] = V4_PRO
+            body["model"] = pro_model
             self._stash_pending_upgrade(body, messages, cfg.persist_turns)
 
     def process_response(

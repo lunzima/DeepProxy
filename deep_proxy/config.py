@@ -313,6 +313,18 @@ class FlashUpgradeConfig(BaseModel):
         default=1, ge=1, le=10,
         description="升格后保持 Pro 的额外轮次数",
     )
+    per_provider: dict[str, dict] = Field(
+        default_factory=dict,
+        description="按 provider 名覆盖阈值，如 {'mimo': {'router_threshold': 0.65}}。"
+                    "未覆盖的字段 fallback 到顶层默认值。",
+    )
+
+    def threshold_for_provider(self, provider_name: str, key: str) -> float:
+        """取 per_provider 覆盖，未覆盖时取顶层默认。"""
+        overrides = self.per_provider.get(provider_name) or {}
+        if key in overrides:
+            return float(overrides[key])
+        return float(getattr(self, key))
 
 
 class CreativeSamplingConfig(BaseModel):
