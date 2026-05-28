@@ -58,7 +58,10 @@ async def test_mimo_non_stream_chat(cfg_with_mimo):
         body, sampling_profile=cfg_with_mimo.creative_sampling, provider=provider,
     )
     result = await router.chat_completions(body, provider=provider)
-    assert result["choices"][0]["message"]["content"]
+    msg = result["choices"][0]["message"]
+    # MiMo with reasoning_effort=high may return output in reasoning_content
+    # with empty content — accept either field being non-empty.
+    assert msg.get("content") or msg.get("reasoning_content") or msg.get("reasoning")
     await router.close()
 
 
@@ -78,9 +81,12 @@ async def test_mimo_stream_chat(cfg_with_mimo):
     async for chunk in router.iter_chat_chunks(body, provider=provider):
         chunks.append(chunk)
     assert len(chunks) > 0
-    # 至少有一个 chunk 含 content delta
+    # MiMo with reasoning_effort=high may stream output as reasoning_content
+    # rather than content — accept either field being non-empty across chunks.
     assert any(
         (chunk.get("choices") or [{}])[0].get("delta", {}).get("content")
+        or (chunk.get("choices") or [{}])[0].get("delta", {}).get("reasoning_content")
+        or (chunk.get("choices") or [{}])[0].get("delta", {}).get("reasoning")
         for chunk in chunks
     )
     await router.close()

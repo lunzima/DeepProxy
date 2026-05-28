@@ -212,7 +212,8 @@ def test_sampling_profile_for_port_dual(cfg_dual):
     assert sw is cfg_dual.creative_sampling
 
 
-def test_assemble_litellm_body_passes_allowed_openai_params_for_mimo():
+def test_assemble_litellm_body_routes_mimo_extras_to_extra_body():
+    """MiMo 的 reasoning_effort / thinking 应放进 extra_body 透传，不留在顶层。"""
     from deep_proxy.config import ProxyConfig, normalize_legacy_config
     from deep_proxy.providers import Provider
     from deep_proxy.litellm_client import _assemble_litellm_body
@@ -229,13 +230,27 @@ def test_assemble_litellm_body_passes_allowed_openai_params_for_mimo():
         pro_model="mimo-v2.5-pro",
         allowed_extra_params=["reasoning_effort", "thinking"],
     )
-    body = {"model": "mimo-v2.5", "messages": [{"role": "user", "content": "hi"}],
-            "reasoning_effort": "high"}
+    body = {
+        "model": "mimo-v2.5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "high",
+        "thinking": {"type": "enabled"},
+    }
     call_body = _assemble_litellm_body(body, cfg, provider=mimo)
-    assert call_body.get("allowed_openai_params") == ["reasoning_effort", "thinking"]
+    # 顶层不再出现这些字段
+    assert "reasoning_effort" not in call_body
+    assert "thinking" not in call_body
+    # 它们落在 extra_body 里
+    assert call_body["extra_body"] == {
+        "reasoning_effort": "high",
+        "thinking": {"type": "enabled"},
+    }
+    # allowed_openai_params 不再被注入
+    assert "allowed_openai_params" not in call_body
 
 
-def test_assemble_litellm_body_omits_allowed_openai_params_when_provider_has_none():
+def test_assemble_litellm_body_no_extra_body_for_deepseek():
+    """DeepSeek provider 的 allowed_extra_params 默认空，不应注入 extra_body。"""
     from deep_proxy.config import ProxyConfig, normalize_legacy_config
     from deep_proxy.providers import Provider
     from deep_proxy.litellm_client import _assemble_litellm_body
@@ -251,6 +266,12 @@ def test_assemble_litellm_body_omits_allowed_openai_params_when_provider_has_non
         flash_model="deepseek-v4-flash",
         pro_model="deepseek-v4-pro",
     )
-    body = {"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "hi"}]}
+    body = {
+        "model": "deepseek-v4-flash",
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "enabled", "reasoning_effort": "max"},
+    }
     call_body = _assemble_litellm_body(body, cfg, provider=ds)
-    assert "allowed_openai_params" not in call_body
+    # DeepSeek path: thinking 保留在顶层（deepseek provider 原生接受）
+    assert call_body["thinking"] == {"type": "enabled", "reasoning_effort": "max"}
+    assert "extra_body" not in call_body

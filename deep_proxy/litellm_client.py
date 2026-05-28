@@ -185,8 +185,16 @@ def _assemble_litellm_body(
             call_body["api_base"] = _to_litellm_api_base(
                 provider.api_base, already_versioned=already,
             )
+        # MiMo / 其它 OpenAI 兼容 provider 接受 OpenAI 没有定义的扩展字段。
+        # 直接放在顶层会让 OpenAI Python SDK 报 "unexpected keyword argument"。
+        # 走 extra_body 透传：SDK 把 extra_body 内容合并到 HTTP body 而不做 kwarg 校验。
         if provider.allowed_extra_params:
-            call_body["allowed_openai_params"] = list(provider.allowed_extra_params)
+            extra_body = dict(call_body.get("extra_body") or {})
+            for p in provider.allowed_extra_params:
+                if p in call_body:
+                    extra_body[p] = call_body.pop(p)
+            if extra_body:
+                call_body["extra_body"] = extra_body
     else:
         # 注：必须以 kwarg 形式传递 api_base —— LiteLLM 的 deepseek provider
         # 忽略全局 `litellm.api_base`，无 kwarg 时回退到硬编码 `/beta`，导致
