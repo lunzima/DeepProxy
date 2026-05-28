@@ -116,6 +116,7 @@ class DeepProxyRouter:
         body: dict[str, Any],
         *,
         sampling_profile: Any = None,
+        provider: Any = None,  # Provider 或 None；None 时走 deepseek 兼容行为
     ) -> dict[str, Any]:
         """聊天补全请求预处理管道。
 
@@ -123,6 +124,8 @@ class DeepProxyRouter:
             sampling_profile: 若提供（PreciseSamplingConfig / CreativeSamplingConfig
                 duck-typed），则强制覆盖 body 中的 4 个采样参数（不是 setdefault）。
                 None 时退回旧的 creative_sampling.enabled-based 默认行为，便于测试。
+            provider: Provider 实例或 None。给定时按 provider 配置路由 reasoning_effort
+                注入位置；None 时退回老的 is_v4_model() 判定（向后兼容）。
         """
         raw_model = body.get("model", "")
 
@@ -161,12 +164,26 @@ class DeepProxyRouter:
             self._maybe_upgrade(body)
             model = body.get("model", "")
 
-        # 1. 默认 reasoning_effort=max + thinking.type=enabled 注入
-        #    （仅当未显式 disabled 且未指定）。
-        #    官方文档：reasoning_effort 是 thinking 对象的子字段，不是顶层参数。
-        #    同步显式注入 type=enabled，让步骤 8 的 ensure_reasoning_content_persistence
-        #    退化为纯"补齐"逻辑，消除跨步隐式依赖。
-        if is_v4_model(model):
+        # 1. 默认 reasoning_effort 注入（仅当未显式 disabled 且未指定）
+        #    DeepSeek: thinking.reasoning_effort = "max"（嵌套）
+        #    MiMo:     reasoning_effort = "high"（顶层）
+        #    取值与位置都从 provider 配置读取，不再硬编码
+        if provider is not None and provider.has_thinking_param:
+            explicitly_disabled = is_thinking_disabled(body.get("thinking"))
+            if not explicitly_disabled:
+                field_path = provider.reasoning_effort_field
+                value = provider.reasoning_effort_value
+                if field_path == "thinking.reasoning_effort":
+                    td = ensure_thinking_dict(body)
+                    td.setdefault("type", "enabled")
+                    td.setdefault("reasoning_effort", value)
+                elif field_path == "reasoning_effort":
+                    from .compatibility.mimo_fixes import inject_top_level_reasoning_effort
+                    inject_top_level_reasoning_effort(body, value=value)
+                else:
+                    logger.warning("未知 reasoning_effort_field: %s", field_path)
+        elif is_v4_model(model):
+            # 老路径（provider=None）：保持旧行为，仅对 V4 注入 thinking.reasoning_effort=max
             explicitly_disabled = is_thinking_disabled(body.get("thinking"))
             if not explicitly_disabled:
                 td = ensure_thinking_dict(body)
@@ -298,11 +315,14 @@ class DeepProxyRouter:
 
         # 8. V4 多轮 reasoning 自愈：在全部消息修改之后执行，确保
         #    缓存键与 remember_response 存储时的对话前缀一致。
-        if is_v4_model(model):
+        #    provider 给定时走 provider.has_reasoning_content，否则保持老 V4 判定。
+        has_rc = provider.has_reasoning_content if provider is not None else is_v4_model(model)
+        if has_rc:
             messages = body.get("messages", [])
             if messages:
                 body = ensure_reasoning_content_persistence(
                     messages, body, cache=self._reasoning_cache,
+                    has_reasoning_content=True,
                 )
 
         logger.debug(
@@ -438,21 +458,29 @@ class DeepProxyRouter:
             body["model"] = V4_PRO
             self._stash_pending_upgrade(body, messages, cfg.persist_turns)
 
-    def process_response(self, response: dict[str, Any]) -> dict[str, Any]:
-        if self.config.deepseek.enable_reasoning:
-            response = process_reasoning_response(response)
+    def process_response(
+        self, response: dict[str, Any], *, provider: Any = None,
+    ) -> dict[str, Any]:
+        has_rc = (
+            provider.has_reasoning_content if provider is not None
+            else self.config.deepseek.enable_reasoning
+        )
+        if has_rc:
+            response = process_reasoning_response(response, has_reasoning_content=True)
         return response
 
     # ------------------------------------------------------------------
     # 端点方法（轻量封装，供 main.py 调用）
     # ------------------------------------------------------------------
 
-    async def chat_completions(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def chat_completions(
+        self, body: dict[str, Any], *, provider: Any = None,
+    ) -> dict[str, Any]:
         request_messages = list(body.get("messages") or [])
         # 是否需要剥离 CoT Reflection 标签（由 apply_cheap_optimizations 在 prepare_request 时打的标）
         strip_cot = bool(body.get("_deepproxy_strip_cot", False))
-        raw = await call_litellm(self.config, body)
-        result = self.process_response(raw)
+        raw = await call_litellm(self.config, body, provider=provider)
+        result = self.process_response(raw, provider=provider)
         if strip_cot:
             for choice in result.get("choices", []):
                 msg = choice.get("message")
@@ -465,7 +493,7 @@ class DeepProxyRouter:
         return result
 
     async def iter_chat_chunks(
-        self, body: dict[str, Any]
+        self, body: dict[str, Any], *, provider: Any = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """业务层流式 chunk 流（dict 形态）。
 
@@ -481,7 +509,9 @@ class DeepProxyRouter:
         completed_cleanly = False
         saw_error_frame = False
         try:
-            async for chunk_dict in iter_litellm_chunks(self.config, body, _accumulator=accumulator):
+            async for chunk_dict in iter_litellm_chunks(
+                self.config, body, _accumulator=accumulator, provider=provider,
+            ):
                 if isinstance(chunk_dict.get("error"), dict) and not chunk_dict.get("choices"):
                     saw_error_frame = True
                 yield chunk_dict
@@ -493,13 +523,13 @@ class DeepProxyRouter:
                 self._commit_pending_upgrade(body)
 
     async def chat_completions_stream(
-        self, body: dict[str, Any]
+        self, body: dict[str, Any], *, provider: Any = None,
     ) -> AsyncGenerator[str, None]:
         """OpenAI 协议层流式输出：iter_chat_chunks → SSE 字符串。
 
         负责协议细节：dict → `data: {...}\\n\\n`、错误帧序列化、`data: [DONE]\\n\\n` 前哨。
         """
-        async for item in self.iter_chat_chunks(body):
+        async for item in self.iter_chat_chunks(body, provider=provider):
             yield f"data: {json.dumps(item)}\n\n"
             if isinstance(item.get("error"), dict) and not item.get("choices"):
                 yield SSE_DONE
