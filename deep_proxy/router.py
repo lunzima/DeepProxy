@@ -148,17 +148,14 @@ class DeepProxyRouter:
         #     - provider 是 deepseek 或未绑定：保持老行为，走 normalize_model_name
         #       完成 legacy alias / clone alias 解析
         if provider is not None and provider.name != "deepseek":
-            if raw_model in (provider.flash_model, provider.pro_model):
-                body["model"] = raw_model
-            else:
-                body["model"] = provider.flash_model
-            model = body["model"]
+            body["model"] = (
+                raw_model
+                if raw_model in (provider.flash_model, provider.pro_model)
+                else provider.flash_model
+            )
         else:
-            if provider is not None and raw_model in (provider.flash_model, provider.pro_model):
-                body["model"] = raw_model
-            else:
-                body["model"] = normalize_model_name(raw_model, self._model_routes_dicts)
-            model = body.get("model", "")
+            body["model"] = normalize_model_name(raw_model, self._model_routes_dicts)
+        model = body["model"]
 
         # 0c. 客户端 telemetry header 剥离（在升格哈希 / skills / 压缩缓存 key 之前）
         #     Claude Code 2.1.42+ 在 system 头部注入 `x-anthropic-billing-header: cc_version=...`

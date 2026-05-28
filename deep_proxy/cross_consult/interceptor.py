@@ -74,15 +74,19 @@ def inject_into_request(
 # ---------------------------------------------------------------------------
 
 def _extract_cross_consult_tool_calls(response: dict[str, Any], tool_name: str) -> list[dict]:
-    """从 response 提取所有 name == tool_name 的 tool_calls。返回 OpenAI 风格 dict 列表。"""
-    out: list[dict] = []
-    for choice in response.get("choices") or []:
-        msg = choice.get("message") or {}
-        for tc in (msg.get("tool_calls") or []):
-            fn = tc.get("function") or {}
-            if fn.get("name") == tool_name:
-                out.append(tc)
-    return out
+    """从 response.choices[0] 提取所有 name == tool_name 的 tool_calls。
+
+    只处理 choices[0]——DeepProxy 不支持 n>1，与下游 append assistant_msg
+    的语义保持一致（避免 tool_call_id 错配进无关 choice）。
+    """
+    choices = response.get("choices") or []
+    if not choices:
+        return []
+    msg = choices[0].get("message") or {}
+    return [
+        tc for tc in (msg.get("tool_calls") or [])
+        if (tc.get("function") or {}).get("name") == tool_name
+    ]
 
 
 def _parse_args(tc: dict) -> dict:

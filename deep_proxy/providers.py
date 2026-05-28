@@ -19,11 +19,6 @@ class Provider(BaseModel):
     flash_model: str = Field(description="默认 / flash 档模型 ID")
     pro_model: str = Field(description="升格后的 pro 档模型 ID")
 
-    legacy_aliases: dict[str, dict] = Field(
-        default_factory=dict,
-        description="客户端历史模型名映射，如 deepseek-chat → flash + thinking 配置",
-    )
-
     has_reasoning_content: bool = Field(
         default=True,
         description="上游响应是否包含 reasoning_content 字段",
@@ -39,10 +34,6 @@ class Provider(BaseModel):
     reasoning_effort_value: str = Field(
         default="max",
         description="reasoning_effort 注入的取值",
-    )
-    thinking_disable_payload: dict = Field(
-        default_factory=lambda: {"thinking": {"type": "disabled"}},
-        description="禁用思考的 payload 模板",
     )
 
     allowed_extra_params: list[str] = Field(

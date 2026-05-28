@@ -34,10 +34,6 @@ def cfg_dual() -> ProxyConfig:
                 "litellm_prefix": "deepseek/",
                 "flash_model": "deepseek-v4-flash",
                 "pro_model": "deepseek-v4-pro",
-                "legacy_aliases": {
-                    "deepseek-chat": {"thinking": {"type": "disabled"}},
-                    "deepseek-reasoner": {"thinking": {"type": "enabled"}},
-                },
             },
             "mimo": {
                 "name": "mimo",
