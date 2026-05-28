@@ -141,3 +141,62 @@ async def test_chat_completions_handles_consult_error_as_tool_result(cfg_cross):
 
     assert result["choices"][0]["message"]["content"] == "final after error"
     assert len(responses_main) == 0
+
+
+async def test_iter_chat_chunks_intercepts_cross_consult_in_stream(cfg_cross):
+    """流式响应含 cross_consult tool_call 时，DeepProxy 切到非流式补完模式。"""
+    from deep_proxy.router import DeepProxyRouter
+    import json
+    router = DeepProxyRouter(cfg_cross)
+    provider = cfg_cross.providers["deepseek"]
+
+    # 模拟首轮流式：分多 chunk 输出一个 cross_consult tool_call
+    initial_stream_chunks = [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [{
+            "index": 0, "id": "tc1", "type": "function",
+            "function": {"name": "cross_consult", "arguments": ""},
+        }]}, "finish_reason": None}]},
+        {"choices": [{"index": 0, "delta": {"tool_calls": [{
+            "index": 0, "function": {"arguments": '{"question": "what?"}'},
+        }]}, "finish_reason": None}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+
+    async def fake_iter(*args, **kwargs):
+        for c in initial_stream_chunks:
+            yield c
+
+    # consult 调用 + 重发都走非流式：
+    main_text_response = {
+        "choices": [{"message": {"role": "assistant", "content": "final"},
+                     "finish_reason": "stop"}],
+    }
+
+    async def fake_call(config, body, *, provider=None):
+        return main_text_response
+
+    with patch("deep_proxy.router.iter_litellm_chunks", new=fake_iter), \
+         patch("deep_proxy.router.call_litellm",
+               new=AsyncMock(side_effect=fake_call)), \
+         patch("deep_proxy.cross_consult.executor.call_litellm",
+               new=AsyncMock(return_value=main_text_response)):
+        body = {"model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "go"}],
+                "stream": True}
+        body = await router.prepare_request(
+            body, sampling_profile=cfg_cross.precise_sampling, provider=provider,
+        )
+        out_chunks = []
+        async for chunk in router.iter_chat_chunks(body, provider=provider):
+            out_chunks.append(chunk)
+
+    # 最后一个 chunk 应包含 "final" 文本（来自重发后的非流式响应）
+    contents = []
+    for c in out_chunks:
+        for ch in c.get("choices") or []:
+            d = ch.get("delta") or ch.get("message") or {}
+            v = d.get("content")
+            if v:
+                contents.append(v)
+    assert "final" in "".join(contents)

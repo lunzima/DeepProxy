@@ -557,6 +557,10 @@ class DeepProxyRouter:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """业务层流式 chunk 流（dict 形态）。
 
+        cross_consult enabled + pair 存在 + provider 给定时，
+        在内部 buffer chunks 并检测 cross_consult tool_call；
+        触发时切到非流式 loop 并把最终响应作为单 chunk yield。
+
         - 每个 yield：OpenAI 风格的 chunk dict（带 reasoning 字段已自愈/累加）
           或 `{"error": {...}}` 错误终止
         - 自然结束 = 流正常完成
@@ -564,18 +568,91 @@ class DeepProxyRouter:
 
         SSE 序列化（`data:` 前缀、`[DONE]` 前哨）由调用方在协议层完成。
         """
+        cc_active = (
+            self.config.cross_consult.enabled
+            and provider is not None
+            and self.config.cross_consult.pair_for(provider.name) is not None
+        )
+
         request_messages = list(body.get("messages") or [])
         accumulator = StreamingReasoningAccumulator(request_messages=request_messages)
         completed_cleanly = False
         saw_error_frame = False
+        buffered_chunks: list[dict] = []
+        accumulated_tool_calls: dict[int, dict] = {}
+
         try:
             async for chunk_dict in iter_litellm_chunks(
                 self.config, body, _accumulator=accumulator, provider=provider,
             ):
                 if isinstance(chunk_dict.get("error"), dict) and not chunk_dict.get("choices"):
                     saw_error_frame = True
-                yield chunk_dict
+                    yield chunk_dict
+                    continue
+
+                if cc_active:
+                    # 累积 tool_call delta（OpenAI 流式约定：用 index 标识同一 tool_call）
+                    for ch in chunk_dict.get("choices") or []:
+                        delta = ch.get("delta") or {}
+                        for tc_delta in (delta.get("tool_calls") or []):
+                            idx = tc_delta.get("index", 0)
+                            slot = accumulated_tool_calls.setdefault(idx, {
+                                "id": None, "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            })
+                            if tc_delta.get("id"):
+                                slot["id"] = tc_delta["id"]
+                            if tc_delta.get("type"):
+                                slot["type"] = tc_delta["type"]
+                            fn = tc_delta.get("function") or {}
+                            if fn.get("name"):
+                                slot["function"]["name"] += fn["name"]
+                            if fn.get("arguments"):
+                                slot["function"]["arguments"] += fn["arguments"]
+                    buffered_chunks.append(chunk_dict)
+                else:
+                    yield chunk_dict
+
             completed_cleanly = True
+
+            # 流结束：cc_active 时判断是否触发 cross_consult
+            if cc_active:
+                tool_name = self.config.cross_consult.tool_name
+                has_cc_call = any(
+                    (tc.get("function") or {}).get("name") == tool_name
+                    for tc in accumulated_tool_calls.values()
+                )
+                if not has_cc_call:
+                    # 不含 cross_consult，原样 yield buffered chunks
+                    for c in buffered_chunks:
+                        yield c
+                else:
+                    # 含 cross_consult：组装完整 assistant message + 执行循环 + 重发非流式
+                    initial_response = {
+                        "choices": [{
+                            "message": {
+                                "role": "assistant", "content": None,
+                                "tool_calls": list(accumulated_tool_calls.values()),
+                            },
+                            "finish_reason": "tool_calls",
+                        }],
+                    }
+                    from .cross_consult.interceptor import execute_cross_consult_loop
+                    final_result = await execute_cross_consult_loop(
+                        body=body, initial_response=initial_response,
+                        source_provider=provider, config=self.config,
+                        cc_config=self.config.cross_consult,
+                        call_litellm_fn=call_litellm,
+                    )
+                    final_result = self.process_response(final_result, provider=provider)
+                    msg = (final_result.get("choices") or [{}])[0].get("message") or {}
+                    yield {
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": msg.get("content", "")},
+                            "finish_reason": "stop",
+                        }],
+                    }
         finally:
             accumulator.flush_to_cache(self._reasoning_cache)
             # 流自然结束（无 error frame、无异常、未被取消）才提交升格记账
