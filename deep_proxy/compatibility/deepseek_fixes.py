@@ -23,6 +23,9 @@ from ..deepseek_models import (
     v4_model_full_set,
 )
 
+# 共享工具从 base 重导出，老调用点 from .deepseek_fixes import sanitize_stream_options 仍可用
+from .base import has_tools, sanitize_stream_options  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 
@@ -103,27 +106,9 @@ def is_v4_model(model: str) -> bool:
     return model in v4_model_full_set()
 
 
-def sanitize_stream_options(body: Dict[str, Any]) -> Dict[str, Any]:
-    """清理流式响应选项。
-
-    DeepSeek V4 支持 ``stream_options.include_usage``，无需特殊处理。
-    本函数只删空 stream_options（避免传 ``{}`` 触发部分 SDK 校验问题）。
-    """
-    body = dict(body)
-    stream_options = body.get("stream_options")
-    if isinstance(stream_options, dict) and not stream_options:
-        body.pop("stream_options", None)
-    return body
-
-
 def is_thinking_disabled(thinking: Any) -> bool:
     """检查 thinking 对象是否显式 disabled。"""
     return isinstance(thinking, dict) and thinking.get("type") == "disabled"
-
-
-def has_tools(body: dict) -> bool:
-    """检查请求体是否携带 tools 或 tool_choice。"""
-    return bool(body.get("tools") or body.get("tool_choice"))
 
 
 def ensure_thinking_dict(body: dict) -> dict:
