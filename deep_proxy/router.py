@@ -198,7 +198,7 @@ class DeepProxyRouter:
                 else:
                     logger.warning("未知 reasoning_effort_field: %s", field_path)
         elif is_v4_model(model):
-            # 老路径（provider=None）：保持旧行为，仅对 V4 注入 thinking.reasoning_effort=max
+            # provider=None（老路径）或 provider.has_thinking_param=False：仅对 V4 注入 thinking.reasoning_effort=max
             explicitly_disabled = is_thinking_disabled(body.get("thinking"))
             if not explicitly_disabled:
                 td = ensure_thinking_dict(body)

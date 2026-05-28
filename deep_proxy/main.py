@@ -1,6 +1,6 @@
 """DeepProxy FastAPI 应用入口。
 
-暴露兼容 OpenAI API + Anthropic Messages API 格式的端点，将请求路由到 DeepSeek 官方 API。
+暴露兼容 OpenAI API + Anthropic Messages API 格式的端点，按入站端口路由到上游 provider（DeepSeek / MiMo）。
 
 统一请求管道：
   /v1/chat/completions → router.prepare_request（含廉价提示词优化 + Flash→Pro 升格）

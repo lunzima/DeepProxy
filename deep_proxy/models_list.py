@@ -99,19 +99,22 @@ def normalize_model_entry(entry: Dict[str, Any], *, provider: Provider | None = 
     created = int(entry.get("created") or 1700000000)
 
     if provider is not None and provider.name == "mimo":
-        from .mimo_pricing import (
-            _MIMO_CONTEXT_WINDOW as _CTX,
-            _MIMO_MAX_OUTPUT as _MXO,
-            model_pricing as _pricing_fn,
-        )
+        from .mimo_pricing import model_pricing as _pricing_fn
         default_owned_by = "xiaomi"
         default_desc_prefix = "MiMo"
     else:
-        _CTX = _V4_CONTEXT_WINDOW
-        _MXO = _V4_MAX_OUTPUT
         _pricing_fn = model_pricing
         default_owned_by = "deepseek"
         default_desc_prefix = "DeepSeek V4"
+
+    # 上下文 / 输出上限：provider 给定时读取其配置字段（允许 config.yaml 覆盖），
+    # 否则退回 V4 常量。
+    if provider is not None:
+        _CTX = provider.context_window
+        _MXO = provider.max_output_tokens
+    else:
+        _CTX = _V4_CONTEXT_WINDOW
+        _MXO = _V4_MAX_OUTPUT
 
     # 向上游取真实值；无则用默认常量
     # 顺序：Anthropic 原生 > OpenRouter > vLLM/SGLang > 旧 OpenAI 字段

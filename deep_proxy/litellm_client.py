@@ -16,8 +16,7 @@
 from __future__ import annotations
 
 import logging
-import random
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List
 
 from litellm.exceptions import RateLimitError, ServiceUnavailableError, APIError
 
@@ -166,7 +165,7 @@ def _assemble_litellm_body(
     """从业务 body 组装 LiteLLM 调用参数（共享于流式/非流式路径）。
 
     provider 给定时按该 provider 的 api_base/api_key/prefix 路由；
-    provider=None 时退回 config.deepseek.*（向后兼容老调用点与压缩器）。
+    provider=None 时退回 config.deepseek.*（向后兼容老调用点与未传 provider 的测试路径）。
     """
     call_body = _strip_sentinels(body)
     # 显式覆盖：调用方 stream 参数为真理；防止原 body 中残留的 stream=True
