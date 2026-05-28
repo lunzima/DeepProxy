@@ -1,0 +1,53 @@
+"""CrossConsultConfig pydantic 模型测试。"""
+from __future__ import annotations
+
+import pytest
+
+from deep_proxy.cross_consult.config import CrossConsultConfig
+
+
+def test_cross_consult_config_defaults_disabled():
+    """默认 disabled —— 用户必须显式开启 + 配置 pairs。"""
+    c = CrossConsultConfig()
+    assert c.enabled is False
+    assert c.tool_name == "cross_consult"
+    assert c.pairs == {}
+    assert c.max_calls_per_request == 3
+    assert c.call_timeout_seconds == 30
+    assert c.max_input_chars == 32000
+    assert c.max_output_tokens == 4096
+
+
+def test_cross_consult_config_with_pairs():
+    c = CrossConsultConfig(
+        enabled=True,
+        pairs={"deepseek": "mimo", "mimo": "deepseek"},
+    )
+    assert c.enabled is True
+    assert c.pairs["deepseek"] == "mimo"
+    assert c.pairs["mimo"] == "deepseek"
+
+
+def test_cross_consult_config_pair_lookup():
+    c = CrossConsultConfig(
+        enabled=True,
+        pairs={"deepseek": "mimo", "mimo": "deepseek"},
+    )
+    assert c.pair_for("deepseek") == "mimo"
+    assert c.pair_for("mimo") == "deepseek"
+    assert c.pair_for("unknown") is None
+
+
+def test_cross_consult_config_disabled_pair_lookup_returns_none():
+    """enabled=False 时 pair_for 一律返回 None（防止意外触发）。"""
+    c = CrossConsultConfig(
+        enabled=False,
+        pairs={"deepseek": "mimo"},
+    )
+    assert c.pair_for("deepseek") is None
+
+
+def test_cross_consult_config_has_default_system_prompt():
+    c = CrossConsultConfig()
+    assert "顾问" in c.consult_system_prompt
+    assert "self-contained" in c.consult_system_prompt or "上下文" in c.consult_system_prompt
