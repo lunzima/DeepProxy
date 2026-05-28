@@ -29,3 +29,18 @@ def test_mimo_model_pricing_callable():
     assert "completion" in p
     # 未知模型返回 {}（与 deepseek 同协议）
     assert model_pricing("unknown-model") == {}
+
+
+def test_mimo_models_constants():
+    from deep_proxy.mimo_models import MIMO_FLASH, MIMO_PRO, MIMO_MODELS
+    assert MIMO_FLASH == "mimo-v2.5"
+    assert MIMO_PRO == "mimo-v2.5-pro"
+    assert MIMO_FLASH in MIMO_MODELS
+    assert MIMO_PRO in MIMO_MODELS
+
+
+def test_mimo_models_have_metadata():
+    from deep_proxy.mimo_models import MIMO_MODELS
+    flash = MIMO_MODELS["mimo-v2.5"]
+    assert flash["id"] == "mimo-v2.5"
+    assert flash["owned_by"] == "xiaomi"
