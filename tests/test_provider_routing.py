@@ -197,3 +197,16 @@ def test_assemble_litellm_body_falls_back_to_deepseek_when_no_provider():
     call_body = _assemble_litellm_body(body, cfg, provider=None)
     assert call_body["api_key"] == "sk-default"
     assert call_body["model"] == "deepseek/deepseek-v4-flash"
+
+
+def test_provider_for_port_dual_config(cfg_dual):
+    assert cfg_dual.provider_for_port(8000).name == "deepseek"
+    assert cfg_dual.provider_for_port(8001).name == "mimo"
+    assert cfg_dual.provider_for_port(9999) is None
+
+
+def test_sampling_profile_for_port_dual(cfg_dual):
+    sp = cfg_dual.sampling_profile_for_port(8000)
+    assert sp is cfg_dual.precise_sampling
+    sw = cfg_dual.sampling_profile_for_port(8001)
+    assert sw is cfg_dual.creative_sampling

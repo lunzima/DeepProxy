@@ -212,22 +212,17 @@ async def health():
     return result
 
 
-def _profile_for_request(request: Request):
-    """按入站端口选择采样 profile：
-    - coding_port → precise_sampling（高确定性）
-    - writing_port → creative_sampling（高多样性；写作篮 creative/general 由
-      optimization.writing_basket_kind 在 dynamic_baskets 层切换）
-    - 其它端口（罕见，例如直接绑定到非配置端口） → None（无强制覆盖）
-    """
+def _binding_for_request(request: Request):
+    """按入站端口返回 (provider, sampling_profile) 元组；端口未配置返回 (None, None)。"""
     if config is None:
-        return None
+        return None, None
     server = request.scope.get("server")
     port = server[1] if server else None
-    if port == config.coding_port:
-        return config.precise_sampling
-    if port == config.writing_port:
-        return config.creative_sampling
-    return None
+    if port is None:
+        return None, None
+    provider = config.provider_for_port(port)
+    sampling = config.sampling_profile_for_port(port)
+    return provider, sampling
 
 
 @app.post("/v1/chat/completions")
@@ -241,19 +236,20 @@ async def chat_completions(request: Request):
     _ensure_router_ready()
 
     body: Dict[str, Any] = await request.json()
+    provider, sampling = _binding_for_request(request)
     body = await router.prepare_request(
-        body, sampling_profile=_profile_for_request(request),
+        body, sampling_profile=sampling, provider=provider,
     )
     is_stream = body.get("stream", False)
 
     if is_stream:
         return StreamingResponse(
-            router.chat_completions_stream(body),
+            router.chat_completions_stream(body, provider=provider),
             media_type="text/event-stream",
         )
 
     try:
-        result = await router.chat_completions(body)
+        result = await router.chat_completions(body, provider=provider)
         return JSONResponse(content=result)
     except HTTPException:
         raise
@@ -261,14 +257,8 @@ async def chat_completions(request: Request):
         logger.error("请求处理异常: %s", str(e))
         raise HTTPException(
             status_code=500,
-            detail={
-                "error": {
-                    "message": f"内部错误: {str(e)}",
-                    "type": "api_error",
-                    "param": None,
-                    "code": 500,
-                }
-            },
+            detail={"error": {"message": f"内部错误: {str(e)}", "type": "api_error",
+                              "param": None, "code": 500}},
         ) from e
 
 
@@ -293,23 +283,23 @@ async def anthropic_messages(request: Request):
     requested_model = anthropic_body.get("model", "")
 
     openai_body = claude_request_to_openai(anthropic_body)
+    provider, sampling = _binding_for_request(request)
     openai_body = await router.prepare_request(
-        openai_body, sampling_profile=_profile_for_request(request),
+        openai_body, sampling_profile=sampling, provider=provider,
     )
     is_stream = openai_body.get("stream", False)
 
     if is_stream:
         async def _claude_sse():
-            # 直接接业务层 dict 流，跳过 OpenAI SSE 协议层
             async for event in openai_stream_to_claude(
-                router.iter_chat_chunks(openai_body),
+                router.iter_chat_chunks(openai_body, provider=provider),
                 requested_model=requested_model,
             ):
                 yield event
         return StreamingResponse(_claude_sse(), media_type="text/event-stream")
 
     try:
-        openai_result = await router.chat_completions(openai_body)
+        openai_result = await router.chat_completions(openai_body, provider=provider)
         claude_result = openai_response_to_claude(
             openai_result, requested_model=requested_model,
         )

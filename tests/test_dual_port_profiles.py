@@ -94,16 +94,17 @@ class TestForcedOverride:
 
 
 class TestPortToProfileMapping:
-    """main.py 端口检测助手 _profile_for_request 的逻辑（不起 server，只测分派）。"""
+    """main.py 端口检测助手 _binding_for_request 的逻辑（不起 server，只测分派）。"""
 
     def test_profile_mapping_is_correct(self):
         from deep_proxy import main as m
+        from deep_proxy.config import normalize_legacy_config
 
-        cfg = ProxyConfig(
-            deepseek=DeepSeekConfig(api_key="sk"),
-            coding_port=8000,
-            writing_port=8001,
-        )
+        cfg = ProxyConfig.model_validate(normalize_legacy_config({
+            "coding_port": 8000,
+            "writing_port": 8001,
+            "deepseek": {"api_key": "sk"},
+        }))
 
         # mock 一个最小 Request
         class _Req:
@@ -114,13 +115,19 @@ class TestPortToProfileMapping:
         old = m.config
         try:
             m.config = cfg
-            assert m._profile_for_request(_Req(8000)) is cfg.precise_sampling
-            assert m._profile_for_request(_Req(8001)) is cfg.creative_sampling
-            # 未配置端口 → None
-            assert m._profile_for_request(_Req(9999)) is None
-            # 无 scope.server → None
+            _, sp_coding = m._binding_for_request(_Req(8000))
+            assert sp_coding is cfg.precise_sampling
+            _, sp_writing = m._binding_for_request(_Req(8001))
+            assert sp_writing is cfg.creative_sampling
+            # 未配置端口 → (None, None)
+            provider_none, sp_none = m._binding_for_request(_Req(9999))
+            assert provider_none is None
+            assert sp_none is None
+            # 无 scope.server → (None, None)
             class _BadReq:
                 scope = {}
-            assert m._profile_for_request(_BadReq()) is None
+            provider_bad, sp_bad = m._binding_for_request(_BadReq())
+            assert provider_bad is None
+            assert sp_bad is None
         finally:
             m.config = old
