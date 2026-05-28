@@ -566,8 +566,12 @@ class DeepProxyRouter:
                 return
         yield SSE_DONE
 
-    async def list_models(self) -> dict[str, Any]:
+    async def list_models(self, *, provider: Any = None) -> dict[str, Any]:
         """列出可用模型（同时兼容 OpenAI / OpenRouter / Anthropic 三种生态）。
+
+        provider 给定时按 provider 派发列表：
+          - provider.name == "mimo"：跳过上游拉取，直接用本地 MIMO_MODELS
+          - provider=None 或 provider.name == "deepseek"：现有行为（上游拉取 + 本地兜底）
 
         优先从 DeepSeek 上游 `GET /v1/models` 拉取真实清单；上游不可用时退化到
         内置 V4 模型列表（含 `[1m]` 变体）。`expose_legacy_models=True` 会附加老别名；
@@ -576,16 +580,20 @@ class DeepProxyRouter:
         响应同时含 OpenAI 的 `object=list` 和 Anthropic 的 `first_id/last_id/has_more`
         分页字段；条目层 normalize_model_entry 同时输出两套生态字段。
         """
-        raw = await fetch_upstream_models(
-            self.config.deepseek.api_key,
-            self.config.deepseek.api_base,
-            self._get_http_client(),
-        )
-        models = build_models_list(
-            raw,
-            expose_legacy_models=self.config.deepseek.expose_legacy_models,
-            model_routes=self._model_routes_dicts,
-        )
+        if provider is not None and provider.name == "mimo":
+            models = build_models_list(raw=[], provider=provider)
+        else:
+            raw = await fetch_upstream_models(
+                self.config.deepseek.api_key,
+                self.config.deepseek.api_base,
+                self._get_http_client(),
+            )
+            models = build_models_list(
+                raw,
+                expose_legacy_models=self.config.deepseek.expose_legacy_models,
+                model_routes=self._model_routes_dicts,
+                provider=provider,
+            )
         return {
             # OpenAI 列表标识
             "object": "list",

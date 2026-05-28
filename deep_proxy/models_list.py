@@ -75,8 +75,10 @@ def _build_display_name(model_id: str) -> str:
     return " ".join(parts)
 
 
-def normalize_model_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_model_entry(entry: Dict[str, Any], *, provider: Any = None) -> Dict[str, Any]:
     """统一模型条目（同时覆盖 OpenAI / OpenRouter / Anthropic 三种生态字段）。
+
+    provider 给定时使用该 provider 的默认上下文/输出/owned_by/pricing；否则走 DeepSeek 默认。
 
     上下文长度 / 输出上限的字段冗余表（全部同值，下游各取所需，未知字段静默忽略）：
 
@@ -95,10 +97,25 @@ def normalize_model_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     model_id = entry["id"]
     created = int(entry.get("created") or 1700000000)
 
+    if provider is not None and provider.name == "mimo":
+        from .mimo_pricing import (
+            _MIMO_CONTEXT_WINDOW as _CTX,
+            _MIMO_MAX_OUTPUT as _MXO,
+            model_pricing as _pricing_fn,
+        )
+        default_owned_by = "xiaomi"
+        default_desc_prefix = "MiMo"
+    else:
+        _CTX = _V4_CONTEXT_WINDOW
+        _MXO = _V4_MAX_OUTPUT
+        _pricing_fn = model_pricing
+        default_owned_by = "deepseek"
+        default_desc_prefix = "DeepSeek V4"
+
     # 向上游取真实值；无则用默认常量
     # 顺序：Anthropic 原生 > OpenRouter > vLLM/SGLang > 旧 OpenAI 字段
-    ctx = _V4_CONTEXT_WINDOW
-    mxo = _V4_MAX_OUTPUT
+    ctx = _CTX
+    mxo = _MXO
     for k in ("max_input_tokens", "context_length", "max_model_len", "context_window"):
         v = entry.get(k)
         if isinstance(v, int) and v > 0:
@@ -118,12 +135,12 @@ def normalize_model_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         "id": model_id,
         "object": entry.get("object", "model"),
         "created": created,
-        "owned_by": entry.get("owned_by", "deepseek"),
+        "owned_by": entry.get("owned_by", default_owned_by),
         "context_length": ctx,
         "max_completion_tokens": mxo,
         "max_model_len": ctx,        # vLLM/SGLang/Qwen Code
         "context_window": ctx,       # 部分 Agent 备用
-        "pricing": model_pricing(model_id),
+        "pricing": _pricing_fn(model_id),
         # ── Anthropic 字段 ──────────────────────────────────────────
         # Anthropic 真实 /v1/models 仅含 {type, id, display_name, created_at}；
         # max_input_tokens/max_tokens 是社区扩展（Qwen Code 等读取），
@@ -135,7 +152,7 @@ def normalize_model_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         "max_input_tokens": ctx,
         "max_tokens": mxo,
         # ── 共用 ─────────────────────────────────────────────────────
-        "description": f"DeepSeek V4 — {ctx:,} context window, up to {mxo:,} output tokens",
+        "description": f"{default_desc_prefix} — {ctx:,} context window, up to {mxo:,} output tokens",
     }
     return out
 
@@ -173,38 +190,46 @@ def build_models_list(
     *,
     expose_legacy_models: bool = False,
     model_routes: list[Dict[str, Any]] | None = None,
+    provider: Any = None,
 ) -> list[Dict[str, Any]]:
-    """将原始模型条目列表组装为三生态共存的输出列表。
+    """按 provider 派发模型列表。
+
+    provider=None 或 provider.name=='deepseek' 走 DeepSeek 三生态合并逻辑；
+    provider.name=='mimo' 走 MiMo 专属列表（跳过上游拉取 / 仿冒别名）。
 
     合并上游列表、[1m] 变体、仿冒模型（clone_models）、老别名（DEEPSEEK_MODELS）、
     自定义 model_routes。已存在的 ID 不会重复。每个条目通过 normalize_model_entry
     同时携带 OpenAI/OpenRouter 与 Anthropic 两套字段。
     """
+    if provider is not None and provider.name == "mimo":
+        return _build_mimo_models_list()
+
+    # DeepSeek path: 现有逻辑，provider 透传到每个 normalize 调用
     if not raw:
         raw = list(V4_MODELS.values())
 
     raw_1m = list(V4_MODELS_1M.values())
 
-    models = [normalize_model_entry(m) for m in raw if isinstance(m, dict) and m.get("id")]
+    models = [normalize_model_entry(m, provider=provider) for m in raw if isinstance(m, dict) and m.get("id")]
     seen = {m["id"] for m in models}
 
     # [1m] 变体
     for m in raw_1m:
         if m["id"] not in seen:
-            models.append(normalize_model_entry(m))
+            models.append(normalize_model_entry(m, provider=provider))
             seen.add(m["id"])
 
     # 仿冒模型
     for m in CLONE_MODELS.values():
         if m["id"] not in seen:
-            models.append(normalize_model_entry(m))
+            models.append(normalize_model_entry(m, provider=provider))
             seen.add(m["id"])
 
     # 老别名（当 expose_legacy_models 启用时）
     if expose_legacy_models:
         for m in DEEPSEEK_MODELS.values():
             if m["id"] not in seen:
-                models.append(normalize_model_entry(m))
+                models.append(normalize_model_entry(m, provider=provider))
                 seen.add(m["id"])
 
     # 自定义 model_routes
@@ -216,7 +241,23 @@ def build_models_list(
             models.append(normalize_model_entry({
                 "id": model_name,
                 "owned_by": "deepseek",
-            }))
+            }, provider=provider))
             seen.add(model_name)
 
     return models
+
+
+def _build_mimo_models_list() -> list[Dict[str, Any]]:
+    """MiMo 模型列表：仅真实模型 + 上下文/定价元数据，不混合仿冒别名。"""
+    from .mimo_models import MIMO_MODELS
+    from .providers import Provider
+    mimo_provider = Provider(
+        name="mimo",
+        api_base="",
+        api_key="",
+        litellm_prefix="openai/",
+        flash_model="mimo-v2.5",
+        pro_model="mimo-v2.5-pro",
+        max_output_tokens=128_000,
+    )
+    return [normalize_model_entry(m, provider=mimo_provider) for m in MIMO_MODELS.values()]

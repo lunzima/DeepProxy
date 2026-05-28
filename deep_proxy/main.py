@@ -185,10 +185,14 @@ def _extract_bearer_token(auth_header: str) -> str | None:
 
 @app.get("/v1/models")
 async def list_models(request: Request):
-    """列出可用模型（三生态：OpenAI / OpenRouter / Anthropic 字段共存，响应同时带 Anthropic 分页 first_id/last_id/has_more）。"""
+    """列出可用模型（三生态：OpenAI / OpenRouter / Anthropic 字段共存，响应同时带 Anthropic 分页 first_id/last_id/has_more）。
+
+    按入站端口选择 provider，MiMo 端口返回 MiMo 专属模型列表，DeepSeek 端口返回 DeepSeek 列表。
+    """
     await _check_api_key(request)
     _ensure_router_ready()
-    return await router.list_models()
+    provider, _ = _binding_for_request(request)
+    return await router.list_models(provider=provider)
 
 
 @app.get("/health")
