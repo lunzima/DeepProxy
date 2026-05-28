@@ -9,6 +9,8 @@ from typing import List, Optional
 import yaml
 from pydantic import BaseModel, Field
 
+from .providers import Provider, PortBinding
+
 
 class DeepSeekConfig(BaseModel):
     """DeepSeek 特有配置。"""
@@ -395,6 +397,43 @@ class ModelRoute(BaseModel):
     provider_model: str = Field(description="实际传递给提供商的模型名称")
 
 
+def normalize_legacy_config(raw: dict) -> dict:
+    """老格式 config.yaml → 新格式（providers + ports）的加载期 normalize。
+
+    检测：raw 不含 providers 或 ports → 老格式 → 注入双端口都走 deepseek 的默认值。
+    新格式直接 passthrough。
+    """
+    if "providers" in raw and "ports" in raw:
+        return raw
+
+    deepseek_legacy = raw.get("deepseek") or {}
+    raw["providers"] = {
+        "deepseek": {
+            "name": "deepseek",
+            "api_base": deepseek_legacy.get("api_base", "https://api.deepseek.com"),
+            "api_key": deepseek_legacy.get("api_key", ""),
+            "litellm_prefix": "deepseek/",
+            "flash_model": "deepseek-v4-flash",
+            "pro_model": "deepseek-v4-pro",
+            "legacy_aliases": {
+                "deepseek-chat": {"thinking": {"type": "disabled"}},
+                "deepseek-reasoner": {"thinking": {"type": "enabled"}},
+            },
+            "has_reasoning_content": True,
+            "has_thinking_param": True,
+            "reasoning_effort_field": "thinking.reasoning_effort",
+            "reasoning_effort_value": "max",
+            "max_output_tokens": 384000,
+            "context_window": 1000000,
+        }
+    }
+    raw["ports"] = [
+        {"port": raw.get("coding_port", 8000), "provider": "deepseek", "sampling": "precise"},
+        {"port": raw.get("writing_port", 8001), "provider": "deepseek", "sampling": "creative"},
+    ]
+    return raw
+
+
 class ProxyConfig(BaseModel):
     """代理服务器主配置。"""
 
@@ -417,6 +456,14 @@ class ProxyConfig(BaseModel):
     creative_sampling: CreativeSamplingConfig = Field(default_factory=CreativeSamplingConfig)
     precise_sampling: PreciseSamplingConfig = Field(default_factory=PreciseSamplingConfig)
     model_routes: List[ModelRoute] = Field(default_factory=list)
+    providers: dict[str, Provider] = Field(
+        default_factory=dict,
+        description="provider 字典，key 是 provider 标识。空时退回 deepseek 单 provider 老格式。",
+    )
+    ports: list[PortBinding] = Field(
+        default_factory=list,
+        description="端口绑定列表。空时退回 coding_port/writing_port 老格式（双端口都走 deepseek）。",
+    )
 
     @classmethod
     def discover_and_load(cls) -> "ProxyConfig":
@@ -448,12 +495,13 @@ class ProxyConfig(BaseModel):
             return cls()
 
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = normalize_legacy_config(raw)
         return cls.model_validate(raw)
 
     @classmethod
     def from_env(cls) -> "ProxyConfig":
         """从环境变量加载配置。"""
-        return cls(
+        cfg = cls(
             host=os.getenv("PROXY_HOST", "0.0.0.0"),
             coding_port=int(os.getenv("PROXY_CODING_PORT", os.getenv("PROXY_PORT", "8000"))),
             writing_port=int(os.getenv("PROXY_WRITING_PORT", "8001")),
@@ -467,4 +515,10 @@ class ProxyConfig(BaseModel):
                 enabled=os.getenv("OPTIMIZATION_ENABLED", "true").lower() == "true",
             ),
         )
+        # 把老字段 normalize 到新结构供下游使用。
+        # exclude providers/ports（默认空）以便 normalize 检测到老格式并注入。
+        normalized = normalize_legacy_config(
+            cfg.model_dump(exclude={"providers", "ports"})
+        )
+        return cls.model_validate(normalized)
 
