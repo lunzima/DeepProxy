@@ -41,8 +41,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def process_reasoning_response(response: Dict[str, Any]) -> Dict[str, Any]:
+def process_reasoning_response(
+    response: Dict[str, Any],
+    *,
+    has_reasoning_content: bool = True,
+) -> Dict[str, Any]:
     """保留 `reasoning_content`，并写一份 `reasoning` 兼容字段（旧 SDK 用）。"""
+    if not has_reasoning_content:
+        return response
     for choice in response.get("choices", []):
         slot = choice.get("delta") or choice.get("message")
         if not slot:
@@ -351,6 +357,8 @@ def ensure_reasoning_content_persistence(
     messages: List[Dict[str, Any]],
     body: Dict[str, Any],
     cache: Optional[ReasoningCache] = None,
+    *,
+    has_reasoning_content: bool = True,
 ) -> Dict[str, Any]:
     """V4 Thinking Mode 多轮 reasoning trace 自愈（静默执行）。
 
@@ -368,6 +376,8 @@ def ensure_reasoning_content_persistence(
 
     用户显式 thinking.type=disabled 时跳过整个流程（disabled 模式不校验 reasoning_content）。
     """
+    if not has_reasoning_content:
+        return body
     if cache is not None:
         cache.backfill(messages)
 
