@@ -210,3 +210,47 @@ def test_sampling_profile_for_port_dual(cfg_dual):
     assert sp is cfg_dual.precise_sampling
     sw = cfg_dual.sampling_profile_for_port(8001)
     assert sw is cfg_dual.creative_sampling
+
+
+def test_assemble_litellm_body_passes_allowed_openai_params_for_mimo():
+    from deep_proxy.config import ProxyConfig, normalize_legacy_config
+    from deep_proxy.providers import Provider
+    from deep_proxy.litellm_client import _assemble_litellm_body
+
+    cfg = ProxyConfig.model_validate(normalize_legacy_config({
+        "deepseek": {"api_key": "sk", "api_base": "https://api.deepseek.com"},
+    }))
+    mimo = Provider(
+        name="mimo",
+        api_base="https://token-plan-cn.xiaomimimo.com/v1",
+        api_key="tp-test",
+        litellm_prefix="openai/",
+        flash_model="mimo-v2.5",
+        pro_model="mimo-v2.5-pro",
+        allowed_extra_params=["reasoning_effort", "thinking"],
+    )
+    body = {"model": "mimo-v2.5", "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high"}
+    call_body = _assemble_litellm_body(body, cfg, provider=mimo)
+    assert call_body.get("allowed_openai_params") == ["reasoning_effort", "thinking"]
+
+
+def test_assemble_litellm_body_omits_allowed_openai_params_when_provider_has_none():
+    from deep_proxy.config import ProxyConfig, normalize_legacy_config
+    from deep_proxy.providers import Provider
+    from deep_proxy.litellm_client import _assemble_litellm_body
+
+    cfg = ProxyConfig.model_validate(normalize_legacy_config({
+        "deepseek": {"api_key": "sk", "api_base": "https://api.deepseek.com"},
+    }))
+    ds = Provider(
+        name="deepseek",
+        api_base="https://api.deepseek.com",
+        api_key="sk-x",
+        litellm_prefix="deepseek/",
+        flash_model="deepseek-v4-flash",
+        pro_model="deepseek-v4-pro",
+    )
+    body = {"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "hi"}]}
+    call_body = _assemble_litellm_body(body, cfg, provider=ds)
+    assert "allowed_openai_params" not in call_body

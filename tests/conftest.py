@@ -49,6 +49,7 @@ def cfg_dual() -> ProxyConfig:
                 "reasoning_effort_field": "reasoning_effort",
                 "reasoning_effort_value": "high",
                 "max_output_tokens": 128000,
+                "allowed_extra_params": ["reasoning_effort", "thinking"],
             },
         },
         "ports": [
@@ -88,4 +89,5 @@ def provider_mimo() -> Provider:
         reasoning_effort_field="reasoning_effort",
         reasoning_effort_value="high",
         max_output_tokens=128000,
+        allowed_extra_params=["reasoning_effort", "thinking"],
     )

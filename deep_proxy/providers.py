@@ -45,6 +45,13 @@ class Provider(BaseModel):
         description="禁用思考的 payload 模板",
     )
 
+    allowed_extra_params: list[str] = Field(
+        default_factory=list,
+        description="LiteLLM 严格校验时需放行的 provider 特有参数（非 OpenAI 标准）。"
+                    "例如 MiMo 走 openai/ prefix 但接受 reasoning_effort / thinking。"
+                    "为空时不传 allowed_openai_params 给 LiteLLM。",
+    )
+
     max_output_tokens: int = Field(default=384000, gt=0)
     context_window: int = Field(default=1000000, gt=0)
 
