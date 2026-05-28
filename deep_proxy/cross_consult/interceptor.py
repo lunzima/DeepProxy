@@ -1,14 +1,18 @@
 """Cross-Consult 请求路径注入 + 响应路径拦截/重发循环。
 
 请求路径：inject_into_request — 加 tool schema + system prompt 增量
-响应路径：拦截 + 重发循环将在 Task 6 加入
+响应路径：execute_cross_consult_loop — 拦截 + 重发循环（非流式）
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
+from ..config import ProxyConfig
+from ..providers import Provider
 from .config import CrossConsultConfig
+from .executor import execute_consult
 from .schema import build_system_prompt_addendum, build_tool_schema
 
 logger = logging.getLogger(__name__)
@@ -63,3 +67,120 @@ def inject_into_request(
 
     logger.debug("cross_consult injected for provider=%s", source_provider_name)
     return True
+
+
+# ---------------------------------------------------------------------------
+# 响应路径拦截 + 重发循环（非流式）
+# ---------------------------------------------------------------------------
+
+def _extract_cross_consult_tool_calls(response: dict[str, Any], tool_name: str) -> list[dict]:
+    """从 response 提取所有 name == tool_name 的 tool_calls。返回 OpenAI 风格 dict 列表。"""
+    out: list[dict] = []
+    for choice in response.get("choices") or []:
+        msg = choice.get("message") or {}
+        for tc in (msg.get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            if fn.get("name") == tool_name:
+                out.append(tc)
+    return out
+
+
+def _parse_args(tc: dict) -> dict:
+    raw = (tc.get("function") or {}).get("arguments")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+async def execute_cross_consult_loop(
+    *,
+    body: dict[str, Any],
+    initial_response: dict[str, Any],
+    source_provider: Provider,
+    config: ProxyConfig,
+    cc_config: CrossConsultConfig,
+    call_litellm_fn,
+) -> dict[str, Any]:
+    """响应路径循环（非流式）。
+
+    1. 检查 initial_response 是否含 cross_consult tool_call
+    2. 若无：原样返回
+    3. 若有：execute_consult 拿结果 → append assistant tool_call msg + tool_result msg 到 messages
+       → re-call original provider → 循环
+    4. 计数达到 max_calls_per_request 时，后续 cross_consult tool_call 返回 quota error tool_result
+       （但继续循环让 agent 处理 / 返回最终响应）
+
+    防无限循环：硬轮次上限 = max_calls_per_request * 2 + 1，
+    确保 quota 耗尽场景下 agent 最多再得到一次重发机会后必定退出。
+    """
+    if not cc_config.enabled:
+        return initial_response
+
+    target_name = cc_config.pair_for(source_provider.name)
+    if target_name is None:
+        return initial_response
+
+    target_provider = config.providers.get(target_name)
+    if target_provider is None:
+        return initial_response
+
+    response = initial_response
+    call_count = 0
+    max_turns = cc_config.max_calls_per_request * 2 + 1
+
+    for _turn in range(max_turns):
+        tool_calls = _extract_cross_consult_tool_calls(response, cc_config.tool_name)
+        if not tool_calls:
+            return response
+
+        # assistant 消息（含 tool_calls）追加到对话历史
+        assistant_msg = response["choices"][0]["message"]
+        body["messages"].append(assistant_msg)
+
+        for tc in tool_calls:
+            args = _parse_args(tc)
+            question = (args.get("question") or "").strip()
+            context = args.get("context") or None
+            combined_len = len(question) + (len(context) if context else 0)
+
+            if call_count >= cc_config.max_calls_per_request:
+                tool_text = (
+                    f"[DeepProxy cross_consult error] quota "
+                    f"({cc_config.max_calls_per_request}) exhausted for this request"
+                )
+            elif not question:
+                tool_text = "[DeepProxy cross_consult error] missing required 'question' field"
+            elif combined_len > cc_config.max_input_chars:
+                tool_text = (
+                    f"[DeepProxy cross_consult error] input too long "
+                    f"({combined_len} chars > {cc_config.max_input_chars})"
+                )
+            else:
+                tool_text = await execute_consult(
+                    question=question,
+                    context=context,
+                    target_provider=target_provider,
+                    config=config,
+                    cc_config=cc_config,
+                )
+                call_count += 1
+
+            body["messages"].append({
+                "role": "tool",
+                "tool_call_id": tc.get("id"),
+                "content": tool_text,
+            })
+
+        # 重发原 provider
+        response = await call_litellm_fn(config, body, provider=source_provider)
+
+    # 达到硬上限（防无限循环）——返回最后一次响应
+    logger.warning(
+        "cross_consult loop reached hard turn limit (%d); returning last response", max_turns
+    )
+    return response

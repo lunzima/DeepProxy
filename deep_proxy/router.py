@@ -529,6 +529,18 @@ class DeepProxyRouter:
         strip_cot = bool(body.get("_deepproxy_strip_cot", False))
         raw = await call_litellm(self.config, body, provider=provider)
         result = self.process_response(raw, provider=provider)
+        # Cross-Consult 拦截：若响应含 cross_consult tool_call，执行 consult + 重发循环
+        if self.config.cross_consult.enabled and provider is not None:
+            from .cross_consult.interceptor import execute_cross_consult_loop
+            result = await execute_cross_consult_loop(
+                body=body,
+                initial_response=result,
+                source_provider=provider,
+                config=self.config,
+                cc_config=self.config.cross_consult,
+                call_litellm_fn=call_litellm,
+            )
+            result = self.process_response(result, provider=provider)
         if strip_cot:
             for choice in result.get("choices", []):
                 msg = choice.get("message")
