@@ -169,8 +169,10 @@ def _assemble_litellm_body(
     provider=None 时退回 config.deepseek.*（向后兼容老调用点与压缩器）。
     """
     call_body = _strip_sentinels(body)
-    if stream:
-        call_body["stream"] = True
+    # 显式覆盖：调用方 stream 参数为真理；防止原 body 中残留的 stream=True
+    # 在非流式 re-call（如 cross_consult 重发循环）中泄漏，导致 LiteLLM 返回
+    # async iterator 而非 dict。
+    call_body["stream"] = stream
     call_body["messages"] = _ensure_string_content(call_body.get("messages", []))
 
     if provider is not None:

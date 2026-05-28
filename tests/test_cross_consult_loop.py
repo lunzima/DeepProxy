@@ -200,3 +200,66 @@ async def test_iter_chat_chunks_intercepts_cross_consult_in_stream(cfg_cross):
             if v:
                 contents.append(v)
     assert "final" in "".join(contents)
+
+
+async def test_resend_loop_forces_stream_false_even_when_body_has_stream_true(cfg_cross):
+    """C2 regression: 重发时即使原 body stream=True，也必须按非流式调 LiteLLM。"""
+    from deep_proxy.router import DeepProxyRouter
+    from deep_proxy.cross_consult.interceptor import execute_cross_consult_loop
+    from deep_proxy.litellm_client import _assemble_litellm_body
+
+    captured_calls = []
+
+    async def fake_call_litellm(config, body, *, provider=None):
+        # 把 _assemble_litellm_body 后的 stream 字段记录下来
+        assembled = _assemble_litellm_body(body, config, provider=provider)
+        captured_calls.append({
+            "stream_in_body": body.get("stream"),
+            "stream_in_assembled": assembled.get("stream"),
+        })
+        # 直接返回文本响应（不含 cross_consult tool_call，结束循环）
+        return {"choices": [{"message": {"role": "assistant", "content": "final"},
+                              "finish_reason": "stop"}]}
+
+    body = {
+        "model": "deepseek-v4-flash",
+        "messages": [{"role": "user", "content": "go"}],
+        "stream": True,  # 模拟流式请求
+    }
+    initial = {
+        "choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{
+                    "id": "tc1", "type": "function",
+                    "function": {"name": "cross_consult",
+                                 "arguments": '{"question": "q"}'},
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+    }
+
+    async def fake_consult(*args, **kwargs):
+        return "external"
+
+    from unittest.mock import patch
+    with patch("deep_proxy.cross_consult.interceptor.execute_consult",
+               side_effect=fake_consult):
+        await execute_cross_consult_loop(
+            body=body,
+            initial_response=initial,
+            source_provider=cfg_cross.providers["deepseek"],
+            config=cfg_cross,
+            cc_config=cfg_cross.cross_consult,
+            call_litellm_fn=fake_call_litellm,
+        )
+
+    # 至少触发了一次重发
+    assert len(captured_calls) >= 1
+    # 每次 assembled body 的 stream 都应该是 False
+    for c in captured_calls:
+        assert c["stream_in_assembled"] is False, (
+            f"resend body assembled with stream={c['stream_in_assembled']} "
+            f"(body had stream={c['stream_in_body']}); C2 not fixed"
+        )
