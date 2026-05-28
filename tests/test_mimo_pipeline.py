@@ -77,3 +77,40 @@ async def test_prepare_request_mimo_disable_thinking_skips_reasoning_effort(
         body, sampling_profile=router_dual.config.creative_sampling, provider=provider_mimo,
     )
     assert "reasoning_effort" not in out
+
+
+async def test_mimo_writing_does_not_inject_inner_os_marker(
+    router_dual, provider_mimo,
+):
+    """spec §11：think_steering（inner_os_marker）仅 DeepSeek 启用，MiMo 跳过。"""
+    body = {
+        "model": "mimo-v2.5",
+        "messages": [{"role": "user", "content": "写一个 RP 开场"}],
+    }
+    await router_dual.prepare_request(
+        body, sampling_profile=router_dual.config.creative_sampling, provider=provider_mimo,
+    )
+    last_user = body["messages"][-1]
+    # 角色沉浸 marker 不应被注入
+    content = last_user.get("content", "")
+    if isinstance(content, list):
+        content = " ".join(c.get("text", "") if isinstance(c, dict) else str(c) for c in content)
+    assert "【角色沉浸要求】" not in content
+
+
+async def test_deepseek_writing_still_injects_inner_os_marker(
+    router_dual, provider_deepseek,
+):
+    """DeepSeek 创作 port 行为不变：marker 应被注入。"""
+    body = {
+        "model": "deepseek-v4-flash",
+        "messages": [{"role": "user", "content": "写一个 RP 开场"}],
+    }
+    await router_dual.prepare_request(
+        body, sampling_profile=router_dual.config.creative_sampling, provider=provider_deepseek,
+    )
+    last_user = body["messages"][-1]
+    content = last_user.get("content", "")
+    if isinstance(content, list):
+        content = " ".join(c.get("text", "") if isinstance(c, dict) else str(c) for c in content)
+    assert "【角色沉浸要求】" in content

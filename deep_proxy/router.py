@@ -301,13 +301,19 @@ class DeepProxyRouter:
                     if block:
                         prepend_to_system_message(messages, block)
 
-        # 7.5 V4 <think> 角色沉浸引导（creative mode + 非 tools 场景）
+        # 7.5 V4 <think> 角色沉浸引导（仅 DeepSeek + creative + 非 tools）
+        #     spec §11: 该 skill 基于 DeepSeek V4 训练分布，对 MiMo 等异家族无意义
         #     引导 <think> 推理层进入角色第一人称内心独白模式，
         #     使角色的情感推理真实化，输出自然带体温。
         #     注入位置：最后一条 user 消息末尾（与 V4 训练时的注入位置一致）。
         #     idempotent：已有 marker 则跳过。
+        is_deepseek_path = (
+            provider is None  # 老路径默认 deepseek
+            or (provider is not None and provider.name == "deepseek")
+        )
         if (
-            self.config.optimization.enabled
+            is_deepseek_path
+            and self.config.optimization.enabled
             and _opt_mode == "creative"
             and self.config.optimization.inner_os_marker
             and not has_tools(body)
