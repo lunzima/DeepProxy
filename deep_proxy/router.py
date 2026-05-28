@@ -336,6 +336,18 @@ class DeepProxyRouter:
                     has_reasoning_content=True,
                 )
 
+        # 9. Cross-Consult 工具注入（在所有 skills 之后，避免改变 has_tools 影响其它步骤）
+        if (
+            self.config.cross_consult.enabled
+            and provider is not None
+        ):
+            from .cross_consult.interceptor import inject_into_request
+            inject_into_request(
+                body,
+                source_provider_name=provider.name,
+                cc_config=self.config.cross_consult,
+            )
+
         logger.debug(
             "准备请求: model=%s, stream=%s, params_keys=%s",
             body.get("model"),
