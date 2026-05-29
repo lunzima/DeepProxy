@@ -315,11 +315,14 @@ class FlashUpgradeConfig(BaseModel):
         description="升格后保持 Pro 的额外轮次数",
     )
     downgrade_threshold: float = Field(
-        default=3.0, ge=0.0, le=10.0,
+        default=5.0, ge=0.0, le=10.0,
         description="升格状态下若当前 compute_complexity_score < 此值，主动撤销升格切回 flash。"
                     "必须严格小于 heuristic_threshold 形成 hysteresis（gap = heuristic - downgrade），"
                     "防止评分轻微抖动引发反复切换。可 per_provider 覆盖。"
-                    "model_validator 会拒绝 downgrade >= heuristic 的配置。",
+                    "model_validator 会拒绝 downgrade >= heuristic 的配置。"
+                    "默认 5.0 基于实测 agent loop 常量基线（kw+math+turn+last_user_size cap 时约 4.5-6.8）"
+                    "校准——略低于平均 constants ceiling 以让中等复杂度初始 prompt + "
+                    "机械工作在 reasoning 衰减后触发降格。",
     )
     per_provider: dict[str, dict] = Field(
         default_factory=dict,

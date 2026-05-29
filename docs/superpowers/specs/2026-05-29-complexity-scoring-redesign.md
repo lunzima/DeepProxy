@@ -67,7 +67,12 @@ def compute_complexity_score(messages):
 
 ### 二、Direction C 主动降格机制
 
-**`FlashUpgradeConfig.downgrade_threshold = 3.0`**（per_provider 可覆盖；MiMo 设 2.5）。
+**`FlashUpgradeConfig.downgrade_threshold = 5.0`**（per_provider 可覆盖；MiMo 也设 5.0）。
+
+校准依据（基于实测用户 agent loop 日志 18:26:12 请求的维度分解）：
+- 实测 constants 基线（kw cap + math cap + turn + last_user_size 短 follow-up）= 4.56
+- 阈值 3.0 时：reasoning windowed=0 后总分 4.56 仍远高于 3.0 → Direction C 从不触发
+- 阈值 5.0 时：4.56 < 5.0 → 触发；最大 first-turn constants ceiling 6.83 仍守住升格
 
 `router._maybe_upgrade` 在 Step 2（持久升格命中）之内**重新评估当前复杂度**：
 
@@ -84,7 +89,7 @@ if self._upgrade_tracker.is_upgraded(messages, provider=provider_name):
         return
 ```
 
-**Hysteresis 设计**：upgrade ≥ 8.0（heur_thr）、downgrade < 3.0（downgrade_thr），gap = 5.0 充分防振荡。
+**Hysteresis 设计**：upgrade ≥ 8.0 (heur_thr) / 7.5 (mimo)、downgrade < 5.0 (downgrade_thr)，gap = 3.0 / 2.5 充分防振荡（reasoning windowed N=3 后单 chunk 不会跳变 ≥ gap）。
 
 ### 三、删除清单（今天 + 早期都需要删的部分）
 
@@ -115,7 +120,7 @@ if self._upgrade_tracker.is_upgraded(messages, provider=provider_name):
 #### 今天工作保留（与 Direction C 相关）
 - `FlashUpgradeConfig.downgrade_threshold` + per_provider 覆盖
 - Router Step 2 hysteresis 重评估
-- `config.yaml` MiMo `downgrade_threshold: 2.5`
+- `config.yaml` MiMo `downgrade_threshold: 5.0`（与全局一致；hysteresis gap=2.5）
 - Utilities 迁移到 `utils.py`（layering 修复）
 
 ### 五、关键文件修改
@@ -134,8 +139,8 @@ if self._upgrade_tracker.is_upgraded(messages, provider=provider_name):
 | 方向 | 信号来源 | 触发路径 |
 |------|---------|---------|
 | **A** 简单 user + 复杂 grind | reasoning_score 单维度可达 8.0（cap = heuristic_threshold）；avg ~4000 字 reasoning/turn 即触发 | 总分跨过 `heuristic_threshold` (8.0 / MiMo 7.5)，**纯 heuristic 路径**（BERT user-only 看不到 grind） |
-| **B** 复杂 user + 简单 follow-up "继续" | keyword_score 累积全部 user 历史 + reasoning_score 已累积；last_user_size 局部低但占比仅 3 / 12.5 | 总分稳在 downgrade_threshold (3.0 / MiMo 2.5) 之上 |
-| **C** 升格后机械重复 | reasoning_density 下降到接近零（机械任务无推理） + 其它静态信号不动 | 总分跌破 downgrade_threshold → Step 2 hysteresis 主动撤销升格 |
+| **B** 复杂 user + 简单 follow-up "继续" | keyword_score 累积全部 user 历史 + reasoning_score 已累积；last_user_size 局部低但占比仅 3 / 16.5 | 总分稳在 downgrade_threshold (5.0) 之上 |
+| **C** 升格后机械重复 | reasoning_density 下降到接近零（机械任务无推理） + 其它静态信号不动 | 中等复杂度初始 prompt（constants ≈ 4.5）总分跌破 5.0 → Step 2 hysteresis 主动撤销升格；max-complex 首轮（constants ~6.83）由于守住其下限继续保留 Pro |
 
 ---
 
