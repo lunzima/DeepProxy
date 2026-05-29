@@ -40,7 +40,7 @@ from .compatibility.reasoning_handler import (
 )
 from .config import ProxyConfig, CreativeSamplingConfig
 from .providers import Provider
-from .utils import SSE_DONE, append_to_system_message, prepend_to_system_message
+from .utils import SSE_DONE, append_to_system_message, merge_tool_call_deltas, prepend_to_system_message
 from .litellm_client import call_litellm, iter_litellm_chunks, _to_litellm_api_base
 from .models_list import build_models_list, fetch_upstream_models
 from .optimization import apply_cheap_optimizations, extract_cot_output, sample_in_range
@@ -628,7 +628,7 @@ class DeepProxyRouter:
         completed_cleanly = False
         saw_error_frame = False
         buffered_chunks: list[dict] = []
-        accumulated_tool_calls: dict[int, dict] = {}
+        accumulated_tool_calls: list[dict] = []  # canonical OpenAI shape, index-sorted
 
         try:
             async for chunk_dict in iter_litellm_chunks(
@@ -640,24 +640,15 @@ class DeepProxyRouter:
                     continue
 
                 if cc_active:
-                    # 累积 tool_call delta（OpenAI 流式约定：用 index 标识同一 tool_call）
+                    # 累积 tool_call delta —— 复用 utils.merge_tool_call_deltas 保持
+                    # canonical 语义（name=覆盖, arguments=拼接）。详见 helper docstring。
                     for ch in chunk_dict.get("choices") or []:
                         delta = ch.get("delta") or {}
-                        for tc_delta in (delta.get("tool_calls") or []):
-                            idx = tc_delta.get("index", 0)
-                            slot = accumulated_tool_calls.setdefault(idx, {
-                                "id": None, "type": "function",
-                                "function": {"name": "", "arguments": ""},
-                            })
-                            if tc_delta.get("id"):
-                                slot["id"] = tc_delta["id"]
-                            if tc_delta.get("type"):
-                                slot["type"] = tc_delta["type"]
-                            fn = tc_delta.get("function") or {}
-                            if fn.get("name"):
-                                slot["function"]["name"] += fn["name"]
-                            if fn.get("arguments"):
-                                slot["function"]["arguments"] += fn["arguments"]
+                        tcs = delta.get("tool_calls")
+                        if isinstance(tcs, list) and tcs:
+                            accumulated_tool_calls = merge_tool_call_deltas(
+                                accumulated_tool_calls, tcs,
+                            )
                     buffered_chunks.append(chunk_dict)
                 else:
                     yield chunk_dict
@@ -669,7 +660,7 @@ class DeepProxyRouter:
                 tool_name = self.config.cross_consult.tool_name
                 has_cc_call = any(
                     (tc.get("function") or {}).get("name") == tool_name
-                    for tc in accumulated_tool_calls.values()
+                    for tc in accumulated_tool_calls
                 )
                 if not has_cc_call:
                     # 不含 cross_consult，原样 yield buffered chunks
@@ -681,7 +672,7 @@ class DeepProxyRouter:
                         "choices": [{
                             "message": {
                                 "role": "assistant", "content": None,
-                                "tool_calls": list(accumulated_tool_calls.values()),
+                                "tool_calls": accumulated_tool_calls,
                             },
                             "finish_reason": "tool_calls",
                         }],

@@ -99,10 +99,23 @@ def merge_tool_call_deltas(
     existing: List[Dict[str, Any]],
     deltas: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """OpenAI 流式 tool_calls 按 index 增量累加。
+    """OpenAI 流式 tool_calls 按 index 增量累加（canonical 实现）。
 
     流式场景中 tool_calls 以 delta 形式逐 chunk 发出，每个 delta 携带
-    index 字段标识属于第几个 tool_call。本函数按 index 合并增量。
+    index 字段标识属于第几个 tool_call。本函数是项目内 OpenAI-format
+    tool_call 累加的唯一规范实现，所有 stream-buffering 代码必须复用，
+    避免 `+=` vs `=` 等语义分歧。
+
+    Canonical 语义（不要改动）：
+      - id:                覆盖（=）— OpenAI 每个 tool_call 只有一个 id；
+                           首 chunk 给定，后续 chunk 不应重发。
+      - type:              覆盖（=）— 通常仅 "function"。
+      - function.name:     覆盖（=）— OpenAI 规范：name 仅在首 chunk 给定；
+                           跨 chunk 拼接会重复字符（如 "get_weather" + "get_weather"）。
+      - function.arguments: 拼接（+=）— arguments JSON 字符串按 chunk 流式发出，
+                           必须按到达顺序拼接。
+
+    返回值按 index 升序排列，确保跨调用确定性输出。
     """
     by_idx: Dict[int, Dict[str, Any]] = {
         tc.get("index", i): tc for i, tc in enumerate(existing)

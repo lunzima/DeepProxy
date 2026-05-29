@@ -479,6 +479,10 @@ class _AnthropicStreamBuilder:
             }))
 
         # tool_calls 增量累加（不立即 emit）
+        # 注：此处不复用 utils.merge_tool_call_deltas — 该 helper 输出 OpenAI 形状
+        # ({index, id, type, function:{name,arguments}})，本累加器直接累积成
+        # Anthropic tool_use 块的扁平形状 ({id, name, arguments})，省去后续转换。
+        # canonical 语义保持一致：name 覆盖、arguments 拼接。
         for tc in delta.get("tool_calls") or []:
             if not isinstance(tc, dict):
                 continue
