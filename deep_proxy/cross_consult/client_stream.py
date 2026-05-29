@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 _HEARTBEAT: dict[str, Any] = {"_dp_heartbeat": True}
 
+# 内部哨兵：continuation 在重发轮 errored（超时/error）退出时 yield，供
+# iter_chat_chunks 识别并设 saw_error_frame（不提交升格记账）。不透传给客户端。
+_STREAM_ERRORED: dict[str, Any] = {"_dp_stream_errored": True}
+
 T = TypeVar("T")
 
 
@@ -124,45 +128,67 @@ async def stream_one_turn(
     """
     it = chunk_iter.__aiter__() if hasattr(chunk_iter, "__aiter__") else chunk_iter
     got_first = False
-    task: asyncio.Future | None = asyncio.ensure_future(it.__anext__())
+    # 持久化的 __anext__ task：跨心跳 tick 复用，仅在 chunk 真正到达后才重建，
+    # 避免每次 timeout 重拉而丢弃 in-flight 读。
+    task: asyncio.Future = asyncio.ensure_future(it.__anext__())
     waited = 0.0
-    while True:
-        budget = idle_timeout if got_first else first_chunk_timeout
-        step = heartbeat_seconds
-        if budget and budget > 0:
-            step = min(heartbeat_seconds, max(0.0, budget - waited))
-        done, _ = await asyncio.wait({task}, timeout=step if step > 0 else heartbeat_seconds)
-        if task not in done:
-            waited += step
-            if budget and budget > 0 and waited >= budget:
-                logger.warning(
-                    "stream_one_turn %s timeout after %.1fs",
-                    "first_chunk" if not got_first else "mid_stream", budget,
-                )
-                result.errored = True
-                task.cancel()
+    try:
+        while True:
+            budget = idle_timeout if got_first else first_chunk_timeout
+            step = heartbeat_seconds
+            if budget and budget > 0:
+                step = min(heartbeat_seconds, max(0.0, budget - waited))
+            done, _ = await asyncio.wait(
+                {task}, timeout=step if step > 0 else heartbeat_seconds,
+            )
+            if task not in done:
+                waited += step
+                if budget and budget > 0 and waited >= budget:
+                    logger.warning(
+                        "stream_one_turn %s timeout after %.1fs",
+                        "first_chunk" if not got_first else "mid_stream", budget,
+                    )
+                    result.errored = True
+                    return
+                yield _HEARTBEAT
+                continue
+            # chunk 到达
+            try:
+                chunk = task.result()
+            except StopAsyncIteration:
                 return
-            yield _HEARTBEAT
-            continue
-        # chunk 到达
-        try:
-            chunk = task.result()
-        except StopAsyncIteration:
-            return
-        got_first = True
-        waited = 0.0
-        task = asyncio.ensure_future(it.__anext__())
+            got_first = True
+            waited = 0.0
+            task = asyncio.ensure_future(it.__anext__())
 
-        if isinstance(chunk.get("error"), dict) and not chunk.get("choices"):
-            result.errored = True
-            yield chunk
+            if isinstance(chunk.get("error"), dict) and not chunk.get("choices"):
+                result.errored = True
+                yield chunk
+                return
+
+            _accumulate_turn(chunk, result, tool_name)
+            fwd = _client_facing_chunk(chunk)
+            if fwd is not None:
+                yield fwd
+    finally:
+        # 任何退出路径（超时 return / error return / StopAsyncIteration /
+        # 消费者 aclose() 触发的 GeneratorExit）都清理上游：
+        #   1) 取消仍 in-flight 的 __anext__ task 并 drain，避免 "Task was destroyed
+        #      but it is pending" 警告；drain 后上游才无 pending __anext__，可安全 aclose。
+        #   2) aclose 上游异步生成器，促使其 finally 运行（关闭 httpx 流 / 释放连接），
+        #      不依赖 GC 的非确定性回收。
+        if not task.done():
             task.cancel()
-            return
-
-        _accumulate_turn(chunk, result, tool_name)
-        fwd = _client_facing_chunk(chunk)
-        if fwd is not None:
-            yield fwd
+        try:
+            await task
+        except BaseException:
+            pass
+        aclose = getattr(it, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except BaseException:
+                pass
 
 
 async def stream_cross_consult_continuation(
@@ -239,6 +265,9 @@ async def stream_cross_consult_continuation(
         ):
             yield frame
         if turn.errored:
+            # 重发轮超时/error：通知调用方设 saw_error_frame（不提交升格记账），
+            # 该哨兵被 iter_chat_chunks 吞掉，不透传给客户端。
+            yield _STREAM_ERRORED
             return
         turn_tool_calls = turn.accumulated_tool_calls
         turn_content = turn.content

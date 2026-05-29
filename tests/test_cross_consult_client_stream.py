@@ -193,21 +193,18 @@ async def test_continuation_streams_consult_heartbeat_and_resend():
                for m in body["messages"])
 
 
-async def test_stream_one_turn_cancels_pending_task_on_early_close():
-    """消费者提前关闭生成器（客户端断连）时，in-flight __anext__ task 被取消，
-    不泄漏、不留 pending task。"""
-    started = asyncio.Event()
-    cancelled = {"hit": False}
+async def test_stream_one_turn_closes_upstream_on_early_close():
+    """消费者提前关闭生成器（客户端断连 → GeneratorExit）时，上游异步生成器被
+    aclose，其 finally 确定性运行（关闭 httpx 流 / 释放连接），不依赖 GC。"""
+    closed = {"hit": False}
 
     async def slow_gen():
-        yield _delta_chunk(content="first")
-        started.set()
         try:
+            yield _delta_chunk(content="first")
             await asyncio.sleep(10)  # 模拟上游下一 chunk 迟迟不来
-        except asyncio.CancelledError:
-            cancelled["hit"] = True
-            raise
-        yield _delta_chunk(content="never")
+            yield _delta_chunk(content="never")
+        finally:
+            closed["hit"] = True
 
     res = TurnResult()
     agen = stream_one_turn(
@@ -218,6 +215,4 @@ async def test_stream_one_turn_cancels_pending_task_on_early_close():
     first = await agen.__anext__()
     assert first["choices"][0]["delta"] == {"content": "first"}
     await agen.aclose()
-    # 让事件循环跑一拍，取消传播到底层 gen
-    await asyncio.sleep(0.05)
-    assert cancelled["hit"] is True
+    assert closed["hit"] is True

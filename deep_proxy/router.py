@@ -534,11 +534,13 @@ class DeepProxyRouter:
                     initial_iter, turn, tool_name=self.config.cross_consult.tool_name,
                     idle_timeout=idle, first_chunk_timeout=first, heartbeat_seconds=hb,
                 ):
-                    if frame.get("error"):
+                    if isinstance(frame.get("error"), dict) and not frame.get("choices"):
                         saw_error_frame = True
                     yield frame
                 if turn.errored:
-                    completed_cleanly = True
+                    # 初始轮超时/error（error frame 已透传或仅超时无帧）——非干净完成，
+                    # 不提交升格记账。
+                    saw_error_frame = True
                     return
                 if not turn.had_cc_call:
                     # 无 cc 调用：终轮，补发 finish_reason / 非 cc tool_calls
@@ -553,7 +555,11 @@ class DeepProxyRouter:
                         body=body, source_provider=provider, config=self.config,
                         cc_config=self.config.cross_consult, accumulator=accumulator,
                     ):
-                        if frame.get("error"):
+                        # 重发轮 errored 哨兵：标记不干净，吞掉不透传客户端
+                        if frame.get("_dp_stream_errored"):
+                            saw_error_frame = True
+                            continue
+                        if isinstance(frame.get("error"), dict) and not frame.get("choices"):
                             saw_error_frame = True
                         yield frame
                 completed_cleanly = True

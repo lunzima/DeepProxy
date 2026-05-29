@@ -294,6 +294,41 @@ async def test_iter_chat_chunks_heartbeat_during_consult(cfg_cross):
     assert any(f == {"_dp_heartbeat": True} for f in frames)
 
 
+async def test_iter_chat_chunks_timeout_does_not_commit_upgrade(cfg_cross):
+    """I-1 回归：初始轮首 chunk 超时（result.errored）不是干净完成，
+    不得提交升格记账（_commit_pending_upgrade 不被调用）。"""
+    import asyncio
+    from unittest.mock import patch
+    from deep_proxy.router import DeepProxyRouter
+    router = DeepProxyRouter(cfg_cross)
+    # 心跳 1s < 首 chunk 预算 2s → 先发一个心跳，再在第二个 tick 超时
+    router.config.cross_consult.first_chunk_timeout_seconds = 2
+    router.config.cross_consult.stream_heartbeat_seconds = 1
+    provider = cfg_cross.providers["deepseek"]
+
+    async def never_first(config, body, *, _accumulator=None, provider=None):
+        await asyncio.sleep(5)  # 首 chunk 永不在预算内到达
+        yield {"choices": [{"index": 0, "delta": {"content": "late"},
+                            "finish_reason": "stop"}]}
+
+    committed = {"hit": False}
+    def fake_commit(b):
+        committed["hit"] = True
+
+    with patch("deep_proxy.router.iter_litellm_chunks", new=never_first), \
+         patch.object(router, "_commit_pending_upgrade", new=fake_commit):
+        body = {"model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "use cc"}]}
+        body = await router.prepare_request(
+            body, sampling_profile=cfg_cross.precise_sampling, provider=provider,
+        )
+        frames = [f async for f in router.iter_chat_chunks(body, provider=provider)]
+
+    # 超时前发过心跳，但最终超时 → 不提交升格记账（I-1 核心断言）
+    assert any(f == {"_dp_heartbeat": True} for f in frames)
+    assert committed["hit"] is False
+
+
 async def test_resend_loop_uses_streaming_iter(cfg_cross):
     """关键回归：重发循环必须经过 streaming.iter_litellm_chunks（避免墙钟超时
     在深度思考期间错误地杀掉响应）。"""
