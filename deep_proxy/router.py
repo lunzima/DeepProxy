@@ -113,8 +113,8 @@ class DeepProxyRouter:
                 logger.warning(
                     "compress_skills=True 但未配置 DeepSeek api_key——"
                     "system prompt 压缩器降级为禁用（避免每请求静默 401）。"
-                    "若 MiMo-only 部署需启用压缩，请提供 deepseek.api_key 或"
-                    "配置 compressor 使用 MiMo provider。",
+                    "若需启用压缩，请提供 deepseek.api_key（当前 compressor 仅"
+                    "支持 DeepSeek 凭据；MiMo provider 凭据复用尚未实现）。",
                 )
             else:
                 from pathlib import Path

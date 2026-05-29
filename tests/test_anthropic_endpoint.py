@@ -525,9 +525,12 @@ class TestOpenAIStreamToClaude:
         assert msg_delta["usage"]["input_tokens"] == 100
         assert msg_delta["usage"]["output_tokens"] == 60
 
-    async def test_tool_call_arguments_null_mid_stream_does_not_crash(self):
-        """上游若中段发 arguments: null（非 str）应被守卫跳过，不抛 TypeError。
+    async def test_tool_call_arguments_non_string_mid_stream_does_not_crash(self):
+        """上游若中段发非 str 的 arguments（如 dict）应被 isinstance 守卫跳过。
 
+        旧实现 `if fn.get("arguments"): slot["arguments"] += args` 对 truthy
+        非 str（dict/list）会 TypeError 崩翻译器。falsy 值（None / 0）旧代码
+        碰巧 skip 不崩，所以必须用 truthy 非 str 才能真正 exercise 守卫。
         与 utils.merge_tool_call_deltas 的 isinstance(... str) 守卫语义一致。
         """
         async def fake():
@@ -535,9 +538,9 @@ class TestOpenAIStreamToClaude:
                 "index": 0, "id": "tc1", "type": "function",
                 "function": {"name": "f", "arguments": '{"x":'},
             }]}, "index": 0}]}
-            # 中段 arguments=None（非 str） — 历史上会让翻译器 TypeError
+            # 中段 arguments=dict（truthy 非 str） — 旧代码会 TypeError
             yield {"choices": [{"delta": {"tool_calls": [{
-                "index": 0, "function": {"arguments": None},
+                "index": 0, "function": {"arguments": {"garbage": "skipped"}},
             }]}, "index": 0}]}
             yield {"choices": [{"delta": {"tool_calls": [{
                 "index": 0, "function": {"arguments": "1}"},
@@ -546,12 +549,12 @@ class TestOpenAIStreamToClaude:
 
         events = await _collect(openai_stream_to_claude(fake(), requested_model="x"))
         parsed = [_parse_event(e) for e in events]
-        # 最终 tool_use 块的 input_json_delta 应包含完整 {"x":1}（中段 None 被跳过）
+        # 最终 tool_use 块的 input_json_delta 应包含完整 {"x":1}
+        # （中段 dict 被守卫跳过，不污染拼接结果；旧代码会在 dict 那帧 TypeError 崩流）
         input_deltas = [p for n, p in parsed
                         if n == "content_block_delta"
                         and p.get("delta", {}).get("type") == "input_json_delta"]
         assert input_deltas, "应至少产生一个 input_json_delta"
-        # partial_json 应是合法 JSON（中段 None 不污染拼接结果）
         import json as _json
         parsed_json = _json.loads(input_deltas[0]["delta"]["partial_json"])
         assert parsed_json == {"x": 1}
