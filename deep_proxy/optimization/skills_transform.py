@@ -93,6 +93,92 @@ _READURLS_OK_CT_PREFIXES = (
 )
 
 
+def _extract_urls(content: str) -> List[str]:
+    """从 content 中提取去重 + 上限截断后的待抓取 URL 列表。
+
+    纯函数，无 I/O；抽出便于单元测试 URL 解析 / 去重 / 上限逻辑。
+    """
+    raw = _URL_RE.findall(content) or []
+    seen: set[str] = set()
+    clean: List[str] = []
+    for url in raw:
+        cu = url.rstrip(",.;:'\"!?)]}")
+        if not cu or cu in seen:
+            continue
+        seen.add(cu)
+        clean.append(cu)
+        if len(clean) >= _READURLS_MAX_PER_MSG:
+            break
+    return clean
+
+
+async def _fetch_all(
+    client: httpx.AsyncClient, urls: List[str],
+) -> List[Any]:
+    """并发抓取所有 URL；per-URL 严格 timeout = _READURLS_TIMEOUT。
+
+    return_exceptions=True：单 URL 异常不阻断其它；上层按异常类型分流
+    （CancelledError 透传，其它吞掉）。asyncio.wait_for 防共享 httpx 客户端
+    的全局 10s timeout 让慢站点逃过 _READURLS_TIMEOUT 上限。
+    """
+    return await asyncio.gather(
+        *(
+            asyncio.wait_for(_fetch_url_text(client, u), timeout=_READURLS_TIMEOUT)
+            for u in urls
+        ),
+        return_exceptions=True,
+    )
+
+
+def _substitute_urls(content: str, urls: List[str], results: List[Any]) -> str:
+    """把 (url, fetched_snippet) 对替换进 content；异常/空抓取保持原样。
+
+    纯函数（除了让 CancelledError 透传给调用方处理）。
+    """
+    modified = content
+    for cu, res in zip(urls, results):
+        if isinstance(res, BaseException):
+            # CancelledError 必须重新抛出让上层 task 取消正常传播
+            if isinstance(res, asyncio.CancelledError):
+                raise res
+            logger.debug("readurls: %s 抓取异常被吞: %r", cu, res)
+            continue
+        snippet = res or ""
+        if not snippet:
+            continue
+        try:
+            domain = urlparse(cu).netloc or "url"
+        except Exception:
+            domain = "url"
+        modified = modified.replace(cu, f"{cu} [Content from {domain}: {snippet}]", 1)
+    return modified
+
+
+async def _process_one_message(
+    msg: Dict[str, Any], client: httpx.AsyncClient,
+) -> None:
+    """对单条 user 消息执行 URL 抓取 + 内联替换。
+
+    仅处理 string content 的 user 消息；非 user / 空 / 已内联过 / 无 URL
+    时直接 no-op。原地 mutate msg['content']。
+    """
+    if msg.get("role") != "user":
+        return
+    content = msg.get("content")
+    if not isinstance(content, str) or not content:
+        return
+    if _READURLS_MARKER in content:  # 已内联过则跳过（idempotent）
+        return
+    urls = _extract_urls(content)
+    if not urls:
+        return
+
+    results = await _fetch_all(client, urls)
+    modified = _substitute_urls(content, urls, results)
+    if modified != content:
+        msg["content"] = modified
+
+
 async def _apply_readurls(
     messages: List[Dict[str, Any]],
     *,
@@ -100,11 +186,14 @@ async def _apply_readurls(
 ) -> None:
     """对所有 user 消息抓取并内联其中 URL 的正文（optillm/plugins/readurls_plugin.py 同构）。
 
+    顶层只负责 httpx 客户端生命周期 + 跨 messages 的 fail-open 隔离；
+    单条 message 的 URL 提取/抓取/替换逻辑见 _process_one_message。
+
     健壮性原则（fail-open）：
-    - 任何单个 URL 抓取/解析的异常被吞在 `_fetch_url_text` 内（含 CancelledError 透传）
+    - 任何单个 URL 抓取/解析的异常被吞在 _fetch_url_text + _substitute_urls 内
     - 单条 message 处理崩溃不影响后续 messages
     - client 创建/关闭异常不影响整体流程，最坏情况 readurls 整体跳过
-    - 同一消息内多 URL 并发抓取，不被慢站点串行阻塞
+    - CancelledError 始终透传以让 task 取消正常传播
     """
     own_client = False
     if client is None:
@@ -121,63 +210,7 @@ async def _apply_readurls(
     try:
         for msg in messages:
             try:
-                if msg.get("role") != "user":
-                    continue
-                content = msg.get("content")
-                if not isinstance(content, str) or not content:
-                    continue
-                # 已内联过则跳过（idempotent）
-                if _READURLS_MARKER in content:
-                    continue
-                urls = _URL_RE.findall(content) or []
-                if not urls:
-                    continue
-                # 去重 + 上限：防滥发链接拖垮整请求（每个 URL 最多 _READURLS_TIMEOUT 秒）
-                seen: set[str] = set()
-                clean_urls: List[str] = []
-                for url in urls:
-                    cu = url.rstrip(",.;:'\"!?)]}")
-                    if not cu or cu in seen:
-                        continue
-                    seen.add(cu)
-                    clean_urls.append(cu)
-                    if len(clean_urls) >= _READURLS_MAX_PER_MSG:
-                        break
-
-                # 并发抓取（return_exceptions=True：单 URL 异常不影响其它）
-                # asyncio.wait_for 确保 per-URL 超时严格 = _READURLS_TIMEOUT，
-                # 防止共享 httpx 客户端的全局 10s timeout 让慢站点逃过 5s 上限。
-                results = await asyncio.gather(
-                    *(
-                        asyncio.wait_for(
-                            _fetch_url_text(client, u),
-                            timeout=_READURLS_TIMEOUT,
-                        )
-                        for u in clean_urls
-                    ),
-                    return_exceptions=True,
-                )
-
-                modified = content
-                for cu, res in zip(clean_urls, results):
-                    if isinstance(res, BaseException):
-                        # asyncio.CancelledError 也属 BaseException 的派生（>=3.8）
-                        if isinstance(res, asyncio.CancelledError):
-                            raise res
-                        logger.debug("readurls: %s 抓取异常被吞: %r", cu, res)
-                        continue
-                    snippet = res or ""
-                    if not snippet:
-                        continue
-                    try:
-                        domain = urlparse(cu).netloc or "url"
-                    except Exception:
-                        domain = "url"
-                    replacement = f"{cu} [Content from {domain}: {snippet}]"
-                    modified = modified.replace(cu, replacement, 1)
-
-                if modified != content:
-                    msg["content"] = modified
+                await _process_one_message(msg, client)
             except asyncio.CancelledError:
                 raise
             except Exception as e:

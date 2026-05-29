@@ -391,6 +391,57 @@ class TestReadUrls:
         assert "..." in c
 
 
+class TestReadUrlsHelpers:
+    """A7 重构后新增的纯函数 helper 单元测试（无 I/O，快）。"""
+
+    def test_extract_urls_dedup_and_trailing_punct_strip(self):
+        from deep_proxy.optimization.skills_transform import _extract_urls
+        content = "see https://a.com, and https://a.com. also https://b.com!"
+        urls = _extract_urls(content)
+        # 去重 + 尾部标点剥离
+        assert urls == ["https://a.com", "https://b.com"]
+
+    def test_extract_urls_respects_cap(self):
+        from deep_proxy.optimization.skills_transform import (
+            _extract_urls, _READURLS_MAX_PER_MSG,
+        )
+        urls = " ".join(f"https://h{i}.test/" for i in range(_READURLS_MAX_PER_MSG + 4))
+        result = _extract_urls(urls)
+        assert len(result) == _READURLS_MAX_PER_MSG
+
+    def test_extract_urls_no_urls_returns_empty(self):
+        from deep_proxy.optimization.skills_transform import _extract_urls
+        assert _extract_urls("no link here") == []
+
+    def test_substitute_urls_inlines_successful_results(self):
+        from deep_proxy.optimization.skills_transform import _substitute_urls
+        urls = ["https://a.com", "https://b.com"]
+        results = ["page A", "page B"]
+        out = _substitute_urls("see https://a.com and https://b.com", urls, results)
+        assert "[Content from a.com: page A]" in out
+        assert "[Content from b.com: page B]" in out
+
+    def test_substitute_urls_skips_exceptions_and_empty(self):
+        from deep_proxy.optimization.skills_transform import _substitute_urls
+        urls = ["https://a.com", "https://b.com", "https://c.com"]
+        results = [Exception("network"), "", "real content"]
+        out = _substitute_urls(
+            "x https://a.com y https://b.com z https://c.com", urls, results,
+        )
+        # a.com 异常 / b.com 空 都不内联；c.com 正常内联
+        assert "[Content from a.com" not in out
+        assert "[Content from b.com" not in out
+        assert "[Content from c.com: real content]" in out
+
+    def test_substitute_urls_reraises_cancelled_error(self):
+        import asyncio
+        from deep_proxy.optimization.skills_transform import _substitute_urls
+        urls = ["https://a.com"]
+        results = [asyncio.CancelledError("cancelled")]
+        with pytest.raises(asyncio.CancelledError):
+            _substitute_urls("https://a.com", urls, results)
+
+
 class TestCreativeMode:
     """验证 mode="creative" 时使用新 skills 路径。
 
