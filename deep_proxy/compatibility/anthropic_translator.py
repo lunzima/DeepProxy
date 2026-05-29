@@ -541,8 +541,12 @@ class _AnthropicStreamBuilder:
             fn = tc.get("function") or {}
             if fn.get("name"):
                 slot["name"] = fn["name"]
-            if fn.get("arguments"):
-                slot["arguments"] += fn["arguments"]
+            # arguments 增量必须是 str 才拼接；非 str（如 None / dict）跳过——
+            # 与 utils.merge_tool_call_deltas 的 isinstance 守卫保持一致，
+            # 避免某些 provider 发 arguments: null 中段 crash 翻译器
+            args_delta = fn.get("arguments")
+            if isinstance(args_delta, str) and args_delta:
+                slot["arguments"] += args_delta
 
     # ----------------------------------------------------------- emit helpers
 

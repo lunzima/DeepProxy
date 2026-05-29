@@ -101,16 +101,30 @@ class DeepProxyRouter:
         # LLM-based system prompt 压缩器（持久化磁盘缓存）
         # 复用 PreciseSamplingConfig 的采样预设：高确定性 + 微抖动，最适合
         # 同义改写类任务（确定性是主要诉求，微随机仅供并行重试）
+        #
+        # 凭据派生：compressor_model 默认带 deepseek/ 前缀 → 用 deepseek 凭据。
+        # 若用户改为 openai/mimo-* 等，需对应 provider 凭据；当前简化为：
+        # 仅当 deepseek.api_key 可用时初始化压缩器，否则降级 skip + 显式 warn
+        # （MiMo-only 部署未配 DeepSeek key 时，避免每请求静默 401 → 用户付
+        # 全 prompt tokens 而无感知）。
         self._compressor: SystemPromptCompressor | None = None
         if config.optimization.enabled and config.optimization.compress_skills:
-            from pathlib import Path
-            self._compressor = SystemPromptCompressor(
-                cache_path=Path(config.optimization.compressor_cache_path),
-                api_key=config.deepseek.api_key,
-                api_base=_to_litellm_api_base(config.deepseek.api_base),
-                model=config.optimization.compressor_model,
-                sampling=config.precise_sampling,
-            )
+            if not config.deepseek.api_key:
+                logger.warning(
+                    "compress_skills=True 但未配置 DeepSeek api_key——"
+                    "system prompt 压缩器降级为禁用（避免每请求静默 401）。"
+                    "若 MiMo-only 部署需启用压缩，请提供 deepseek.api_key 或"
+                    "配置 compressor 使用 MiMo provider。",
+                )
+            else:
+                from pathlib import Path
+                self._compressor = SystemPromptCompressor(
+                    cache_path=Path(config.optimization.compressor_cache_path),
+                    api_key=config.deepseek.api_key,
+                    api_base=_to_litellm_api_base(config.deepseek.api_base),
+                    model=config.optimization.compressor_model,
+                    sampling=config.precise_sampling,
+                )
 
     def _get_http_client(self) -> httpx.AsyncClient:
         """共享的 httpx 客户端，被上游 /v1/models 拉取与 readurls 优化复用。"""
@@ -197,7 +211,10 @@ class DeepProxyRouter:
         # 0c. 客户端 telemetry header 剥离（在升格哈希 / skills / 压缩缓存 key 之前）
         #     Claude Code 2.1.42+ 在 system 头部注入 `x-anthropic-billing-header: cc_version=...`
         #     含 session hash，每次新会话破坏 prefix cache。早期清理让所有下游看到稳定文本。
-        #     与 compressor 内部的 _normalize 形成双层防御。
+        #     生产路径下 main.py::chat_completions 已在 _maybe_redirect_provider 之前
+        #     调过同一个 strip（确保 RedirectTracker fingerprint 稳定）；此处是
+        #     直接调用 router.prepare_request 的测试场景的幂等 fallback。
+        #     与 compressor 内部的 _normalize 形成三层防御。
         if (
             self.config.optimization.enabled
             and self.config.optimization.strip_client_telemetry
@@ -382,27 +399,6 @@ class DeepProxyRouter:
         if cfg.router_type == "bert" and cfg.bert_checkpoint:
             return create_router("bert", checkpoint_path=cfg.bert_checkpoint)
         return create_router("rule")
-
-    def _stash_pending_upgrade(
-        self, body: dict[str, Any], messages: list[dict[str, Any]], turns: int,
-        *, provider_name: str = "deepseek",
-    ) -> None:
-        """快照 fingerprint + last_user_hash，等上游成功后再 commit。
-
-        必要性：set_remaining 直接写入会让失败的上游请求也"白扣"一个
-        Pro 轮次额度。延迟到 chat_completions / 流式自然结束后提交，
-        失败请求不污染 tracker。
-
-        快照在此处取，因为 messages 会被 skills 阶段（RE2/readurls）改写，
-        提交时直接读取已不可靠。
-        """
-        fp, last_user_h = UpgradeTracker.snapshot_keys(messages)
-        body["_deepproxy_pending_upgrade"] = {
-            "fingerprint": fp,
-            "last_user_hash": last_user_h,
-            "turns": turns,
-            "provider": provider_name,
-        }
 
     def _commit_pending_upgrade(self, body: dict[str, Any]) -> None:
         """上游成功后提交挂起的升格记账（无挂起则空操作）。"""

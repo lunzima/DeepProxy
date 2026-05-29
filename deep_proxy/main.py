@@ -227,17 +227,35 @@ def _binding_for_request(request: Request):
     return provider, sampling
 
 
+def _strip_telemetry_if_enabled(body: Dict[str, Any]) -> None:
+    """按 optimization.strip_client_telemetry 配置剥离 user/system 消息中的
+    x-anthropic-* telemetry header。在 _maybe_redirect_provider 之前调用，
+    确保 RedirectTracker.conversation_fingerprint 看到稳定的首条 user 内容
+    （Claude Code 2.1.42+ 注入的 telemetry 含 session hash，每会话变化，
+    会让 fingerprint 在首轮就不稳定，破坏 persist 窗口）。
+
+    幂等操作（regex sub），prepare_request step 0c 仍保留同一调用作为
+    fallback——便于直接调 router.prepare_request 的测试场景。
+    """
+    if config is None:
+        return
+    if not (config.optimization.enabled and config.optimization.strip_client_telemetry):
+        return
+    from .optimization.strip_telemetry import strip_telemetry_from_messages
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        strip_telemetry_from_messages(messages)
+
+
 def _maybe_redirect_provider(body, provider):
     """检测 user 消息中的标签或 persist 窗口，必要时覆盖 provider。
 
     sampling profile 不随重定向变化——标签是"换 provider"而非"换写作风格"，
     入站 port 的 profile 含义对用户更稳定。返回（可能被覆盖的）provider。
 
-    顺序说明：本函数在 prepare_request 之前调用，因此 conversation_fingerprint
-    在此处计算的是**telemetry-strip 之前**的首条 user 内容（prepare_request
-    step 0c 才剥离 x-anthropic-* 行）。flash_upgrade.UpgradeTracker 的指纹计算
-    则在 strip 之后。两个 tracker 各自独立维护状态、互不交叉引用，所以这种
-    时机不对称今天无实际影响——但若未来需要它们共享 key 必须先对齐顺序。
+    前提：调用方必须先调 _strip_telemetry_if_enabled(body)，否则
+    RedirectTracker.conversation_fingerprint 会包含 session-变化的
+    telemetry header，让首轮 fingerprint 不稳定。
     """
     if provider is None or config is None or router is None:
         return provider
@@ -263,9 +281,9 @@ async def chat_completions(request: Request):
 
     body: Dict[str, Any] = await request.json()
     provider, sampling = _binding_for_request(request)
-    # cross_consult 标签重定向：在 prepare_request 之前覆盖 provider，让下游
-    # 全部步骤（模型名规范化、thinking、reasoning_effort、flash_upgrade、
-    # 工具注入）按重定向后的 provider 走。
+    # telemetry 剥离必须先于 redirect/prepare_request，否则两个 tracker 的
+    # conversation_fingerprint 会包含 session-变化的 header → persist 窗口失稳
+    _strip_telemetry_if_enabled(body)
     provider = _maybe_redirect_provider(body, provider)
     body = await router.prepare_request(
         body, sampling_profile=sampling, provider=provider,
@@ -314,7 +332,8 @@ async def anthropic_messages(request: Request):
 
     openai_body = claude_request_to_openai(anthropic_body)
     provider, sampling = _binding_for_request(request)
-    # cross_consult 标签重定向（与 OpenAI 端点一致）
+    # telemetry 剥离 + cross_consult 标签重定向（顺序同 OpenAI 端点）
+    _strip_telemetry_if_enabled(openai_body)
     provider = _maybe_redirect_provider(openai_body, provider)
     openai_body = await router.prepare_request(
         openai_body, sampling_profile=sampling, provider=provider,
