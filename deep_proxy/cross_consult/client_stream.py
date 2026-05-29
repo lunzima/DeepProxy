@@ -49,12 +49,23 @@ async def with_heartbeat(
     """运行 awaitable，期间每 heartbeat_seconds 无完成就 yield 一个心跳帧；
     完成后 yield 单个 _Done(result)。"""
     task = asyncio.ensure_future(awaitable)
-    while True:
-        done, _ = await asyncio.wait({task}, timeout=heartbeat_seconds)
-        if task in done:
-            yield _Done(task.result())
-            return
-        yield _HEARTBEAT
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=heartbeat_seconds)
+            if task in done:
+                yield _Done(task.result())
+                return
+            yield _HEARTBEAT
+    finally:
+        # 消费者提前关闭生成器（客户端断连 → GeneratorExit）时，取消并 drain
+        # 仍 in-flight 的 awaitable（如 execute_consult），避免 "Task was destroyed
+        # but it is pending" 警告与浪费的上游调用。
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
 
 
 @dataclass

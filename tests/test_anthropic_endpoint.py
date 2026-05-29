@@ -488,6 +488,19 @@ class TestOpenAIStreamToClaude:
                            if _parse_event(e)[0] == "error")
         assert err_payload["error"]["message"] == "boom"
 
+    async def test_heartbeat_translated_to_ping_event(self):
+        """cross_consult 心跳哨兵 → Anthropic ping 事件（保持连接温热）。"""
+        async def fake():
+            yield {"_dp_heartbeat": True}
+            yield {"choices": [{"delta": {"content": "hi"}, "index": 0,
+                                "finish_reason": "stop"}]}
+
+        events = await _collect(openai_stream_to_claude(fake(), requested_model="x"))
+        names = [_parse_event(e)[0] for e in events]
+        assert "ping" in names
+        # 心跳不得污染内容流：内容仍正常翻译
+        assert "content_block_delta" in names
+
     async def test_reasoning_after_text_opens_new_thinking_block(self):
         """边缘场景：reasoning_content 在 text 已开后到达。
 

@@ -678,6 +678,11 @@ async def openai_stream_to_claude(
     async for chunk in openai_chunks:
         if not isinstance(chunk, dict):
             continue
+        if chunk.get("_dp_heartbeat"):
+            # cross_consult 静默间隙的 keep-alive：翻成 Anthropic 原生 ping 事件，
+            # 保持连接温热、防客户端 idle-read 超时（对应 OpenAI 路径的 SSE 注释帧）。
+            yield "event: ping\ndata: {\"type\": \"ping\"}\n\n"
+            continue
         events = builder.on_chunk(chunk)
         for ev in events:
             yield ev
