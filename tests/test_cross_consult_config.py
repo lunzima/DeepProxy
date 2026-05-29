@@ -70,7 +70,6 @@ def test_proxyconfig_cross_consult_enabled_but_inert_without_pairs():
         "deepseek": {"api_key": "sk"},
     }))
     assert cfg.cross_consult.enabled is True
-    # 但 pairs 未配置 → 不会触发任何注入 / 重定向
     assert cfg.cross_consult.pair_for("deepseek") is None
 
 
