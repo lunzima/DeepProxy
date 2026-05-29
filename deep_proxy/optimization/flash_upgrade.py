@@ -262,9 +262,9 @@ class UpgradeTracker:
 # ======================================================================
 # Layer 1：启发式复杂度评分
 # ======================================================================
-# 关键词权重表：每个关键词触发 +0.3，上限 2.0
-# 叠加规则：与 token 数、代码块比例、数学符号密度、消息历史长度等其他信号共同计算
-# 阈值建议：>= 0.7（或根据 router_threshold 配置）→ 直接升格 Pro
+# 关键词权重表：每个关键词触发 +0.30，user-only 扫描，cap 2.0。
+# 与 math / turn / last_user_size / reasoning_density 共同求和，
+# 总分 >= heuristic_threshold（默认 8.0）→ 启发式升格 Pro。
 #
 # 制定原则：
 # 1. 来源：提取自主流 CLI/Router 开源项目的路由逻辑，覆盖所有升格场景类别。
@@ -370,8 +370,12 @@ def compute_complexity_score(
       2. math_score    (cap 1.5)        — _MATH_SYMBOLS 密度，数学/形式化任务
       3. turn_score    (cap 2.0)        — user 消息数 / 3，迭代持续度
       4. last_user_size_score (cap 3.0) — 最后一条 user 长度 / 300，当前请求分量
-      5. reasoning_score (cap 4.0)      — V4 reasoning_content 平均每条 assistant
+      5. reasoning_score (cap 8.0)      — V4 reasoning_content 平均每条 assistant
                                           字符数 / 500，直接测量推理强度
+                                          cap 设为 8.0（= heuristic_threshold）让
+                                          重度 reasoning 单维度即可触发升格——
+                                          这是 Direction A（简单 user + 复杂 grind）
+                                          唯一的触发路径（BERT 仅看 user，看不到 grind）。
 
     Direction A/B/C 全部由 5 维 + router._maybe_upgrade Step 2 hysteresis 覆盖。
     已删除：token_score（全文本噪声）、code_score（不区分复杂度）、discount
@@ -403,13 +407,18 @@ def compute_complexity_score(
     # 5. reasoning_density — V4 reasoning_content 平均每条 assistant 长度
     #    直接测量"模型在思考多努力"，跨编码 / 写作都有效；
     #    机械重复任务下 reasoning 几乎为空 → 信号降为零 → 配合
-    #    router 侧 downgrade_threshold 形成 Direction C 主动降格
+    #    router 侧 downgrade_threshold 形成 Direction C 主动降格。
+    #    cap=8.0 = heuristic_threshold：让重度 reasoning 单维度即可触发升格，
+    #    覆盖 Direction A（简单 user prompt + 长 agent grind）——这是该
+    #    场景唯一的触发路径，因为 BERT 输入 user-only 看不到 grind。
+    #    Dilution 注意：混合 V4 + non-V4 历史时无 reasoning_content 的 assistant
+    #    会拉低平均值，这是 *有意* 的——我们要持续 reasoning 而非一次性 spike。
     asst = [m for m in messages if m.get("role") == "assistant"]
     if asst:
         reasoning_chars = sum(
             len(m.get("reasoning_content") or "") for m in asst
         )
-        reasoning_score = min((reasoning_chars / len(asst)) / 500.0, 4.0)
+        reasoning_score = min((reasoning_chars / len(asst)) / 500.0, 8.0)
     else:
         reasoning_score = 0.0
 
@@ -459,4 +468,4 @@ def extra_body_requests_upgrade(body: Dict[str, Any]) -> bool:
     return bool(body.get(_EXTRA_BODY_SENTINEL, False))
 
 
-# _flatten_messages 已迁移到 utils.flatten_messages（含 user_only / assistant_only 双开关）。
+# _flatten_messages 已迁移到 utils.flatten_messages（含 user_only 开关）。

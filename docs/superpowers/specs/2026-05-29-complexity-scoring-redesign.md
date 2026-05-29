@@ -45,11 +45,13 @@ def compute_complexity_score(messages):
     last_user_size_score = min(len(last_user) / 300.0, 3.0)
 
     # 5. reasoning_density（新增）— V4 reasoning_content 平均每条 assistant 长度
-    #    直接测量"模型在思考多努力"，跨编码/写作都有效；机械重复时降为零
+    #    直接测量"模型在思考多努力"，跨编码/写作都有效；机械重复时降为零。
+    #    cap=8.0 = heuristic_threshold：重度 reasoning 单维度即可触发升格——
+    #    这是 Direction A 唯一的触发路径（BERT user-only 看不到 grind）。
     asst = [m for m in messages if m.get("role") == "assistant"]
     if asst:
         reasoning_chars = sum(len(m.get("reasoning_content") or "") for m in asst)
-        reasoning_score = min((reasoning_chars / len(asst)) / 500.0, 4.0)
+        reasoning_score = min((reasoning_chars / len(asst)) / 500.0, 8.0)
     else:
         reasoning_score = 0.0
 
@@ -57,7 +59,7 @@ def compute_complexity_score(messages):
     return ComplexityResult(round(min(score, 10.0), 2), user_text, user_turns)
 ```
 
-加和上限 = 2.0 + 1.5 + 2.0 + 3.0 + 4.0 = 12.5 → clamp 10。
+加和上限 = 2.0 + 1.5 + 2.0 + 3.0 + 8.0 = 16.5 → clamp 10。reasoning cap 8.0 = `heuristic_threshold`，让重度 reasoning 单维度即可触发升格（Direction A 唯一触发路径）。
 
 ### 二、Direction C 主动降格机制
 
@@ -127,7 +129,7 @@ if self._upgrade_tracker.is_upgraded(messages, provider=provider_name):
 
 | 方向 | 信号来源 | 触发路径 |
 |------|---------|---------|
-| **A** 简单 user + 复杂 grind | reasoning_score 累积（4.0 cap） + turn 略增 | 总分跨过 `heuristic_threshold` (8.0 / MiMo 7.5) |
+| **A** 简单 user + 复杂 grind | reasoning_score 单维度可达 8.0（cap = heuristic_threshold）；avg ~4000 字 reasoning/turn 即触发 | 总分跨过 `heuristic_threshold` (8.0 / MiMo 7.5)，**纯 heuristic 路径**（BERT user-only 看不到 grind） |
 | **B** 复杂 user + 简单 follow-up "继续" | keyword_score 累积全部 user 历史 + reasoning_score 已累积；last_user_size 局部低但占比仅 3 / 12.5 | 总分稳在 downgrade_threshold (3.0 / MiMo 2.5) 之上 |
 | **C** 升格后机械重复 | reasoning_density 下降到接近零（机械任务无推理） + 其它静态信号不动 | 总分跌破 downgrade_threshold → Step 2 hysteresis 主动撤销升格 |
 

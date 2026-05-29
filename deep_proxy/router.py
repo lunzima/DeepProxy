@@ -481,8 +481,9 @@ class DeepProxyRouter:
                     "升格主动撤销: score=%.2f < downgrade_thr=%.2f → 切回 %s",
                     current_score, downgrade_thr, flash_model,
                 )
-                # 不 return——继续走 Step 3/3.5/4 让本轮按当下信号决定（可能
-                # 再次升格如果 agent_depth >= 5 等其它信号仍触发）
+                # 不 return——继续走 Step 3/4 让本轮按当下信号重新决定
+                # （reasoning 仍高 / 用户新增关键词等可能再次升格）。
+                # 注：is_upgraded 在迁移 hash 时已扣 1 轮，丢一轮可接受——本来就要降格
             else:
                 remaining = self._upgrade_tracker.remaining(messages, provider=provider_name)
                 logger.info(

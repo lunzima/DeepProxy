@@ -114,9 +114,33 @@ def test_direction_a_simple_user_plus_long_reasoning_grind_high_score():
             "reasoning_content": "长篇推理：分析问题，分解步骤，验证假设。" * 200,  # ~5000+ chars
         })
     score = compute_complexity_score(msgs).score
-    # reasoning avg ~5000 chars/turn → score = min(5000/500, 4.0) = 4.0 cap
-    # 加 turn 0.33 → 总分应 >= 4
-    assert score >= 4.0, f"长 reasoning grind 应抬高 score，实际 {score}"
+    # reasoning avg ~5000 chars/turn → score = min(5000/500, 8.0) = 8.0 cap
+    # 加 turn 0.33 → 总分应 >= 8
+    assert score >= 8.0, f"长 reasoning grind 应抬高 score 到 heuristic 阈值，实际 {score}"
+
+
+def test_direction_a_end_to_end_triggers_heuristic_upgrade():
+    """Direction A 端到端：简单 user + 8 轮长 reasoning grind → router 实际升格。"""
+    from deep_proxy.router import DeepProxyRouter
+    cfg = _simple_cfg()  # heuristic_threshold = 8.0
+    router = DeepProxyRouter(cfg)
+
+    # 简单 user prompt，无关键词 — 模拟典型 Direction A 场景
+    msgs = [{"role": "user", "content": "做"}]
+    for _ in range(8):
+        msgs.append({
+            "role": "assistant",
+            "content": "继续工作中...",
+            "reasoning_content": "深度推理：分析问题，分解步骤，验证假设。" * 200,
+        })
+
+    body = {"model": "deepseek-v4-flash", "messages": msgs}
+    router._maybe_upgrade(body, provider=cfg.providers["deepseek"])
+
+    # reasoning_score 单维度 cap=8.0 已能跨过 heuristic_threshold（启发式路径）
+    assert body["model"] == "deepseek-v4-pro", (
+        f"Direction A 长 reasoning grind 应被 heuristic 升格，实际 {body['model']}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +221,44 @@ def test_direction_c_keeps_pro_when_reasoning_still_high():
 # ---------------------------------------------------------------------------
 # per_provider downgrade_threshold 覆盖
 # ---------------------------------------------------------------------------
+
+
+def test_misconfig_downgrade_geq_heuristic_rejected():
+    """downgrade_threshold >= heuristic_threshold 触发 pydantic 校验失败。"""
+    with pytest.raises(ValueError, match="hysteresis"):
+        ProxyConfig.model_validate({
+            "providers": {
+                "deepseek": {"name": "deepseek", "api_base": "x", "api_key": "y",
+                             "litellm_prefix": "deepseek/",
+                             "flash_model": "deepseek-v4-flash",
+                             "pro_model": "deepseek-v4-pro"},
+            },
+            "ports": [{"port": 8000, "provider": "deepseek", "sampling": "precise"}],
+            "deepseek": {"api_key": "y"},
+            "flash_upgrade": {
+                "heuristic_threshold": 5.0,
+                "downgrade_threshold": 5.0,  # 等于 → 拒绝
+            },
+        })
+
+
+def test_misconfig_per_provider_downgrade_geq_heuristic_rejected():
+    """per_provider 也要遵守 hysteresis 约束。"""
+    with pytest.raises(ValueError, match="per_provider"):
+        ProxyConfig.model_validate({
+            "providers": {
+                "mimo": {"name": "mimo", "api_base": "x", "api_key": "y",
+                         "litellm_prefix": "openai/",
+                         "flash_model": "mimo-v2.5", "pro_model": "mimo-v2.5-pro"},
+            },
+            "ports": [{"port": 8001, "provider": "mimo", "sampling": "creative"}],
+            "deepseek": {"api_key": "y"},
+            "flash_upgrade": {
+                "heuristic_threshold": 8.0,
+                "downgrade_threshold": 3.0,
+                "per_provider": {"mimo": {"downgrade_threshold": 9.0}},  # > heuristic
+            },
+        })
 
 
 def test_per_provider_downgrade_threshold_override():

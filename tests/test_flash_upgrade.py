@@ -254,57 +254,31 @@ class TestComputeComplexityScore:
         score = compute_complexity_score(msgs).score
         assert score >= 1.0  # 关键词命中
 
-    def test_very_long_context(self):
-        """8000+ tokens 的上下文得高分。"""
-        long_text = "Hello world. " * 5000
-        msgs = [{"role": "user", "content": long_text}]
-        score = compute_complexity_score(msgs).score
-        assert score >= 2.0  # token 量加分
-
-    def test_context_inflation_discounts_token_and_code(self):
-        """Qwen Code 典型场景：大量拼接的代码上下文 + 简短用户提问。
-
-        大量 token/代码块应被大幅折扣，最终分数远低于不折扣场景。
-        """
-        # 模拟 Qwen Code 拼接了大量代码上下文（~10K chars） + 用户简单提问
+    def test_last_user_size_protects_against_context_inflation(self):
+        """长 prompt 引发膨胀场景：评分应主要由最后一条 user 长度驱动，
+        不被历史中粘贴的大段代码 / tool output 灌爆。"""
         big_file = ("def process_data():\n    x = 1\n    y = 2\n    return x + y\n" * 200)
-        msgs = [
+        # 场景 1：历史很长但最后一条 user 短 → last_user_size_score 低
+        inflated = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": f"file1:\n```python\n{big_file}\n```"},
             {"role": "assistant", "content": "Got it."},
-            {"role": "user", "content": f"file2:\n```python\n{big_file}\n```"},
-            {"role": "assistant", "content": "OK."},
-            {"role": "user", "content": "帮我看看这段代码"},  # 最后一条很短 (< 1% 总量)
+            {"role": "user", "content": "帮我看看"},  # 短
         ]
-        score = compute_complexity_score(msgs).score
+        s_inflated = compute_complexity_score(inflated).score
 
-        # 无膨胀反事实：同样的代码内容 + 用户主动长提问（无折扣）
-        msgs_no_inflation = [
+        # 场景 2：用户主动长提问 → last_user_size_score 高 + 关键词加分
+        long_ask = [
             {"role": "user", "content":
-                f"file1:\n```python\n{big_file}\n```\n"
-                f"file2:\n```python\n{big_file}\n```\n"
-                "请分析这两个文件中的架构设计问题，并进行全面的代码审查。论证系统的一致性。"},
+                f"```python\n{big_file}\n```\n"
+                "请分析这个文件的架构设计问题，并进行全面的代码审查。论证系统的一致性。"},
         ]
-        score_no = compute_complexity_score(msgs_no_inflation).score
+        s_long = compute_complexity_score(long_ask).score
 
-        # 膨胀场景 token/代码块折扣 70%，应显著低于无膨胀场景
-        assert score < score_no, f"膨胀分数 {score} 应低于无膨胀 {score_no}"
-        # 膨胀分数应远低于 threshold (6.5)，不应触发升格
-        assert score < 5.0, f"膨胀分数 {score} 应低于 5.0（threshold=6.5）"
-
-    def test_context_inflation_not_triggered_when_user_long(self):
-        """最后一条 user 消息占比 >= 15% 时不触发膨胀折扣。"""
-        short_prefix = "Context: "  # 短前缀
-        long_question = "请详细分析这个分布式系统的架构设计，论证其一致性保证。" * 5  # 长提问
-        msgs = [
-            {"role": "system", "content": short_prefix},
-            {"role": "user", "content": long_question},
-        ]
-        # user_fraction ≈ len(long_question) / (len(short_prefix) + len(long_question)) >> 0.15
-        score = compute_complexity_score(msgs).score
-
-        # 不应触发折扣：关键词如 "分析" "分布式" "架构" "一致性" "论证" 全部有效
-        assert score >= 1.0, f"长提问未膨胀场景应保持有效分数，得 {score}"
+        # 长提问应明显高分
+        assert s_long > s_inflated, (
+            f"主动长提问 {s_long} 应高于历史膨胀短提问 {s_inflated}"
+        )
 
 
 # ======================================================================

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .providers import Provider, PortBinding
 from .cross_consult import CrossConsultConfig
@@ -332,6 +332,26 @@ class FlashUpgradeConfig(BaseModel):
         if key in overrides:
             return float(overrides[key])
         return float(getattr(self, key))
+
+    @model_validator(mode="after")
+    def _validate_hysteresis(self):
+        """downgrade_threshold 必须严格小于 heuristic_threshold，否则会出现
+        flash → pro → flash 的连续抖动（Step 3 升 / Step 2 降）。
+        per_provider 覆盖也要遵守。"""
+        if self.downgrade_threshold >= self.heuristic_threshold:
+            raise ValueError(
+                f"downgrade_threshold ({self.downgrade_threshold}) 必须 < "
+                f"heuristic_threshold ({self.heuristic_threshold}) 以形成 hysteresis"
+            )
+        for name, overrides in (self.per_provider or {}).items():
+            d = float(overrides.get("downgrade_threshold", self.downgrade_threshold))
+            h = float(overrides.get("heuristic_threshold", self.heuristic_threshold))
+            if d >= h:
+                raise ValueError(
+                    f"per_provider[{name}]: downgrade_threshold ({d}) 必须 < "
+                    f"heuristic_threshold ({h})"
+                )
+        return self
 
 
 class CreativeSamplingConfig(BaseModel):
