@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..deepseek_models import V4_FLASH
-from ..utils import hash_str
+from ..utils import hash_str, sample_in_range
 
 logger = logging.getLogger(__name__)
 
@@ -335,7 +335,6 @@ class SystemPromptCompressor:
             "thinking": {"type": "disabled", "reasoning_effort": "minimal"},
         }
         if self._sampling is not None:
-            from ..utils import sample_in_range
             s = self._sampling
             kwargs["temperature"] = sample_in_range(s.temperature_min, s.temperature_max)
             kwargs["top_p"] = sample_in_range(s.top_p_min, s.top_p_max)

@@ -83,7 +83,11 @@ class UpgradeDecisionEngine:
             return
         if self._step_throttle_cooldown(messages, params):
             return
-        if self._step_persist_cache_with_hysteresis(body, messages, params):
+        # 持久缓存分两步：
+        # (1) 检查是否在升格窗口内 + 重评估 → 若 score 低则 hysteresis 清缓存（不短路，让 step 3/4 重新决定）
+        # (2) 若窗口内 + score 仍高 → 命中 cache，确定走 Pro 并短路
+        # 拆两步避免单步既能"清+落+短路"又能"清+不短路"的混乱语义。
+        if self._step_persist_cache_hit(body, messages, params):
             return
         self._step_compute_and_commit(body, messages, params)
 
@@ -157,14 +161,21 @@ class UpgradeDecisionEngine:
         logger.info("升格限流冷却中 → 强制 %s", params.flash_model)
         return True  # 不 mutate body['model']（保持原 flash），但短路完成
 
-    def _step_persist_cache_with_hysteresis(
+    def _step_persist_cache_hit(
         self, body: Dict[str, Any], messages: List[Dict[str, Any]],
         params: _ProviderParams,
     ) -> bool:
-        """Step 2b：持久缓存命中 + Direction C hysteresis 主动降格。
+        """Step 2b：持久缓存命中 + Direction C hysteresis 重评估。
 
-        在 persist 窗口内重新评估 score；< downgrade_threshold 时清 tracker
-        让后续 Step 3/4 重新决策；≥ downgrade_threshold 时维持 Pro 直接返回。
+        分支：
+          - tracker 无升格记录 → 返回 False，让 step 3/4 正常决策
+          - tracker 有升格记录 + 复杂度 < downgrade_thr → 清 tracker 后
+            返回 False（主动 hysteresis 降格；继续走 step 3/4 重新决定）
+          - tracker 有升格记录 + 复杂度 >= downgrade_thr → 写 pro_model
+            到 body 并返回 True（短路）
+
+        注：is_upgraded 在迁移 hash 时已扣 1 轮；hysteresis 降格场景下
+        丢一轮可接受（本来就要降格）。
         """
         if not self._tracker.is_upgraded(messages, provider=params.provider_name):
             return False
@@ -176,9 +187,7 @@ class UpgradeDecisionEngine:
                 "升格主动撤销: score=%.2f < downgrade_thr=%.2f → 切回 %s",
                 current_score, params.downgrade_thr, params.flash_model,
             )
-            # 不 return True——继续走 Step 3/4 让本轮按当下信号重新决定
-            # 注：is_upgraded 在迁移 hash 时已扣 1 轮；丢一轮可接受（本来就要降格）
-            return False
+            return False  # hysteresis 降格：让后续 step 重新决定
 
         remaining = self._tracker.remaining(messages, provider=params.provider_name)
         logger.info(
@@ -236,7 +245,7 @@ class UpgradeDecisionEngine:
                 self._tracker.clear(messages, provider=params.provider_name)
                 logger.info(
                     "升格限流: 连续 %d 次触发 → 强制 Flash（冷却 %d 轮）",
-                    self._throttle._max, self._throttle._cooldown,
+                    self._throttle.max_repeats, self._throttle.cooldown_turns,
                 )
         else:
             self._throttle.should_throttle(messages, False)

@@ -28,6 +28,8 @@ from .clone_models import CLONE_MODELS
 from .deepseek_models import DEEPSEEK_MODELS, V4_MODELS, V4_MODELS_1M
 from .deepseek_pricing import _V4_CONTEXT_WINDOW, _V4_MAX_OUTPUT, model_pricing
 from .litellm_client import _to_litellm_api_base
+from .mimo_models import MIMO_MODELS
+from .mimo_pricing import model_pricing as mimo_model_pricing
 from .providers import Provider
 
 logger = logging.getLogger(__name__)
@@ -99,7 +101,7 @@ def normalize_model_entry(entry: Dict[str, Any], *, provider: Provider | None = 
     created = int(entry.get("created") or 1700000000)
 
     if provider is not None and provider.name == "mimo":
-        from .mimo_pricing import model_pricing as _pricing_fn
+        _pricing_fn = mimo_model_pricing
         default_owned_by = "xiaomi"
         default_desc_prefix = "MiMo"
     else:
@@ -206,7 +208,6 @@ def build_models_list(
     同时携带 OpenAI/OpenRouter 与 Anthropic 两套字段。
     """
     if provider is not None and provider.name == "mimo":
-        from .mimo_models import MIMO_MODELS
         return [normalize_model_entry(m, provider=provider) for m in MIMO_MODELS.values()]
 
     # DeepSeek path: 现有逻辑，provider 透传到每个 normalize 调用

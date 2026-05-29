@@ -76,6 +76,16 @@ class RepeatUpgradeThrottle:
         """当前跟踪的 (fingerprint, last_user_hash) 条目数。供健康检查公开访问。"""
         return len(self._state)
 
+    @property
+    def max_repeats(self) -> int:
+        """连续触发上限。供日志 / 健康检查 / 决策引擎读取，避免下游穿透 _max。"""
+        return self._max
+
+    @property
+    def cooldown_turns(self) -> int:
+        """冷却轮数。供日志 / 决策引擎读取，避免下游穿透 _cooldown。"""
+        return self._cooldown
+
     def in_cooldown(self, messages: List[Dict[str, Any]]) -> bool:
         """只读查询：当前 (fingerprint, last_user) 是否处于冷却期。
 

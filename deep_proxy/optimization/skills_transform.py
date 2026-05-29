@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from ..utils import prepend_to_system_message
+from ..utils import find_system_message, prepend_to_system_message
 from .skills_general import _COT_SYSTEM_PROMPT, _READURLS_MARKER
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,6 @@ def _apply_cot_reflection(messages: List[Dict[str, Any]]) -> None:
 
     使用 prepend_to_system_message 统一插入逻辑。
     """
-    from ..utils import find_system_message
     _idx, content, _compressible = find_system_message(messages)
     if content and _COT_SYSTEM_PROMPT in content:
         return  # 已存在，跳过

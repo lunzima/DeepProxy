@@ -50,7 +50,9 @@ from .optimization.dynamic_baskets import (
     assemble_paragraphs as _assemble_basket_paragraphs,
     scenario_from_profile as _scenario_from_profile,
 )
+from .compatibility.mimo_fixes import inject_top_level_reasoning_effort
 from .cross_consult import RedirectTracker
+from .cross_consult.interceptor import execute_cross_consult_loop, inject_into_request
 from .optimization.flash_upgrade import (
     RepeatUpgradeThrottle,
     UpgradeTracker,
@@ -222,7 +224,6 @@ class DeepProxyRouter:
                     td.setdefault("type", "enabled")
                     td.setdefault("reasoning_effort", value)
                 elif field_path == "reasoning_effort":
-                    from .compatibility.mimo_fixes import inject_top_level_reasoning_effort
                     inject_top_level_reasoning_effort(body, value=value)
                 else:
                     logger.warning("未知 reasoning_effort_field: %s", field_path)
@@ -352,7 +353,6 @@ class DeepProxyRouter:
             self.config.cross_consult.enabled
             and provider is not None
         ):
-            from .cross_consult.interceptor import inject_into_request
             inject_into_request(
                 body,
                 source_provider_name=provider.name,
@@ -447,7 +447,6 @@ class DeepProxyRouter:
         result = self.process_response(raw, provider=provider)
         # Cross-Consult 拦截：若响应含 cross_consult tool_call，执行 consult + 重发循环
         if self.config.cross_consult.enabled and provider is not None:
-            from .cross_consult.interceptor import execute_cross_consult_loop
             result = await execute_cross_consult_loop(
                 body=body,
                 initial_response=result,
@@ -545,7 +544,6 @@ class DeepProxyRouter:
                             "finish_reason": "tool_calls",
                         }],
                     }
-                    from .cross_consult.interceptor import execute_cross_consult_loop
                     final_result = await execute_cross_consult_loop(
                         body=body, initial_response=initial_response,
                         source_provider=provider, config=self.config,
