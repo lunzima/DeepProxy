@@ -28,7 +28,7 @@ from .compatibility.deepseek_fixes import (
     normalize_model_name,
     sanitize_stream_options,
 )
-from .deepseek_models import V4_FLASH, V4_PRO
+from .deepseek_models import V4_FLASH
 from .compatibility.error_mapper import (
     strip_unsupported_params,
 )
@@ -54,10 +54,8 @@ from .cross_consult import RedirectTracker
 from .optimization.flash_upgrade import (
     RepeatUpgradeThrottle,
     UpgradeTracker,
-    compute_complexity_score,
-    extra_body_requests_upgrade,
-    has_upgrade_sentinel,
 )
+from .optimization.upgrade_decision import UpgradeDecisionEngine
 from .optimization.upgrade_router import create_router
 from .optimization.silly_priming import (
     pick_n as _pick_silly_n,
@@ -84,6 +82,13 @@ class DeepProxyRouter:
         self._upgrade_tracker = UpgradeTracker()
         self._upgrade_router = self._build_upgrade_router()
         self._upgrade_throttle = RepeatUpgradeThrottle()
+        # 升格决策引擎封装 5 步策略（_maybe_upgrade 仅作 shim）
+        self._upgrade_engine = UpgradeDecisionEngine(
+            cfg=config.flash_upgrade,
+            upgrade_tracker=self._upgrade_tracker,
+            throttle=self._upgrade_throttle,
+            bert_router=self._upgrade_router,
+        )
         # cross_consult 标签触发的整轮 provider 重定向跟踪器
         self._redirect_tracker = RedirectTracker()
         # LLM-based system prompt 压缩器（持久化磁盘缓存）
@@ -434,125 +439,12 @@ class DeepProxyRouter:
         *,
         provider: Provider | None = None,
     ) -> None:
-        """Flash→Pro 升格路由主逻辑（Layer 0–3，全部 upfront）。
+        """Flash→Pro 升格路由 — shim 委托给 UpgradeDecisionEngine。
 
-        决策顺序（短路）：
-          1. Sentinel 强制升格（最高优先级）
-          2. 对话已升格（Layer 3 持久化）
-          3. 启发式快速路径（Layer 1）
-          4. Router 决策（Layer 0）
-
-        持久化记账（set_remaining）通过 _stash_pending_upgrade 延迟到上游
-        成功后由调用方 commit，避免失败请求白扣 Pro 槽位。
-
-        Args:
-            provider: Provider 实例或 None。给定时使用 provider.pro_model /
-                provider.flash_model 以及 per-provider 阈值覆盖；None 时退回
-                硬编码 V4_PRO / V4_FLASH（向后兼容）。
+        历史 API 保留（46 个 test_flash_upgrade 用例直接调用本方法）；
+        实际策略实现见 optimization/upgrade_decision.py。
         """
-        cfg = self.config.flash_upgrade
-        messages = body.get("messages", [])
-
-        # 取目标 pro_model / flash_model 与阈值（per-provider 覆盖优先）
-        if provider is not None:
-            pro_model = provider.pro_model
-            flash_model = provider.flash_model
-            provider_name = provider.name
-            router_thr = cfg.threshold_for_provider(provider.name, "router_threshold")
-            heur_thr = cfg.threshold_for_provider(provider.name, "heuristic_threshold")
-        else:
-            pro_model = V4_PRO
-            flash_model = V4_FLASH
-            provider_name = "deepseek"
-            router_thr = cfg.router_threshold
-            heur_thr = cfg.heuristic_threshold
-
-        # ── Step 1: Sentinel / extra_body 强制升格 ──
-        if has_upgrade_sentinel(messages) or extra_body_requests_upgrade(body):
-            logger.info("Sentinel 强制升格 → %s", pro_model)
-            body["model"] = pro_model
-            self._stash_pending_upgrade(body, messages, cfg.persist_turns, provider_name=provider_name)
-            return
-
-        # ── Step 2: 对话已处于升格状态（Layer 3 持久化） ──
-        # 预检 throttle 冷却：throttle 触发后的 cooldown 期内必须强制 Flash，
-        # 不能让 persist cache 越过 throttle。
-        if self._upgrade_throttle.in_cooldown(messages):
-            self._upgrade_throttle.should_throttle(messages, False)  # 推进冷却计数
-            self._upgrade_tracker.clear(messages, provider=provider_name)
-            logger.info("升格限流冷却中 → 强制 %s", flash_model)
-            return
-
-        if self._upgrade_tracker.is_upgraded(messages, provider=provider_name):
-            # 在持久升格窗口内仍重新评估当前复杂度——避免"复杂提问触发 Pro
-            # 后实际任务机械简单但多轮"的浪费（plan §Direction C）。
-            # hysteresis：upgrade=heur_thr / downgrade=downgrade_thr，gap 足够大
-            # 防止抖动反复切换。
-            current_score = compute_complexity_score(messages).score
-            downgrade_thr = cfg.threshold_for_provider(provider_name, "downgrade_threshold")
-            if current_score < downgrade_thr:
-                self._upgrade_tracker.clear(messages, provider=provider_name)
-                logger.info(
-                    "升格主动撤销: score=%.2f < downgrade_thr=%.2f → 切回 %s",
-                    current_score, downgrade_thr, flash_model,
-                )
-                # 不 return——继续走 Step 3/4 让本轮按当下信号重新决定
-                # （reasoning 仍高 / 用户新增关键词等可能再次升格）。
-                # 注：is_upgraded 在迁移 hash 时已扣 1 轮，丢一轮可接受——本来就要降格
-            else:
-                remaining = self._upgrade_tracker.remaining(messages, provider=provider_name)
-                logger.info(
-                    "持久升格命中 → %s（剩余 %d 轮, score=%.2f）",
-                    pro_model, remaining, current_score,
-                )
-                body["model"] = pro_model
-                return
-
-        # ── Step 3: 启发式快速路径（Layer 1） ──
-        heuristic_result = compute_complexity_score(messages)
-        did_upgrade = False
-        if heuristic_result.score >= heur_thr:
-            did_upgrade = True
-            logger.info("启发式升格: score=%s >= threshold=%s",
-                        heuristic_result.score, heur_thr)
-
-        # ── Step 4: Router 决策（Layer 0） ──
-        if not did_upgrade:
-            router_score = self._upgrade_router.score(messages, body=body)
-            if router_score >= router_thr:
-                logger.info(
-                    "Router 升格: score=%.3f >= threshold=%.2f provider=%s "
-                    "(heuristic=%.1f/10, user_msgs=%d, user_chars=%d)",
-                    router_score, router_thr,
-                    provider_name,
-                    heuristic_result.score, heuristic_result.user_msg_count, len(heuristic_result.user_text),
-                )
-                did_upgrade = True
-            else:
-                logger.info(
-                    "保留 Flash: score=%.3f < threshold=%.2f (heuristic=%.1f/10) → %s",
-                    router_score, router_thr, heuristic_result.score, flash_model,
-                )
-
-        # ── Step 5: 防重复刷屏（Layer 2） ──
-        # Coding Agent 场景下同一复杂消息可能重复多次；连续 N 次相同
-        # user 消息触发升格后，强制回退到 Flash 并冷却，避免浪费。
-        if did_upgrade:
-            if self._upgrade_throttle.should_throttle(messages, True):
-                did_upgrade = False
-                # 同步清掉持久升格 entry，否则下一轮 Step 2 会越过 throttle
-                # 直接走 Pro，使 cooldown 失效。
-                self._upgrade_tracker.clear(messages, provider=provider_name)
-                logger.info(
-                    "升格限流: 连续 %d 次触发 → 强制 Flash（冷却 %d 轮）",
-                    self._upgrade_throttle._max, self._upgrade_throttle._cooldown,
-                )
-        else:
-            self._upgrade_throttle.should_throttle(messages, False)
-
-        if did_upgrade:
-            body["model"] = pro_model
-            self._stash_pending_upgrade(body, messages, cfg.persist_turns, provider_name=provider_name)
+        self._upgrade_engine.apply(body, provider=provider)
 
     def process_response(
         self, response: dict[str, Any], *, provider: Provider | None = None,
