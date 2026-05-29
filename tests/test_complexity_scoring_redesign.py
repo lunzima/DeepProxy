@@ -171,6 +171,66 @@ def test_direction_b_complex_user_simple_followup_score_stable():
 # ---------------------------------------------------------------------------
 
 
+def test_reasoning_score_is_windowed_not_lifetime_average():
+    """reasoning_score 必须用最近 N 轮滑动窗口，不能用全历史平均。
+
+    回归用户实测发现：长 agent loop 早期深度 reasoning 让全历史平均值永久居高
+    （score 钉死在 8-10），即便后续转向机械重复也降不下来 → Direction C
+    主动降格永远触发不了 → Pro 锁定到 hash 改变。
+
+    场景：50 轮深度 reasoning + 3 轮机械化（reasoning=空）
+      - 全历史平均：(50×4000 + 3×0) / 53 ≈ 3774 字 → score=7.5（仍极高）
+      - 最近 3 轮窗口：(0+0+0) / 3 = 0 字 → score=0（Direction C 可触发）
+    """
+    msgs = [{"role": "user", "content": "task"}]
+    # 50 轮深度推理
+    for _ in range(50):
+        msgs.append({
+            "role": "assistant", "content": "...",
+            "reasoning_content": "x" * 4000,
+        })
+    # 3 轮机械化（无 reasoning_content）
+    for _ in range(3):
+        msgs.append({"role": "assistant", "content": "ok"})
+
+    score = compute_complexity_score(msgs).score
+    # 关键断言：windowed → reasoning_score ≈ 0；总分应 << downgrade_threshold(3.0)
+    # 全历史平均会让 reasoning_score ≈ 7.5（错误行为）
+    # 其它维度：keyword(0) + math(0) + turn(0.33) + last_user_size(~0.01) + reasoning(0)
+    # 总分 ≈ 0.34，well below 3.0
+    assert score < 3.0, (
+        f"最近 3 轮 reasoning=0 应让 score 跌破 downgrade_threshold，"
+        f"实际 {score}（若为旧全历史平均，score 应 ~7.5）"
+    )
+
+
+def test_reasoning_score_window_recovers_on_recent_deep_turns():
+    """对照：最近 3 轮重新深度推理 → reasoning_score 立即回升。
+
+    确认窗口"前向"也敏感——不会因历史平庸而压住 score。
+    """
+    msgs = [{"role": "user", "content": "x"}]
+    # 历史 20 轮极轻 reasoning
+    for _ in range(20):
+        msgs.append({
+            "role": "assistant", "content": "ok",
+            "reasoning_content": "短",  # 仅 1 字
+        })
+    # 最近 3 轮深度
+    for _ in range(3):
+        msgs.append({
+            "role": "assistant", "content": "...",
+            "reasoning_content": "x" * 4500,
+        })
+    score = compute_complexity_score(msgs).score
+    # 最近 3 轮 avg=4500 → reasoning_score=min(4500/500, 8.0)=8.0 (cap)
+    # 即便历史全是 1 字 reasoning，windowed 也只看最近 3 轮
+    assert score >= 8.0, (
+        f"最近 3 轮深度 reasoning 应让 score 达到 reasoning cap，"
+        f"实际 {score}（若为旧全历史平均，会被 20 轮短 reasoning 拖低）"
+    )
+
+
 def test_direction_c_active_downgrade_when_reasoning_dries_up():
     """升格后 assistant 全是机械回复（无 reasoning_content）→ score 跌破阈值 → clear tracker。"""
     from deep_proxy.router import DeepProxyRouter

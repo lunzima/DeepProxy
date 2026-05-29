@@ -44,14 +44,18 @@ def compute_complexity_score(messages):
     #    用最后一条 user 长度而非全量 token，避免 tool output / CLAUDE.md 膨胀噪声
     last_user_size_score = min(len(last_user) / 300.0, 3.0)
 
-    # 5. reasoning_density（新增）— V4 reasoning_content 平均每条 assistant 长度
-    #    直接测量"模型在思考多努力"，跨编码/写作都有效；机械重复时降为零。
+    # 5. reasoning_density（新增）— 最近 3 轮 assistant 的 reasoning_content
+    #    平均长度。直接测量"模型在思考多努力"，跨编码/写作都有效；机械重复
+    #    3 轮后信号降为零。滑动窗口 N=3（而非全历史平均）确保 Direction C
+    #    在长 agent loop 中可响应——否则历史深度 reasoning 永久钉高均值。
     #    cap=8.0 = heuristic_threshold：重度 reasoning 单维度即可触发升格——
     #    这是 Direction A 唯一的触发路径（BERT user-only 看不到 grind）。
+    _REASONING_WINDOW = 3
     asst = [m for m in messages if m.get("role") == "assistant"]
     if asst:
-        reasoning_chars = sum(len(m.get("reasoning_content") or "") for m in asst)
-        reasoning_score = min((reasoning_chars / len(asst)) / 500.0, 8.0)
+        recent = asst[-_REASONING_WINDOW:]
+        reasoning_chars = sum(len(m.get("reasoning_content") or "") for m in recent)
+        reasoning_score = min((reasoning_chars / len(recent)) / 500.0, 8.0)
     else:
         reasoning_score = 0.0
 

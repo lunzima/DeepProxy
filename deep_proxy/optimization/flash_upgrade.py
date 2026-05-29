@@ -385,12 +385,14 @@ def compute_complexity_score(
       2. math_score    (cap 1.5)        — _MATH_SYMBOLS 密度，数学/形式化任务
       3. turn_score    (cap 2.0)        — user 消息数 / 3，迭代持续度
       4. last_user_size_score (cap 3.0) — 最后一条 user 长度 / 300，当前请求分量
-      5. reasoning_score (cap 8.0)      — V4 reasoning_content 平均每条 assistant
-                                          字符数 / 500，直接测量推理强度
-                                          cap 设为 8.0（= heuristic_threshold）让
-                                          重度 reasoning 单维度即可触发升格——
-                                          这是 Direction A（简单 user + 复杂 grind）
-                                          唯一的触发路径（BERT 仅看 user，看不到 grind）。
+      5. reasoning_score (cap 8.0)      — V4 reasoning_content 最近 3 轮 assistant
+                                          平均字符数 / 500，直接测量推理强度。
+                                          滑动窗口（非全历史平均）让 Direction C
+                                          主动降格在长 agent loop 中可响应——
+                                          否则历史深度 reasoning 永久钉高均值。
+                                          cap=8.0 (=heuristic_threshold) 让重度
+                                          reasoning 单维度即可触发升格——Direction A
+                                          唯一触发路径（BERT 仅看 user，看不到 grind）。
 
     Direction A/B/C 全部由 5 维 + router._maybe_upgrade Step 2 hysteresis 覆盖。
     已删除：token_score（全文本噪声）、code_score（不区分复杂度）、discount
@@ -419,21 +421,27 @@ def compute_complexity_score(
     #    全量 token，避免 tool output / CLAUDE.md 注入膨胀的噪声
     last_user_size_score = min(len(last_user) / 300.0, 3.0)
 
-    # 5. reasoning_density — V4 reasoning_content 平均每条 assistant 长度
-    #    直接测量"模型在思考多努力"，跨编码 / 写作都有效；
-    #    机械重复任务下 reasoning 几乎为空 → 信号降为零 → 配合
-    #    router 侧 downgrade_threshold 形成 Direction C 主动降格。
+    # 5. reasoning_density — 最近 _REASONING_WINDOW 轮 assistant 的 reasoning
+    #    平均长度。直接测量"模型在思考多努力"，跨编码 / 写作都有效；
+    #    机械重复任务下 reasoning 几乎为空 → 信号降为零 → 配合 router 侧
+    #    downgrade_threshold 形成 Direction C 主动降格。
+    #
     #    cap=8.0 = heuristic_threshold：让重度 reasoning 单维度即可触发升格，
     #    覆盖 Direction A（简单 user prompt + 长 agent grind）——这是该
     #    场景唯一的触发路径，因为 BERT 输入 user-only 看不到 grind。
-    #    Dilution 注意：混合 V4 + non-V4 历史时无 reasoning_content 的 assistant
-    #    会拉低平均值，这是 *有意* 的——我们要持续 reasoning 而非一次性 spike。
+    #
+    #    *滑动窗口*（而非全历史平均）至关重要：长 agent loop 早期深度 reasoning
+    #    会让全历史平均值永久居高，即便后续转向机械重复也降不下来 → Direction C
+    #    永远触发不了（实测：score 钉死在 8-10 直到 hash 改变才会重评估）。
+    #    窗口 N=3：3 轮机械化即可让信号降到 ~0；单 chunk 抖动被 3 轮窗口吸收。
+    _REASONING_WINDOW = 3
     asst = [m for m in messages if m.get("role") == "assistant"]
     if asst:
+        recent = asst[-_REASONING_WINDOW:]
         reasoning_chars = sum(
-            len(m.get("reasoning_content") or "") for m in asst
+            len(m.get("reasoning_content") or "") for m in recent
         )
-        reasoning_score = min((reasoning_chars / len(asst)) / 500.0, 8.0)
+        reasoning_score = min((reasoning_chars / len(recent)) / 500.0, 8.0)
     else:
         reasoning_score = 0.0
 
