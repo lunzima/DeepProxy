@@ -1,23 +1,90 @@
 # DeepProxy 配置文件模板
-# 复制为 config.yaml 并填入你的 API 密钥
+# 复制为 config.yaml 并填入你的 API 密钥。
+# 老（v0.1.x）格式 → 新格式迁移见 docs/config_migration.md（文末有兼容性说明）。
 
-# 代理服务器（双端口绑定不同采样 profile）
+# ============================================================
+# 代理服务器基本
+# ============================================================
 host: "0.0.0.0"
-coding_port: 8000          # → precise_sampling（高确定性，code/math/逻辑）
-writing_port: 8001         # → creative_sampling（高多样性，RP/创作/通用写作）
 api_key: null              # 代理认证密钥（可选，留空则不校验）
 log_level: "info"
 
-# DeepSeek 配置
-deepseek:
-  api_key: ""                          # 填入你的 DeepSeek API 密钥（或通过 DEEPSEEK_API_KEY 环境变量传入）
-  # api_key: "sk-your-deepseek-api-key"
-  api_base: "https://api.deepseek.com"
-  enable_reasoning: true
-  strip_unsupported_params: true
+# ============================================================
+# 多 provider 路由（必填）
+# ============================================================
+providers:
+  deepseek:
+    name: deepseek
+    api_base: https://api.deepseek.com
+    api_key: ""              # 填入你的 DeepSeek 密钥（或通过 DEEPSEEK_API_KEY 环境变量传入）
+    litellm_prefix: deepseek/
+    flash_model: deepseek-v4-flash
+    pro_model: deepseek-v4-pro
+    has_reasoning_content: true
+    has_thinking_param: true
+    reasoning_effort_field: thinking.reasoning_effort  # 嵌套字段
+    reasoning_effort_value: max
+    max_output_tokens: 384000
+    context_window: 1000000
 
-# 廉价提示词优化 + 内置 skills（in-process，无第二端口）
-# 按通用程度分四组（A 最通用 → D 最具体），每项标注原文出处。
+  # MiMo provider（可选）—— 不使用整段 mimo: 块可删除，
+  # 然后把下方 ports 中 mimo 的引用改回 deepseek
+  mimo:
+    name: mimo
+    api_base: https://token-plan-cn.xiaomimimo.com/v1
+    api_key: ""              # 填入你的 MiMo 密钥
+    litellm_prefix: openai/                              # MiMo API 是 OpenAI-compatible
+    flash_model: mimo-v2.5
+    pro_model: mimo-v2.5-pro
+    has_reasoning_content: true
+    has_thinking_param: true
+    reasoning_effort_field: reasoning_effort             # 顶层字段（与 DeepSeek 嵌套不同）
+    reasoning_effort_value: high
+    allowed_extra_params: [reasoning_effort, thinking]   # LiteLLM 严格 kwargs 时走 extra_body 透传
+    max_output_tokens: 128000
+    context_window: 1000000
+
+# ============================================================
+# 端口绑定（每个 port 选一个 provider + 一个采样 profile）
+# ============================================================
+ports:
+  - port: 8000              # → precise_sampling（高确定性，code/math/逻辑）
+    provider: deepseek
+    sampling: precise
+  - port: 8001              # → creative_sampling（高多样性，RP/创作/通用写作）
+    provider: mimo          # 不用 MiMo 时改回 deepseek
+    sampling: creative
+
+# ============================================================
+# Cross-Consult 双家族机制（默认开启）
+# ============================================================
+# 两个并行机制共享 enabled 主开关与 pairs map：
+#   1. tool-call: agent 主动 emit `cross_consult` 工具，向异家族 pro 模型请求单次
+#      第二视角（强制 pro、context-free、原对话继续在源 provider）。
+#   2. tag redirect: user 消息出现字面 `[本轮对话使用不同家族的大语言模型]` 时，
+#      DeepProxy 把当前轮 + 后续 N 轮重路由到异家族 provider（按对方家族自身的
+#      flash_upgrade 分级路由选档），窗口耗尽后自然回到源 provider。
+# 详见 docs/mimo_integration.md §12 / §12.11。
+cross_consult:
+  enabled: true
+  tool_name: cross_consult              # 暴露给 agent 的工具名
+  pairs:                                # 异家族配对（symmetric，无主副层级）
+    deepseek: mimo
+    mimo: deepseek
+  max_calls_per_request: 3              # 单次 client 请求内 consult 次数上限
+  call_timeout_seconds: 30
+  max_input_chars: 32000                # question + context 字符上限
+  max_output_tokens: 4096
+  # —— §12.11 双家族机制 ——
+  awareness_enabled: true               # 在 system prompt 注入双家族状态披露
+  redirect_enabled: true                # user 消息标签触发的整轮 provider 重定向
+  redirect_persist_turns: 2             # 触发后额外保持重定向的轮数（含本轮共 3 轮）
+  redirect_tag_pattern: "\\[本轮对话使用不同家族的大语言模型\\]"
+
+# ============================================================
+# 廉价提示词优化 + 内置 skills（in-process，0 额外 LLM 调用）
+# 按通用程度分四组（A 最通用 → D 最具体）。
+# ============================================================
 optimization:
   enabled: true
 
@@ -29,50 +96,56 @@ optimization:
   # 元功能：LLM 压缩 + 持久化磁盘缓存
   # 首次见某组 skills 配置 → 调一次 LLM 压缩到最短同义版 → 写磁盘
   # 后续同配置 0 上游调用，且字节级一致 → 命中 DeepSeek 服务端 prefix cache
+  # 注：当前 compressor 仅支持 DeepSeek 凭据（MiMo 凭据复用尚未实现）
   compress_skills: true
   compressor_cache_path: "prompt_cache.json"
   compressor_model: "deepseek/deepseek-v4-flash"
 
-  # A. 通用风格 skills —— 每个请求都激活，对创作场景【积极改善】
-  avoid_negative_style: true           # 抑制四种常见 AI 口癖（套话确认 / 情感抚慰 / 自我表演诚实 / 文学化升华）
-  natural_temperament: true            # 内在气质 priming（开放可能性 / 共情但有立场 / 慢热深谈 / 对计划松弛）
-  contextual_register: true            # 抑制 V4 句式简化倾向，鼓励复杂从句与长短交替
-  assume_good_intent: true             # 不按最坏解释拒绝
-  instruction_priority: true           # system 最高 + 防伪造对话
-  independent_analysis: true           # 自主推理（反谄媚）
-  reason_genuinely: true               # 鼓励深入推理 + 禁虚构时间/进度幻觉
-  cot_reset: true                      # 推理出现严重矛盾时允许在思维链中显式重启
-  inject_date: true                    # 注入日期 + 时间相对解析
-  tool_call_chinese_cot: true          # [fkyah3/experiment-console] tools 场景中文 CoT 双通路锚定
+  # A. 通用风格 skills —— 每个请求都激活
+  avoid_negative_style: true            # 抑制四种常见 AI 口癖（套话确认 / 情感抚慰 / 自我表演诚实 / 文学化升华）
+  natural_temperament: true             # 内在气质 priming
+  contextual_register: true             # 抑制 V4 句式简化倾向，鼓励复杂从句与长短交替
+  assume_good_intent: true              # 不按最坏解释拒绝
+  instruction_priority: true            # system 最高 + 防伪造对话
+  independent_analysis: true            # 自主推理（反谄媚）
+  reason_genuinely: true                # 鼓励深入推理 + 禁虚构时间/进度幻觉
+  cot_reset: true                       # 推理出现严重矛盾时允许在思维链中显式重启
+  inject_date: true                     # 注入日期 + 时间相对解析
+  tool_call_chinese_cot: true           # [fkyah3/experiment-console] tools 场景中文 CoT 双通路锚定
 
   # B. 求证 / 反幻觉 —— 模型自门控（仅命中条件时激活）
-  show_math_steps: true                # 确定性数学题展示推导步骤
-  prefer_multiple_sources: true        # 争议性事实不依赖单一来源
-  avoid_fabricated_citations: true     # 不编造 URL/论文/DOI/统计
+  show_math_steps: true                 # 确定性数学题展示推导步骤
+  prefer_multiple_sources: true         # 争议性事实不依赖单一来源
+  avoid_fabricated_citations: true      # 不编造 URL/论文/DOI/统计
 
   # 动态短段注入——按 profile 选场景，各 3 篮抽 1 拼成中文短段，追加到 system 末尾
-  dynamic_baskets: true                # [tanweai/pua]
+  dynamic_baskets: true
 
-  # [实验性] 无厘头 expert priming — MoE 路由扰动。默认关闭。
+  # [实验性] 无厘头 expert priming —— MoE 路由扰动。默认关闭，开启可能改善生成多样性
+  # 但破坏 prefix cache（每请求独立抽样）。MiMo 等其它 MoE provider 未实测
   silly_expert_priming: false
 
-  # V4 <think> 角色沉浸引导 — creative mode 注入角色沉浸 marker
-  inner_os_marker: true                 # [victorchen96/deepseek_v4_rolepaly_instruct]
+  # V4 <think> 角色沉浸引导 —— creative mode 注入角色沉浸 marker
+  inner_os_marker: true
 
   # writing_port 写作篮变体："creative" 偏 RP/创作；"general" 偏 Q&A/公文
   writing_basket_kind: "creative"
 
   # C. 上下文相关 skills —— 仅窄触发条件激活
-  json_mode_hint: true                 # [DeepSeek docs] json_object 时注入 JSON-only
-  safe_inlined_content: true           # [optillm + grok] readurls 内容引用源 + 视为 data
+  json_mode_hint: true                  # json_object 时注入 JSON-only
+  safe_inlined_content: true            # readurls 内容引用源 + 视为 data
 
   # D. 消息转换 skills —— 默认关闭（实验性 optillm 技术）
-  re2: false                           # [optillm/reread.py] 复制最后一条 user 消息
-  cot_reflection: false                # [optillm/cot_reflection.py] thinking=disabled 时 <thinking>/<output> 引导
-  readurls: false                      # [optillm] 检测 URL 并内联网页正文
+  re2: false                            # [optillm/reread.py] 复制最后一条 user 消息
+  cot_reflection: false                 # [optillm/cot_reflection.py] thinking=disabled 时 <thinking>/<output> 引导
+  readurls: false                       # [optillm] 检测 URL 并内联网页正文
 
-# 高多样性范围采样预设（RP / 创作 / 通用写作）
-# 每请求从 [min, max] 随机抽样 round 到 0.01；sampling_profile 覆盖时客户端值被强制替换
+# ============================================================
+# 采样预设
+# 每请求从 [min, max] 随机抽样 round 到 0.01；sampling_profile 覆盖客户端原值
+# ============================================================
+
+# 高多样性范围采样（RP / 创作 / 通用写作）
 creative_sampling:
   enabled: true
   temperature_min: 0.90
@@ -84,7 +157,7 @@ creative_sampling:
   frequency_penalty_min: 0.20
   frequency_penalty_max: 0.50
 
-# 高确定性范围采样预设（编程 / 数学 / 逻辑推理 + 提示词压缩器复用）
+# 高确定性范围采样（编程 / 数学 / 逻辑推理 + 提示词压缩器复用）
 # Unsloth-validated 区间，强确定性 + 微抖动
 precise_sampling:
   temperature_min: 0.25
@@ -96,100 +169,45 @@ precise_sampling:
   frequency_penalty_min: 0.0
   frequency_penalty_max: 0.0
 
-# 模型路由（可选）：自定义模型名到上游模型名的映射
-# 默认别名见 deepseek_fixes.py（chat→v4-flash/disabled, reasoner→v4-flash/enabled）
-model_routes: []
-
-# Flash→Pro 选择性升格（默认启用，四层架构）
+# ============================================================
+# Flash→Pro 选择性升格（四层架构）
 # 若未安装 torch/transformers，路由器自动降级到纯规则模式，不影响服务。
+# ============================================================
 flash_upgrade:
-  enabled: true                         # 启用升格机制
+  enabled: true
   router_type: bert                     # bert（需 torch+transformers）/ rule（始终可用）
   bert_checkpoint: "router_model"       # 本地 LoRA 微调模型路径（或 HF model ID）
-  router_threshold: 0.65                # BERT score >= 此值 → 升格 Pro（偏保守）
+  router_threshold: 0.65                # BERT score >= 此值 → 升格 Pro
   heuristic_threshold: 8.0              # 启发式 score >= 此值 → 直接升格（跳过 BERT）
   persist_turns: 1                      # 升格后保持 Pro 额外 N 轮
   downgrade_threshold: 5.0              # 升格期间若评分 < 此值主动降回 flash（hysteresis 防振荡，gap=3.0）
+  # per_provider 阈值覆盖（可选）
+  per_provider:
+    mimo:
+      router_threshold: 0.60            # MiMo flash 略弱于 V4-flash，温和偏向升格
+      heuristic_threshold: 7.5          # 启发式门槛同步前移（hysteresis gap=2.5）
+      downgrade_threshold: 5.0          # 与全局一致
 
 # ============================================================
-# 多 provider + per-port 路由（新格式，可选）
+# 模型路由（可选）：自定义模型名映射
+# 默认别名见 deepseek_fixes.py（chat→v4-flash/disabled, reasoner→v4-flash/enabled）
 # ============================================================
-# 启用新格式后，coding_port / writing_port / deepseek.* 等顶层字段
-# 会被忽略，全部以 providers + ports 为准。老 config.yaml 不写
-# providers/ports 则继续走兼容路径（双端口都走 DeepSeek）。
+model_routes: []
+
+# ============================================================
+# 老（v0.1.x legacy）格式兼容性说明
+# ============================================================
+# 早期版本使用顶层 `coding_port` / `writing_port` / `deepseek:` 块，
+# 不写 providers/ports。 normalize_legacy_config 仍自动兼容这种结构
+# （双端口都走 deepseek，不启用 MiMo / cross_consult / 双家族机制）。
 #
-# providers:
+# 老格式示例（不建议新部署使用）：
+#
+#   coding_port: 8000
+#   writing_port: 8001
 #   deepseek:
-#     name: deepseek
-#     api_base: https://api.deepseek.com
-#     api_key: sk-...
-#     litellm_prefix: deepseek/
-#     flash_model: deepseek-v4-flash
-#     pro_model: deepseek-v4-pro
-#     has_reasoning_content: true
-#     has_thinking_param: true
-#     reasoning_effort_field: thinking.reasoning_effort
-#     reasoning_effort_value: max
-#     max_output_tokens: 384000
-#     context_window: 1000000
+#     api_key: ""
+#     api_base: "https://api.deepseek.com"
+#   # 其它 optimization / flash_upgrade / sampling 字段不变
 #
-#   mimo:
-#     name: mimo
-#     api_base: https://token-plan-cn.xiaomimimo.com/v1
-#     api_key: tp-...
-#     litellm_prefix: openai/
-#     flash_model: mimo-v2.5
-#     pro_model: mimo-v2.5-pro
-#     has_reasoning_content: true
-#     has_thinking_param: true
-#     reasoning_effort_field: reasoning_effort
-#     reasoning_effort_value: high
-#     max_output_tokens: 128000
-#     context_window: 1000000
-#
-# ports:
-#   - port: 8000
-#     provider: deepseek
-#     sampling: precise
-#   - port: 8001
-#     provider: mimo
-#     sampling: creative
-#
-# flash_upgrade:
-#   enabled: true
-#   router_type: bert
-#   bert_checkpoint: router_model
-#   router_threshold: 0.65
-#   heuristic_threshold: 8.0
-#   persist_turns: 2
-#   per_provider:
-#     mimo:
-#       router_threshold: 0.60   # MiMo flash 略弱于 V4-flash，温和偏向升格
-#       heuristic_threshold: 7.5
-#       downgrade_threshold: 5.0 # 与全局一致；MiMo heuristic 7.5 → gap=2.5
-
-# ============================================================
-# Cross-Consult 双家族机制（v0.4，默认开启）
-# ============================================================
-# 两个并行机制共享 enabled 主开关与 pairs map：
-#   1. tool-call: agent 主动 emit `cross_consult` 工具，向异家族 pro 模型请求单次
-#      第二视角（强制 pro、context-free、原对话继续在源 provider）。
-#   2. tag redirect: user 消息出现字面 `[本轮对话使用不同家族的大语言模型]` 时，
-#      DeepProxy 把当前轮 + 后续 N 轮重路由到异家族 provider（按对方家族自身的
-#      flash_upgrade 分级路由选档），窗口耗尽后自然回到源 provider。
-# 详见 docs/mimo_integration.md §12 / §12.11。
-#
-# cross_consult:
-#   enabled: true
-#   tool_name: cross_consult            # 工具暴露给 agent 的名字
-#   pairs:                              # 双向声明，无主副层级
-#     deepseek: mimo
-#     mimo: deepseek
-#   max_calls_per_request: 3            # 单次 client 请求内 consult 次数上限
-#   call_timeout_seconds: 30            # 单次 consult 超时
-#   max_input_chars: 32000              # question + context 字符上限
-#   max_output_tokens: 4096             # consult 调用 max_tokens
-#   awareness_enabled: true             # 在 system prompt 注入双家族状态披露
-#   redirect_enabled: true              # 标签触发的整轮 provider 重定向
-#   redirect_persist_turns: 2           # 触发后额外保持重定向的轮数（含本轮共 3 轮）
-#   redirect_tag_pattern: "\\[本轮对话使用不同家族的大语言模型\\]"
+# 老 → 新格式迁移指南：docs/config_migration.md
