@@ -487,3 +487,67 @@ class TestOpenAIStreamToClaude:
         err_payload = next(_parse_event(e)[1] for e in events
                            if _parse_event(e)[0] == "error")
         assert err_payload["error"]["message"] == "boom"
+
+    async def test_reasoning_after_text_opens_new_thinking_block(self):
+        """边缘场景：reasoning_content 在 text 已开后到达。
+
+        DeepSeek 实际流序通常 reasoning 先于 text，但本测试钉住"如果上游
+        颠倒顺序，状态机不会崩——只是给 reasoning 开了第二个 block"。
+        """
+        async def fake():
+            yield {"choices": [{"delta": {"content": "Hello"}, "index": 0}]}
+            yield {"choices": [{"delta": {"reasoning_content": "thinking"}, "index": 0}]}
+            yield {"choices": [{"delta": {}, "index": 0, "finish_reason": "stop"}]}
+
+        events = await _collect(openai_stream_to_claude(fake(), requested_model="x"))
+        parsed = [_parse_event(e) for e in events]
+        # 必须同时含 text + thinking 块开启，且无 crash
+        kinds = [(name, payload.get("content_block", {}).get("type")) for name, payload in parsed]
+        assert ("content_block_start", "text") in kinds
+        assert ("content_block_start", "thinking") in kinds
+        # message_stop 是最后一个事件
+        assert parsed[-1][0] == "message_stop"
+
+    async def test_usage_max_across_late_chunks(self):
+        """usage 多次 chunk 间累加按 max() 取值，防止迟到 chunk 倒退。"""
+        async def fake():
+            yield {"choices": [{"delta": {"content": "hi"}, "index": 0}],
+                   "usage": {"prompt_tokens": 100, "completion_tokens": 50}}
+            yield {"choices": [{"delta": {"content": "!"}, "index": 0}],
+                   "usage": {"prompt_tokens": 90, "completion_tokens": 30}}  # 倒退
+            yield {"choices": [{"delta": {}, "index": 0, "finish_reason": "stop"}],
+                   "usage": {"prompt_tokens": 100, "completion_tokens": 60}}  # 上升
+
+        events = await _collect(openai_stream_to_claude(fake(), requested_model="x"))
+        parsed = [_parse_event(e) for e in events]
+        msg_delta = next(p for n, p in parsed if n == "message_delta")
+        # max() 应取最高值：input=100, output=60
+        assert msg_delta["usage"]["input_tokens"] == 100
+        assert msg_delta["usage"]["output_tokens"] == 60
+
+    async def test_reasoning_and_text_in_same_chunk_emit_in_order(self):
+        """同 chunk 含 reasoning_content + content：先 emit thinking 再 emit text，
+        且 text 处理会关掉刚开的 thinking 块。"""
+        async def fake():
+            yield {"choices": [{"delta": {
+                "reasoning_content": "思考",
+                "content": "回答",
+            }, "index": 0}]}
+            yield {"choices": [{"delta": {}, "index": 0, "finish_reason": "stop"}]}
+
+        events = await _collect(openai_stream_to_claude(fake(), requested_model="x"))
+        parsed = [_parse_event(e) for e in events]
+        names = [n for n, _ in parsed]
+        # 期望顺序：message_start, thinking start, thinking_delta, thinking stop,
+        #          text start, text_delta, text stop, message_delta, message_stop
+        # 关键：thinking_delta 必须在 text_delta 之前
+        thinking_delta_idx = next(i for i, (n, p) in enumerate(parsed)
+                                  if n == "content_block_delta"
+                                  and p.get("delta", {}).get("type") == "thinking_delta")
+        text_delta_idx = next(i for i, (n, p) in enumerate(parsed)
+                              if n == "content_block_delta"
+                              and p.get("delta", {}).get("type") == "text_delta")
+        assert thinking_delta_idx < text_delta_idx
+        # 期间应有 thinking 的 content_block_stop
+        between = parsed[thinking_delta_idx:text_delta_idx]
+        assert any(n == "content_block_stop" for n, _ in between)
