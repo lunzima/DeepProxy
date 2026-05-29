@@ -50,27 +50,78 @@ def _text_response(t: str):
                           "finish_reason": "stop"}]}
 
 
+def _text_chunks(text: str):
+    return [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"},
+                      "finish_reason": None}]},
+        {"choices": [{"index": 0, "delta": {"content": text},
+                      "finish_reason": "stop"}]},
+    ]
+
+
+def _resend_iter_seq(*texts: str):
+    """每次调用按 texts 顺序返回一段流式纯文本响应。供 resend 路径 mock 用。"""
+    idx = {"i": 0}
+
+    def factory(config, body, *, provider=None):
+        i = idx["i"]
+        idx["i"] += 1
+        t = texts[i] if i < len(texts) else texts[-1]
+
+        async def gen():
+            for c in _text_chunks(t):
+                yield c
+        return gen()
+    return factory
+
+
 async def test_quota_exhausted_returns_error_tool_result(cfg_with_low_quota):
-    """max_calls_per_request=1，agent 第二次调 cross_consult 时应收到 quota 错误。"""
+    """max_calls_per_request=1，agent 第二次调 cross_consult 时应收到 quota 错误。
+
+    重发走流式聚合：第 1 次重发吐 tc2，第 2 次重发吐 "final"。
+    """
     from deep_proxy.router import DeepProxyRouter
     router = DeepProxyRouter(cfg_with_low_quota)
     provider = cfg_with_low_quota.providers["deepseek"]
 
-    # 主响应链：tc → consult → tc again → quota error → final
-    main_responses = [
-        _tc_response("tc1", {"question": "q1"}),
-        _tc_response("tc2", {"question": "q2"}),
-        _text_response("final"),
-    ]
+    # 主响应初始（非流式）：返回 tc1
+    initial = _tc_response("tc1", {"question": "q1"})
 
-    async def fake_main(config, body, *, provider=None):
-        return main_responses.pop(0)
+    # 重发流式：第 1 次吐 tc2（带 cross_consult tool_call）、第 2 次吐 "final"
+    def resend_factory(config, body, *, provider=None):
+        # 检测重发轮次：tool 消息的数量
+        tool_count = sum(1 for m in body.get("messages", []) if m.get("role") == "tool")
+        if tool_count == 1:
+            # 第一次重发：吐 tc2 stream（带 cross_consult tool_call）
+            async def gen():
+                yield {"choices": [{"index": 0,
+                                    "delta": {"role": "assistant"},
+                                    "finish_reason": None}]}
+                yield {"choices": [{"index": 0,
+                                    "delta": {"tool_calls": [{
+                                        "index": 0, "id": "tc2", "type": "function",
+                                        "function": {"name": "cross_consult",
+                                                     "arguments": json.dumps({"question": "q2"})},
+                                    }]},
+                                    "finish_reason": None}]}
+                yield {"choices": [{"index": 0, "delta": {},
+                                    "finish_reason": "tool_calls"}]}
+            return gen()
+
+        async def gen():
+            for c in _text_chunks("final"):
+                yield c
+        return gen()
 
     # executor 应仅被调一次（第二次被 quota 拦截）
     executor_mock = AsyncMock(return_value="external 1")
 
-    with patch("deep_proxy.router.call_litellm", new=AsyncMock(side_effect=fake_main)), \
-         patch("deep_proxy.cross_consult.interceptor.execute_consult", new=executor_mock):
+    with patch("deep_proxy.router.call_litellm",
+               new=AsyncMock(return_value=initial)), \
+         patch("deep_proxy.cross_consult.interceptor.execute_consult",
+               new=executor_mock), \
+         patch("deep_proxy.cross_consult.streaming.iter_litellm_chunks",
+               new=resend_factory):
         body = {"model": "deepseek-v4-flash",
                 "messages": [{"role": "user", "content": "go"}]}
         body = await router.prepare_request(
@@ -94,18 +145,16 @@ async def test_input_too_long_returns_error_without_calling_executor(cfg_with_lo
 
     long_q = "X" * 200  # exceeds max_input_chars=100
 
-    main_responses = [
-        _tc_response("tc1", {"question": long_q}),
-        _text_response("got error"),
-    ]
-
-    async def fake_main(config, body, *, provider=None):
-        return main_responses.pop(0)
+    initial = _tc_response("tc1", {"question": long_q})
 
     executor_mock = AsyncMock(return_value="should not be called")
 
-    with patch("deep_proxy.router.call_litellm", new=AsyncMock(side_effect=fake_main)), \
-         patch("deep_proxy.cross_consult.interceptor.execute_consult", new=executor_mock):
+    with patch("deep_proxy.router.call_litellm",
+               new=AsyncMock(return_value=initial)), \
+         patch("deep_proxy.cross_consult.interceptor.execute_consult",
+               new=executor_mock), \
+         patch("deep_proxy.cross_consult.streaming.iter_litellm_chunks",
+               new=_resend_iter_seq("got error")):
         body = {"model": "deepseek-v4-flash",
                 "messages": [{"role": "user", "content": "go"}]}
         body = await router.prepare_request(

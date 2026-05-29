@@ -1,7 +1,7 @@
 """Cross-Consult 递归防护：consult 内部调用不重复注入工具。"""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -35,12 +35,14 @@ async def test_executor_body_has_recursion_sentinel(cfg_full):
 
     captured = {}
 
-    async def fake_call(config, body, *, provider=None):
+    async def fake_iter(config, body, *, provider=None):
         captured["body"] = body
-        return {"choices": [{"message": {"content": "ok"}}]}
+        yield {"choices": [{"index": 0,
+                            "delta": {"content": "ok"},
+                            "finish_reason": "stop"}]}
 
-    with patch("deep_proxy.cross_consult.executor.call_litellm",
-               new=AsyncMock(side_effect=fake_call)):
+    with patch("deep_proxy.cross_consult.streaming.iter_litellm_chunks",
+               new=fake_iter):
         await execute_consult(
             question="hi", context=None,
             target_provider=target, config=cfg_full, cc_config=cc,

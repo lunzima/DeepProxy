@@ -41,29 +41,50 @@ def _text(t):
                           "finish_reason": "stop"}]}
 
 
+def _text_chunks(text: str):
+    return [
+        {"choices": [{"index": 0, "delta": {"role": "assistant"},
+                      "finish_reason": None}]},
+        {"choices": [{"index": 0, "delta": {"content": text},
+                      "finish_reason": "stop"}]},
+    ]
+
+
+def _stream_router_by_provider(captured: dict, target_name: str):
+    """流式 mock 工厂：consult（provider.name == target_name）记录 body；
+    其它（resend，provider == source）正常返回 final 文本流。"""
+    def factory(config, body, *, provider=None):
+        if provider is not None and provider.name == target_name:
+            captured["model"] = body["model"]
+            captured["provider_name"] = provider.name
+
+            async def gen():
+                for c in _text_chunks("external answer"):
+                    yield c
+            return gen()
+
+        async def gen():
+            for c in _text_chunks("final"):
+                yield c
+        return gen()
+    return factory
+
+
 async def test_deepseek_source_consults_mimo_pro(cfg_sym):
     """source=deepseek → target=mimo-v2.5-pro。"""
     from deep_proxy.router import DeepProxyRouter
     router = DeepProxyRouter(cfg_sym)
     source = cfg_sym.providers["deepseek"]
 
-    captured_consult_body = {}
+    captured_consult_body: dict = {}
 
-    async def fake_main(config, body, *, provider=None):
-        # If conversation has a tool result, return final; else return tool call
-        if any(m.get("role") == "tool" for m in body["messages"]):
-            return _text("final")
-        return _tc("t", {"question": "q"})
-
-    async def fake_executor_call(config, body, *, provider=None):
-        captured_consult_body["model"] = body["model"]
-        captured_consult_body["provider_name"] = provider.name
-        return _text("external answer")
+    # 主 provider 初始（非流式）返回 tool_call
+    initial = _tc("t", {"question": "q"})
 
     with patch("deep_proxy.router.call_litellm",
-               new=AsyncMock(side_effect=fake_main)), \
-         patch("deep_proxy.cross_consult.executor.call_litellm",
-               new=AsyncMock(side_effect=fake_executor_call)):
+               new=AsyncMock(return_value=initial)), \
+         patch("deep_proxy.cross_consult.streaming.iter_litellm_chunks",
+               new=_stream_router_by_provider(captured_consult_body, "mimo")):
         body = {"model": "deepseek-v4-flash",
                 "messages": [{"role": "user", "content": "go"}]}
         body = await router.prepare_request(
@@ -81,22 +102,14 @@ async def test_mimo_source_consults_deepseek_pro(cfg_sym):
     router = DeepProxyRouter(cfg_sym)
     source = cfg_sym.providers["mimo"]
 
-    captured_consult_body = {}
+    captured_consult_body: dict = {}
 
-    async def fake_main(config, body, *, provider=None):
-        if any(m.get("role") == "tool" for m in body["messages"]):
-            return _text("final")
-        return _tc("t", {"question": "q"})
-
-    async def fake_executor_call(config, body, *, provider=None):
-        captured_consult_body["model"] = body["model"]
-        captured_consult_body["provider_name"] = provider.name
-        return _text("external answer")
+    initial = _tc("t", {"question": "q"})
 
     with patch("deep_proxy.router.call_litellm",
-               new=AsyncMock(side_effect=fake_main)), \
-         patch("deep_proxy.cross_consult.executor.call_litellm",
-               new=AsyncMock(side_effect=fake_executor_call)):
+               new=AsyncMock(return_value=initial)), \
+         patch("deep_proxy.cross_consult.streaming.iter_litellm_chunks",
+               new=_stream_router_by_provider(captured_consult_body, "deepseek")):
         body = {"model": "mimo-v2.5",
                 "messages": [{"role": "user", "content": "go"}]}
         body = await router.prepare_request(

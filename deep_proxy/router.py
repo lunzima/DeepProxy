@@ -58,6 +58,7 @@ from .cross_consult.interceptor import (
     inject_into_request,
     synthesize_final_stream_chunk,
 )
+from .cross_consult.streaming import stream_aggregated_call
 from .optimization.flash_upgrade import (
     RepeatUpgradeThrottle,
     UpgradeTracker,
@@ -456,15 +457,24 @@ class DeepProxyRouter:
         strip_cot = bool(body.get("_deepproxy_strip_cot", False))
         raw = await call_litellm(self.config, body, provider=provider)
         result = self.process_response(raw, provider=provider)
-        # Cross-Consult 拦截：若响应含 cross_consult tool_call，执行 consult + 重发循环
+        # Cross-Consult 拦截：若响应含 cross_consult tool_call，执行 consult + 重发循环。
+        # 重发走流式聚合（stream_aggregated_call）以避免深度思考触发墙钟超时；返回形状
+        # 保持非流式 dict，process_response 无需感知差异。
         if self.config.cross_consult.enabled and provider is not None:
+            cc_idle = float(self.config.cross_consult.call_timeout_seconds)
+
+            async def _resend_via_stream(cfg, b, *, provider=None):
+                return await stream_aggregated_call(
+                    cfg, b, provider=provider, idle_timeout=cc_idle,
+                )
+
             result = await execute_cross_consult_loop(
                 body=body,
                 initial_response=result,
                 source_provider=provider,
                 config=self.config,
                 cc_config=self.config.cross_consult,
-                call_litellm_fn=call_litellm,
+                call_litellm_fn=_resend_via_stream,
                 process_response_fn=self.process_response,
             )
             result = self.process_response(result, provider=provider)
@@ -550,11 +560,18 @@ class DeepProxyRouter:
                     initial_response = build_initial_response_from_stream_tool_calls(
                         accumulated_tool_calls,
                     )
+                    cc_idle = float(self.config.cross_consult.call_timeout_seconds)
+
+                    async def _resend_via_stream(cfg, b, *, provider=None):
+                        return await stream_aggregated_call(
+                            cfg, b, provider=provider, idle_timeout=cc_idle,
+                        )
+
                     final_result = await execute_cross_consult_loop(
                         body=body, initial_response=initial_response,
                         source_provider=provider, config=self.config,
                         cc_config=self.config.cross_consult,
-                        call_litellm_fn=call_litellm,
+                        call_litellm_fn=_resend_via_stream,
                         process_response_fn=self.process_response,
                     )
                     final_result = self.process_response(final_result, provider=provider)

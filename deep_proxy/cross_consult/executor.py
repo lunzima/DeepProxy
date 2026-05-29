@@ -6,19 +6,21 @@
 - target_provider.pro_model
 - 不带 tools / tool_choice（防递归）
 - _deepproxy_cross_consult_internal=True sentinel（防递归注入）
-- max_tokens / timeout 来自 cc_config
+- 全程走流式：上游用 iter_litellm_chunks 拉流，按 chunk 心跳累加。
+  call_timeout_seconds 语义改为"chunk-间最大空闲"——只要持续有 token / reasoning 流
+  到达就继续等下去；连续空闲超过该秒数才视为 hang。深度思考不再被墙钟误杀。
+- max_tokens 来自 cc_config
 - 失败/超时：返回带前缀的错误字符串，不抛异常（让上层把错误以 tool_result 形式返还 agent）
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
 from ..config import ProxyConfig
-from ..litellm_client import call_litellm
 from ..providers import Provider
 from .config import CrossConsultConfig
+from .streaming import aggregate_stream_to_response
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,7 @@ async def execute_consult(
     config: ProxyConfig,
     cc_config: CrossConsultConfig,
 ) -> str:
-    """对 target_provider.pro_model 执行一次 context-free 调用，返回纯文本。
+    """对 target_provider.pro_model 执行一次 context-free 流式调用，返回纯文本。
 
     永远不抛异常——错误条件返回带 _ERROR_PREFIX 前缀的字符串，
     供上层封装成 tool_result 内容返还 agent。
@@ -50,25 +52,34 @@ async def execute_consult(
             {"role": "user", "content": user_content},
         ],
         "max_tokens": cc_config.max_output_tokens,
-        "stream": False,
+        # 注：stream 字段会被 _assemble_litellm_body 覆盖；iter_litellm_chunks 路径
+        # 强制 stream=True，这里写不写都不影响。
+        "stream": True,
         # 递归防护 sentinel：prepare_request 检测到此标记跳过 cross_consult 注入
         "_deepproxy_cross_consult_internal": True,
     }
 
     try:
-        result = await asyncio.wait_for(
-            call_litellm(config, body, provider=target_provider),
-            timeout=cc_config.call_timeout_seconds,
+        result = await aggregate_stream_to_response(
+            config, body,
+            provider=target_provider,
+            idle_timeout=float(cc_config.call_timeout_seconds),
         )
-    except asyncio.TimeoutError:
-        logger.warning(
-            "cross_consult timeout source→target=%s pro_model=%s timeout=%ds",
-            target_provider.name, target_provider.pro_model, cc_config.call_timeout_seconds,
-        )
-        return f"{_ERROR_PREFIX} timeout after {cc_config.call_timeout_seconds}s"
-    except Exception as e:
-        logger.warning("cross_consult upstream error: %s", e)
+    except Exception as e:  # 防御：aggregator 内部已捕获大多数错误，这里保兜底
+        logger.warning("cross_consult upstream unexpected error: %s", e)
         return f"{_ERROR_PREFIX} upstream failed: {e}"
+
+    if "_dp_error" in result:
+        err = result["_dp_error"]
+        if "idle timeout" in err:
+            logger.warning(
+                "cross_consult idle timeout source→target=%s pro_model=%s timeout=%ds",
+                target_provider.name, target_provider.pro_model,
+                cc_config.call_timeout_seconds,
+            )
+            return f"{_ERROR_PREFIX} timeout after {cc_config.call_timeout_seconds}s (no chunks)"
+        logger.warning("cross_consult upstream error: %s", err)
+        return f"{_ERROR_PREFIX} upstream failed: {err}"
 
     try:
         choice = result["choices"][0]
