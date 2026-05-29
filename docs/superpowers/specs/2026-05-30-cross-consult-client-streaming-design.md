@@ -54,6 +54,7 @@ buffer、要么 yield 一个 `synthesize_final_stream_chunk` 合成块。
 @dataclass
 class TurnResult:
     accumulated_tool_calls: list[dict] = field(default_factory=list)
+    content: str = ""            # 累加的 assistant 文本，供重发轮重建消息历史
     had_cc_call: bool = False
     finish_reason: str | None = None
     errored: bool = False
