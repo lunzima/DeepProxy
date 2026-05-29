@@ -103,25 +103,35 @@ class DeepProxyRouter:
         # 同义改写类任务（确定性是主要诉求，微随机仅供并行重试）
         #
         # 凭据派生：compressor_model 默认带 deepseek/ 前缀 → 用 deepseek 凭据。
-        # 若用户改为 openai/mimo-* 等，需对应 provider 凭据；当前简化为：
-        # 仅当 deepseek.api_key 可用时初始化压缩器，否则降级 skip + 显式 warn
-        # （MiMo-only 部署未配 DeepSeek key 时，避免每请求静默 401 → 用户付
-        # 全 prompt tokens 而无感知）。
+        # 新格式（providers 块）优先；老格式（顶层 deepseek:）兜底——避免新
+        # 格式用户因顶层 deepseek 字段空而被误判为"未配置"。
+        # 仅当解析后的 api_key 可用时初始化压缩器，否则降级 skip + 显式 warn
+        # 避免每请求静默 401 → 用户付全 prompt tokens 而无感知。
         self._compressor: SystemPromptCompressor | None = None
         if config.optimization.enabled and config.optimization.compress_skills:
-            if not config.deepseek.api_key:
+            ds_provider = config.providers.get("deepseek")
+            ds_api_key = (
+                (ds_provider.api_key if ds_provider else "")
+                or config.deepseek.api_key
+            )
+            ds_api_base = (
+                (ds_provider.api_base if ds_provider else "")
+                or config.deepseek.api_base
+            )
+            if not ds_api_key:
                 logger.warning(
                     "compress_skills=True 但未配置 DeepSeek api_key——"
                     "system prompt 压缩器降级为禁用（避免每请求静默 401）。"
-                    "若需启用压缩，请提供 deepseek.api_key（当前 compressor 仅"
-                    "支持 DeepSeek 凭据；MiMo provider 凭据复用尚未实现）。",
+                    "若需启用压缩，请在 providers.deepseek.api_key 或顶层 "
+                    "deepseek.api_key 提供凭据（当前 compressor 仅支持 DeepSeek 凭据；"
+                    "MiMo provider 凭据复用尚未实现）。",
                 )
             else:
                 from pathlib import Path
                 self._compressor = SystemPromptCompressor(
                     cache_path=Path(config.optimization.compressor_cache_path),
-                    api_key=config.deepseek.api_key,
-                    api_base=_to_litellm_api_base(config.deepseek.api_base),
+                    api_key=ds_api_key,
+                    api_base=_to_litellm_api_base(ds_api_base),
                     model=config.optimization.compressor_model,
                     sampling=config.precise_sampling,
                 )
