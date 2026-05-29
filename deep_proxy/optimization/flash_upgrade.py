@@ -466,6 +466,3 @@ def extra_body_requests_upgrade(body: Dict[str, Any]) -> bool:
     该字段在 call_litellm 时被 sentinel 剥离子流程自动移除。
     """
     return bool(body.get(_EXTRA_BODY_SENTINEL, False))
-
-
-# _flatten_messages 已迁移到 utils.flatten_messages（含 user_only 开关）。
