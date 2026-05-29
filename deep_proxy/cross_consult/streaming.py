@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, AsyncGenerator, Awaitable, Callable
 
 from ..config import ProxyConfig
@@ -32,6 +33,7 @@ async def aggregate_stream_to_response(
     *,
     provider: Provider | None,
     idle_timeout: float,
+    first_chunk_timeout: float | None = None,
     iter_fn: IterFn | None = None,
 ) -> dict[str, Any]:
     """流式调上游、按 chunk 累加，返回非流式 chat.completion 风格 dict。
@@ -46,10 +48,15 @@ async def aggregate_stream_to_response(
           }]
         }
 
-    错误（连接失败 / 流中途异常 / idle 超时）以 {"_dp_error": str} 返回，调用方
+    错误（连接失败 / 流中途异常 / 超时）以 {"_dp_error": str} 返回，调用方
     自行决定如何包装（executor 包成错误前缀字符串；interceptor 把它当成空响应处理）。
 
-    idle_timeout 含义：相邻 chunk 间允许的最长无活动时间。0 / 负数 = 不限。
+    两个超时预算（刻意分离，见模块 docstring）：
+      - first_chunk_timeout：等待**首个** chunk（prefill / TTFT + 推理预热）的上限。
+        大上下文重发的 time-to-first-chunk 远长于 chunk 间隙，故单独给宽预算。
+        None / 0 / 负数 = 退回 idle_timeout 守护首 chunk（向后兼容）。
+      - idle_timeout：首 chunk 之后，相邻 chunk 间允许的最长无活动时间（真正的
+        mid-stream hang tripwire）。0 / 负数 = 不限。
     """
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -60,17 +67,37 @@ async def aggregate_stream_to_response(
     # 默认到模块级名（注：通过模块属性查找，便于测试 patch 整个 streaming.iter_litellm_chunks）
     fn = iter_fn if iter_fn is not None else iter_litellm_chunks
     iterator = fn(config, body, provider=provider).__aiter__()
+    chunk_count = 0
+    start = time.monotonic()
     while True:
+        first = chunk_count == 0
+        # 首 chunk 用 first_chunk_timeout（未给则退回 idle_timeout）；之后用 idle_timeout
+        wait_timeout = (
+            first_chunk_timeout
+            if first and first_chunk_timeout and first_chunk_timeout > 0
+            else idle_timeout
+        )
         try:
-            if idle_timeout and idle_timeout > 0:
-                chunk = await asyncio.wait_for(iterator.__anext__(), timeout=idle_timeout)
+            if wait_timeout and wait_timeout > 0:
+                chunk = await asyncio.wait_for(iterator.__anext__(), timeout=wait_timeout)
             else:
                 chunk = await iterator.__anext__()
         except StopAsyncIteration:
             break
         except asyncio.TimeoutError:
-            logger.warning("aggregate_stream idle timeout after %.1fs", idle_timeout)
-            return {"_dp_error": f"idle timeout after {idle_timeout}s with no chunks"}
+            phase = "first_chunk" if first else "mid_stream"
+            elapsed = time.monotonic() - start
+            logger.warning(
+                "aggregate_stream %s timeout after %.1fs (chunks=%d, elapsed=%.1fs)",
+                phase, wait_timeout, chunk_count, elapsed,
+            )
+            return {
+                "_dp_error": (
+                    f"{phase} timeout after {wait_timeout}s "
+                    f"({chunk_count} chunks received)"
+                )
+            }
+        chunk_count += 1
 
         if isinstance(chunk.get("error"), dict) and not chunk.get("choices"):
             err = chunk["error"]
@@ -124,6 +151,7 @@ async def stream_aggregated_call(
     *,
     provider: Provider | None = None,
     idle_timeout: float = 30.0,
+    first_chunk_timeout: float | None = None,
     iter_fn: IterFn | None = None,
 ) -> dict[str, Any]:
     """`call_litellm_fn` 兼容签名的流式封装。
@@ -134,7 +162,8 @@ async def stream_aggregated_call(
     """
     result = await aggregate_stream_to_response(
         config, body, provider=provider,
-        idle_timeout=idle_timeout, iter_fn=iter_fn,
+        idle_timeout=idle_timeout, first_chunk_timeout=first_chunk_timeout,
+        iter_fn=iter_fn,
     )
     if "_dp_error" in result:
         logger.warning("cross_consult resend streaming failed: %s", result["_dp_error"])

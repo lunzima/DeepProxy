@@ -175,9 +175,9 @@ async def test_execute_consult_accumulates_reasoning_when_content_empty(
 async def test_execute_consult_returns_error_string_on_idle_timeout(
     cfg_for_executor, target_provider,
 ):
-    """连续 idle_timeout 秒无 chunk 视为 hang，返回带前缀的错误字符串，不抛异常。"""
+    """首 chunk 迟迟不到（连 first_chunk_timeout 都超），返回带前缀的错误字符串，不抛异常。"""
     async def slow_stream(config, body, *, provider=None):
-        # 模拟连接成功但 chunk 永不到达——idle timeout 路径
+        # 模拟连接成功但 chunk 永不到达——首 chunk 超时路径
         await asyncio.sleep(2.0)
         yield {"choices": [{"index": 0,
                             "delta": {"content": "should not see"},
@@ -191,7 +191,7 @@ async def test_execute_consult_returns_error_string_on_idle_timeout(
             question="hi", context=None,
             target_provider=target_provider, config=cfg_for_executor,
             cc_config=CrossConsultConfig(
-                enabled=True, call_timeout_seconds=1,
+                enabled=True, call_timeout_seconds=1, first_chunk_timeout_seconds=1,
             ),
         )
     assert out.startswith("[DeepProxy cross_consult error]")

@@ -72,7 +72,8 @@ cross_consult:
     deepseek: mimo
     mimo: deepseek
   max_calls_per_request: 3              # 单次 client 请求内 consult 次数上限
-  call_timeout_seconds: 30
+  call_timeout_seconds: 30              # 流式 chunk 间最大空闲秒数（inter-chunk idle hang tripwire）
+  first_chunk_timeout_seconds: 120      # 首 chunk（prefill/TTFT+推理预热）上限；大上下文重发的 TTFT 远超 idle，单独给宽预算
   max_input_chars: 32000                # question + context 字符上限
   max_output_tokens: 4096
   # —— §12.11 双家族机制 ——

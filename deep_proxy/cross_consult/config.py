@@ -42,7 +42,16 @@ class CrossConsultConfig(BaseModel):
     )
     call_timeout_seconds: int = Field(
         default=30, ge=1, le=600,
-        description="单次 consult 调用超时（秒）。",
+        description="流式 chunk 间最大空闲秒数（inter-chunk idle）。首 chunk 之后，"
+                    "相邻 chunk 间隔超过该值才视为 mid-stream hang。注：首 chunk 的 "
+                    "prefill/TTFT 由 first_chunk_timeout_seconds 单独管辖。",
+    )
+    first_chunk_timeout_seconds: int = Field(
+        default=120, ge=1, le=600,
+        description="等待首个 chunk（prefill / TTFT + 推理预热）的上限秒数。"
+                    "cross_consult 重发携带最大上下文（原对话 + 注入的 tool_result），"
+                    "其 time-to-first-chunk 可能远超 inter-chunk idle 预算；首 chunk "
+                    "因此单独给更宽预算，避免健康上游在预填充阶段被误杀。",
     )
     max_input_chars: int = Field(
         default=32000, ge=100,

@@ -462,10 +462,12 @@ class DeepProxyRouter:
         # 保持非流式 dict，process_response 无需感知差异。
         if self.config.cross_consult.enabled and provider is not None:
             cc_idle = float(self.config.cross_consult.call_timeout_seconds)
+            cc_first = float(self.config.cross_consult.first_chunk_timeout_seconds)
 
             async def _resend_via_stream(cfg, b, *, provider=None):
                 return await stream_aggregated_call(
-                    cfg, b, provider=provider, idle_timeout=cc_idle,
+                    cfg, b, provider=provider,
+                    idle_timeout=cc_idle, first_chunk_timeout=cc_first,
                 )
 
             result = await execute_cross_consult_loop(
@@ -561,10 +563,12 @@ class DeepProxyRouter:
                         accumulated_tool_calls,
                     )
                     cc_idle = float(self.config.cross_consult.call_timeout_seconds)
+                    cc_first = float(self.config.cross_consult.first_chunk_timeout_seconds)
 
                     async def _resend_via_stream(cfg, b, *, provider=None):
                         return await stream_aggregated_call(
-                            cfg, b, provider=provider, idle_timeout=cc_idle,
+                            cfg, b, provider=provider,
+                            idle_timeout=cc_idle, first_chunk_timeout=cc_first,
                         )
 
                     final_result = await execute_cross_consult_loop(

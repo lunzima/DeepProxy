@@ -64,6 +64,7 @@ async def execute_consult(
             config, body,
             provider=target_provider,
             idle_timeout=float(cc_config.call_timeout_seconds),
+            first_chunk_timeout=float(cc_config.first_chunk_timeout_seconds),
         )
     except Exception as e:  # 防御：aggregator 内部已捕获大多数错误，这里保兜底
         logger.warning("cross_consult upstream unexpected error: %s", e)
@@ -71,13 +72,14 @@ async def execute_consult(
 
     if "_dp_error" in result:
         err = result["_dp_error"]
-        if "idle timeout" in err:
+        if "timeout" in err:
             logger.warning(
-                "cross_consult idle timeout source→target=%s pro_model=%s timeout=%ds",
-                target_provider.name, target_provider.pro_model,
-                cc_config.call_timeout_seconds,
+                "cross_consult %s source→target=%s pro_model=%s "
+                "(idle=%ds first_chunk=%ds)",
+                err, target_provider.name, target_provider.pro_model,
+                cc_config.call_timeout_seconds, cc_config.first_chunk_timeout_seconds,
             )
-            return f"{_ERROR_PREFIX} timeout after {cc_config.call_timeout_seconds}s (no chunks)"
+            return f"{_ERROR_PREFIX} {err}"
         logger.warning("cross_consult upstream error: %s", err)
         return f"{_ERROR_PREFIX} upstream failed: {err}"
 
