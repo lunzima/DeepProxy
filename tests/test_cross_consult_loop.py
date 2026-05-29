@@ -365,3 +365,27 @@ async def test_streaming_final_chunk_includes_reasoning_content_when_present(cfg
             if d.get("reasoning_content") == "step by step thinking":
                 reasoning_emitted = True
     assert reasoning_emitted, "streaming final chunk dropped reasoning_content"
+
+
+async def test_chat_completions_stream_serializes_heartbeat_as_sse_comment():
+    """心跳 sentinel -> SSE 注释帧（: keep-alive），不是 data: 帧。"""
+    from unittest.mock import patch
+    from deep_proxy.router import DeepProxyRouter
+    from deep_proxy.config import ProxyConfig, normalize_legacy_config
+
+    cfg = ProxyConfig.model_validate(normalize_legacy_config({
+        "deepseek": {"api_key": "sk", "api_base": "https://api.deepseek.com"},
+    }))
+    router = DeepProxyRouter(cfg)
+
+    async def fake_iter(body, *, provider=None):
+        yield {"_dp_heartbeat": True}
+        yield {"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}]}
+
+    with patch.object(router, "iter_chat_chunks", new=fake_iter):
+        out = [s async for s in router.chat_completions_stream({}, provider=None)]
+
+    assert ": keep-alive\n\n" in out
+    assert not any(s.startswith("data: ") and "_dp_heartbeat" in s for s in out)
+    assert any(s.startswith("data: ") and '"content": "hi"' in s for s in out)
+    assert out[-1] == "data: [DONE]\n\n"

@@ -594,6 +594,10 @@ class DeepProxyRouter:
         负责协议细节：dict → `data: {...}\\n\\n`、错误帧序列化、`data: [DONE]\\n\\n` 前哨。
         """
         async for item in self.iter_chat_chunks(body, provider=provider):
+            if item.get("_dp_heartbeat"):
+                # SSE 注释帧：规范明确忽略 `:` 开头行，零风险污染 delta 解析
+                yield ": keep-alive\n\n"
+                continue
             yield f"data: {json.dumps(item)}\n\n"
             if isinstance(item.get("error"), dict) and not item.get("choices"):
                 yield SSE_DONE
