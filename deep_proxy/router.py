@@ -469,10 +469,28 @@ class DeepProxyRouter:
             return
 
         if self._upgrade_tracker.is_upgraded(messages, provider=provider_name):
-            remaining = self._upgrade_tracker.remaining(messages, provider=provider_name)
-            logger.info("持久升格命中 → %s（剩余 %d 轮）", pro_model, remaining)
-            body["model"] = pro_model
-            return
+            # 在持久升格窗口内仍重新评估当前复杂度——避免"复杂提问触发 Pro
+            # 后实际任务机械简单但多轮"的浪费（plan §Direction C）。
+            # hysteresis：upgrade=heur_thr / downgrade=downgrade_thr，gap 足够大
+            # 防止抖动反复切换。
+            current_score = compute_complexity_score(messages).score
+            downgrade_thr = cfg.threshold_for_provider(provider_name, "downgrade_threshold")
+            if current_score < downgrade_thr:
+                self._upgrade_tracker.clear(messages, provider=provider_name)
+                logger.info(
+                    "升格主动撤销: score=%.2f < downgrade_thr=%.2f → 切回 %s",
+                    current_score, downgrade_thr, flash_model,
+                )
+                # 不 return——继续走 Step 3/3.5/4 让本轮按当下信号决定（可能
+                # 再次升格如果 agent_depth >= 5 等其它信号仍触发）
+            else:
+                remaining = self._upgrade_tracker.remaining(messages, provider=provider_name)
+                logger.info(
+                    "持久升格命中 → %s（剩余 %d 轮, score=%.2f）",
+                    pro_model, remaining, current_score,
+                )
+                body["model"] = pro_model
+                return
 
         # ── Step 3: 启发式快速路径（Layer 1） ──
         heuristic_result = compute_complexity_score(messages)

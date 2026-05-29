@@ -29,8 +29,7 @@ import logging
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
-from ..optimization.flash_upgrade import conversation_fingerprint
-from ..utils import hash_payload, merge_tool_call_deltas
+from ..utils import conversation_fingerprint, hash_payload, merge_tool_call_deltas
 from .deepseek_fixes import ensure_thinking_dict, is_thinking_disabled
 
 logger = logging.getLogger(__name__)

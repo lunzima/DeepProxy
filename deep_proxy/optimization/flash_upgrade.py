@@ -19,32 +19,23 @@ import re
 from collections import OrderedDict, namedtuple
 from typing import Any, Dict, List, Tuple
 
-from ..utils import get_text_from_content, hash_str
+from ..utils import (
+    conversation_fingerprint,
+    count_user_messages,
+    flatten_messages,
+    get_text_from_content,
+    hash_str,
+    last_user_hash,
+    last_user_text,
+)
 
 
 # ======================================================================
 # Layer 3：对话级持久化 — UpgradeTracker
 # ======================================================================
-
-
-def _last_user_text(messages: List[Dict[str, Any]]) -> str:
-    """提取最后一条 user 消息的纯文本内容。"""
-    for m in reversed(messages):
-        if m.get("role") != "user":
-            continue
-        return get_text_from_content(m.get("content", ""))
-    return ""
-
-
-def _count_user_messages(messages: List[Dict[str, Any]]) -> int:
-    """统计 user 消息数量。"""
-    return sum(1 for m in messages if m.get("role") == "user")
-
-
-def _last_user_hash(messages: List[Dict[str, Any]]) -> str:
-    """最后一条 user 消息的短哈希（检测重复消息用）。"""
-    text = _last_user_text(messages)
-    return hash_str(text, algo="md5")[:8] if text else "empty"
+# 通用对话遍历工具（last_user_text / last_user_hash / count_user_messages /
+# flatten_messages / conversation_fingerprint）已迁移到 utils.py。
+# flash_upgrade 不再自己维护这些 helper。
 
 
 class RepeatUpgradeThrottle:
@@ -87,7 +78,7 @@ class RepeatUpgradeThrottle:
         cache hit 之前预检：若仍在 cooldown，应跳过 cache 直接走 Flash。
         """
         fp = conversation_fingerprint(messages)
-        h = _last_user_hash(messages)
+        h = last_user_hash(messages)
         entry = self._state.get((fp, h))
         if entry is None:
             return False
@@ -107,7 +98,7 @@ class RepeatUpgradeThrottle:
             True = 强制使用 Flash（降级）；False = 走正常逻辑
         """
         fp = conversation_fingerprint(messages)
-        h = _last_user_hash(messages)
+        h = last_user_hash(messages)
         key = (fp, h)
         entry = self._state.get(key)
 
@@ -133,24 +124,6 @@ class RepeatUpgradeThrottle:
             self._set(key, (0, 0))
 
         return False
-
-
-def conversation_fingerprint(messages: List[Dict[str, Any]]) -> str:
-    """跨轮次稳定的对话标识，不依赖客户端会话 ID。
-
-    仅使用首条 user 内容[:300] 的 md5 —— 从对话第一轮就确定，永不变化。
-    单用户场景碰撞概率可忽略；若真正发生（两对话首条完全相同），
-    最坏情况是共享升格状态，成本可接受。
-
-    注意：不使用 assistant 内容做 key，因为首轮升格触发时 assistant 尚不存在，
-    后续 fingerprint 会改变，导致 UpgradeTracker 找不到对应 key。
-    """
-    first_user = next((m for m in messages if m.get("role") == "user"), None)
-    if first_user is None:
-        return hash_str("empty", algo="md5")
-
-    prefix = get_text_from_content(first_user.get("content", ""))[:300]
-    return hash_str(prefix, algo="md5")
 
 
 class UpgradeTracker:
@@ -195,7 +168,7 @@ class UpgradeTracker:
         cache hit 早于 Step 5，下一轮 is_upgraded() 会越过 throttle 直走 Pro。
         清掉 entry 让 throttle 的 cooldown 真正生效。
         """
-        fp, last_h = conversation_fingerprint(messages), _last_user_hash(messages)
+        fp, last_h = conversation_fingerprint(messages), last_user_hash(messages)
         key = (fp, last_h, provider)
         self._sessions.pop(key, None)
 
@@ -205,7 +178,7 @@ class UpgradeTracker:
         副作用：如果这是新轮次（最后 user 消息发生变化），消耗 1 轮剩余额度。
         """
         fp = conversation_fingerprint(messages)
-        current_hash = _last_user_hash(messages)
+        current_hash = last_user_hash(messages)
 
         # 先检查当前 last_user_hash 的 key
         key = (fp, current_hash, provider)
@@ -247,7 +220,7 @@ class UpgradeTracker:
         """
         self.set_remaining_by_key(
             conversation_fingerprint(messages),
-            _last_user_hash(messages),
+            last_user_hash(messages),
             turns,
             provider=provider,
         )
@@ -269,12 +242,12 @@ class UpgradeTracker:
     @staticmethod
     def snapshot_keys(messages: List[Dict[str, Any]]) -> Tuple[str, str]:
         """计算 (fingerprint, last_user_hash) 二元组，供延迟提交场景使用。"""
-        return conversation_fingerprint(messages), _last_user_hash(messages)
+        return conversation_fingerprint(messages), last_user_hash(messages)
 
     def remaining(self, messages: List[Dict[str, Any]], *, provider: str = "deepseek") -> int:
         """查询剩余 Pro 轮次（只读，不消耗）。"""
         fp = conversation_fingerprint(messages)
-        current_hash = _last_user_hash(messages)
+        current_hash = last_user_hash(messages)
         key = (fp, current_hash, provider)
         return self._sessions.get(key, 0)
 
@@ -387,80 +360,63 @@ ComplexityResult = namedtuple(
 def compute_complexity_score(
     messages: List[Dict[str, Any]],
 ) -> ComplexityResult:
-    """零成本的启发式复杂度评分（Layer 1 快速路径）。
+    """启发式复杂度评分（Layer 1 快速路径）。5 维加权求和上限 10。
 
-    返回 ComplexityResult(score, user_text, user_msg_count)：
-      - score: 0.0–10.0，越高越可能要 Pro
-      - user_text: 所有 user 消息拼接文本（供外部复用，避免重复计算）
-      - user_msg_count: user 消息条数
+    重设记录见 docs/superpowers/specs/2026-05-29-complexity-scoring-redesign.md。
+    设计要求：信号在"编码任务"和"用 Claude Code 跑文学创作"两种场景上都需有效。
 
-    各维度加权求和，满分 10。
+    维度（均 user-only，除 reasoning_density）：
+      1. keyword_score (cap 2.0)        — _COMPLEXITY_KEYWORDS 命中，用户语言意图
+      2. math_score    (cap 1.5)        — _MATH_SYMBOLS 密度，数学/形式化任务
+      3. turn_score    (cap 2.0)        — user 消息数 / 3，迭代持续度
+      4. last_user_size_score (cap 3.0) — 最后一条 user 长度 / 300，当前请求分量
+      5. reasoning_score (cap 4.0)      — V4 reasoning_content 平均每条 assistant
+                                          字符数 / 500，直接测量推理强度
 
-    通行做法对标：RouteLLM 的请求前静态评分、Cline 的内置复杂度判断。
-
-    2026-04-28：
-      - 内容信号（关键词/代码块/数学符号）仅统计 user 消息，排除 system
-        消息（如 QWEN.md 项目文档）中的技术词污染。
-      - 阈值平滑化：token/轮次/膨胀折扣全部改为线性连续映射。
-      - 移除 coding_port 加分（v4-flash 处理简单编码任务效果已极好）。
+    Direction A/B/C 全部由 5 维 + router._maybe_upgrade Step 2 hysteresis 覆盖。
+    已删除：token_score（全文本噪声）、code_score（不区分复杂度）、discount
+    机制（token_score 删了无需）、agent_depth_score / assistant 双源扫描
+    （误判机械与推理同分）。
     """
     if not messages:
         return ComplexityResult(0.0, "", 0)
 
-    # 全量文本 → token 估算 + 上下文膨胀分母
-    total_text = _flatten_messages(messages)
-    estimated_tokens = len(total_text) / 1.8  # 混排 CJK+English
-    user_turns = _count_user_messages(messages)
+    user_text = flatten_messages(messages, user_only=True)
+    user_turns = count_user_messages(messages)
+    last_user = last_user_text(messages)
 
-    # user-only 文本 → 内容信号（关键词、代码块、数学符号）
-    # system 消息（如 QWEN.md 项目文档）中出现的技术词描述的是项目而非用户请求。
-    user_text = _flatten_messages(messages, user_only=True)
+    # 1. keyword（user-only）— 用户语言意图信号
+    keyword_hits = sum(user_text.count(kw) for kw in _COMPLEXITY_KEYWORDS)
+    keyword_score = min(keyword_hits * 0.30, 2.0)
 
-    # 1. Token 量（上限 2.5）— 线性连续：8000 tokens → 满分
-    token_score = min(estimated_tokens / 3200.0, 2.5)
+    # 2. math（user-only）— 数学 / 形式化任务强信号
+    math_hits = sum(1 for ch in user_text if ch in _MATH_SYMBOLS)
+    math_score = min(math_hits * 0.50, 1.5)
 
-    # 2. 代码块（上限 2.0）— 线性连续，每个代码块 +0.5（仅 user 消息）
-    code_blocks = len(re.findall(r"```", user_text)) // 2
-    code_score = min(code_blocks * 0.5, 2.0)
-
-    # 3. 轮次数（上限 2.0）— 线性连续：6 轮 → 满分
+    # 3. turn — 多轮 = 持续投入（写作迭代 / 多轮 debug）
     turn_score = min(user_turns / 3.0, 2.0)
 
-    # 4. 关键词命中（上限 2.0）— 线性连续，每个关键词 +0.3（仅 user 消息）
-    keyword_hits = sum(user_text.count(kw) for kw in _COMPLEXITY_KEYWORDS)
-    keyword_score = min(keyword_hits * 0.3, 2.0)
+    # 4. last_user_size — 当前"问题/请求"分量；用最后一条 user 长度而非
+    #    全量 token，避免 tool output / CLAUDE.md 注入膨胀的噪声
+    last_user_size_score = min(len(last_user) / 300.0, 3.0)
 
-    # 5. 数学符号（上限 1.5）— 线性连续，每个符号 +0.5（仅 user 消息）
-    math_hits = sum(1 for ch in user_text if ch in _MATH_SYMBOLS)
-    math_score = min(math_hits * 0.5, 1.5)
+    # 5. reasoning_density — V4 reasoning_content 平均每条 assistant 长度
+    #    直接测量"模型在思考多努力"，跨编码 / 写作都有效；
+    #    机械重复任务下 reasoning 几乎为空 → 信号降为零 → 配合
+    #    router 侧 downgrade_threshold 形成 Direction C 主动降格
+    asst = [m for m in messages if m.get("role") == "assistant"]
+    if asst:
+        reasoning_chars = sum(
+            len(m.get("reasoning_content") or "") for m in asst
+        )
+        reasoning_score = min((reasoning_chars / len(asst)) / 500.0, 4.0)
+    else:
+        reasoning_score = 0.0
 
-    # 6. 上下文膨胀检测 — 平滑折扣（无悬崖效应）。
-    #    仅以最近 5 条 user 消息为分母：避免 Coding Agent 注入的巨量
-    #    QWEN.md / memory 上下文永久污染比例计算。
-    #    折扣因子 d = 0.7 × (1 − fraction / 0.30)，clamp 到 [0, 0.7]。
-    #    fraction = 0% → d=0.7（保留 30%）；fraction ≥ 30% → d=0（无折扣）。
-    if user_text:
-        last_user_msg = ""
-        user_msg_lens = []
-        for m in reversed(messages):
-            if m.get("role") != "user":
-                continue
-            c = m.get("content", "")
-            clen = len(c) if isinstance(c, str) else len(str(c))
-            if not last_user_msg:
-                last_user_msg = c if isinstance(c, str) else str(c)
-            user_msg_lens.append(clen)
-            if len(user_msg_lens) >= 5:
-                break
-        if last_user_msg:
-            recent_total = sum(user_msg_lens)
-            fraction = len(last_user_msg) / max(recent_total, 1)
-            if fraction < 0.30:
-                discount = 0.7 * (1.0 - fraction / 0.30)
-                token_score *= (1.0 - discount)
-                code_score *= (1.0 - discount)
-
-    score = token_score + code_score + turn_score + keyword_score + math_score
+    score = (
+        keyword_score + math_score + turn_score
+        + last_user_size_score + reasoning_score
+    )
     return ComplexityResult(round(min(score, 10.0), 2), user_text, user_turns)
 
 
@@ -503,22 +459,4 @@ def extra_body_requests_upgrade(body: Dict[str, Any]) -> bool:
     return bool(body.get(_EXTRA_BODY_SENTINEL, False))
 
 
-def _flatten_messages(
-    messages: List[Dict[str, Any]],
-    *,
-    user_only: bool = False,
-) -> str:
-    """将消息列表拼为纯文本（用于评分/分析）。
-
-    Args:
-        user_only: 仅提取 role=="user" 的消息，排除 system/assistant。
-                   system 消息（如 QWEN.md 项目文档）中出现的"架构""分布式"
-                   等词描述的是项目而非用户请求，不应污染复杂度评分。
-    """
-    parts = []
-    for m in messages:
-        if user_only and m.get("role") != "user":
-            continue
-        c = m.get("content", "")
-        parts.append(get_text_from_content(c))
-    return "\n".join(parts)
+# _flatten_messages 已迁移到 utils.flatten_messages（含 user_only / assistant_only 双开关）。

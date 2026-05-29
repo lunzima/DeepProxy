@@ -1,8 +1,9 @@
 """标签重定向的对话级持久化跟踪器。
 
 仿 `optimization.flash_upgrade.UpgradeTracker` 模式，把"当前对话剩余 N 轮重定向"
-保存在 in-memory OrderedDict 中。key 复用 conversation_fingerprint + last_user_hash
-（直接从 flash_upgrade 模块 import 复用，避免重复实现）。
+保存在 in-memory OrderedDict 中。key 复用 utils.conversation_fingerprint +
+utils.last_user_hash（同 UpgradeTracker 一致，确保两个 tracker 对"新轮次"的
+判定标准一致）。
 
 语义差异：
 - UpgradeTracker 跟踪"flash→pro 升格"的 N 轮持续
@@ -14,10 +15,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Any, Dict, List, Tuple
 
-from ..optimization.flash_upgrade import (
-    _last_user_hash,
-    conversation_fingerprint,
-)
+from ..utils import conversation_fingerprint, last_user_hash
 
 
 class RedirectTracker:
@@ -49,7 +47,7 @@ class RedirectTracker:
             remaining = 含本轮的剩余总轮数（active=False 时为 0）。
         """
         fp = conversation_fingerprint(messages)
-        current_hash = _last_user_hash(messages)
+        current_hash = last_user_hash(messages)
 
         # 当前 hash 已记账
         key = (fp, current_hash, source_provider_name)
@@ -95,7 +93,7 @@ class RedirectTracker:
         """写入剩余轮次。turns 含当前请求；turns=1 表示"仅本次"。"""
         key = (
             conversation_fingerprint(messages),
-            _last_user_hash(messages),
+            last_user_hash(messages),
             source_provider_name,
         )
         self._sessions[key] = turns
@@ -108,7 +106,7 @@ class RedirectTracker:
         """只读查询剩余轮次。"""
         key = (
             conversation_fingerprint(messages),
-            _last_user_hash(messages),
+            last_user_hash(messages),
             source_provider_name,
         )
         return self._sessions.get(key, 0)
@@ -119,7 +117,7 @@ class RedirectTracker:
         """主动清除当前对话的重定向状态。"""
         key = (
             conversation_fingerprint(messages),
-            _last_user_hash(messages),
+            last_user_hash(messages),
             source_provider_name,
         )
         self._sessions.pop(key, None)

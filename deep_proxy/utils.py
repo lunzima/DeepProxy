@@ -279,6 +279,70 @@ def hash_payload(payload: dict, *, prefix: str = "", algo: str = "sha256") -> st
 
 
 # ---------------------------------------------------------------------------
+# 对话遍历 / 指纹工具
+# ---------------------------------------------------------------------------
+# 这些函数描述的是通用的"对话消息遍历"操作，原本散落在
+# optimization/flash_upgrade.py，被 optimization / cross_consult / compatibility
+# 三个独立业务层共用。集中放在 utils 避免跨层 import 造成虚假耦合。
+
+
+def flatten_messages(
+    messages: List[Dict[str, Any]],
+    *,
+    user_only: bool = False,
+) -> str:
+    """将消息列表拼为纯文本（用于评分 / 分析 / 指纹）。
+
+    Args:
+        user_only: 仅提取 role=="user" 的消息——避免 system 消息（如 QWEN.md
+            项目文档）中出现的"架构""分布式"等词污染复杂度评分。
+    """
+    parts: List[str] = []
+    for m in messages:
+        if user_only and m.get("role") != "user":
+            continue
+        parts.append(get_text_from_content(m.get("content", "")))
+    return "\n".join(parts)
+
+
+def last_user_text(messages: List[Dict[str, Any]]) -> str:
+    """提取最后一条 user 消息的纯文本内容；无 user 消息返回空串。"""
+    for m in reversed(messages):
+        if m.get("role") != "user":
+            continue
+        return get_text_from_content(m.get("content", ""))
+    return ""
+
+
+def last_user_hash(messages: List[Dict[str, Any]]) -> str:
+    """最后一条 user 消息的短哈希；空对话返回 "empty"。"""
+    text = last_user_text(messages)
+    return hash_str(text, algo="md5")[:8] if text else "empty"
+
+
+def count_user_messages(messages: List[Dict[str, Any]]) -> int:
+    """统计 user 消息数量。"""
+    return sum(1 for m in messages if m.get("role") == "user")
+
+
+def conversation_fingerprint(messages: List[Dict[str, Any]]) -> str:
+    """跨轮次稳定的对话标识，不依赖客户端会话 ID。
+
+    仅使用首条 user 内容[:300] 的 md5 —— 从对话第一轮就确定，永不变化。
+    单用户场景碰撞概率可忽略；若真正发生（两对话首条完全相同），
+    最坏情况是共享升格 / 重定向状态，成本可接受。
+
+    注意：不使用 assistant 内容做 key，因为首轮升格触发时 assistant 尚不存在，
+    后续 fingerprint 会改变，导致 UpgradeTracker / RedirectTracker 找不到对应 key。
+    """
+    first_user = next((m for m in messages if m.get("role") == "user"), None)
+    if first_user is None:
+        return hash_str("empty", algo="md5")
+    prefix = get_text_from_content(first_user.get("content", ""))[:300]
+    return hash_str(prefix, algo="md5")
+
+
+# ---------------------------------------------------------------------------
 # 流式协议常量
 # ---------------------------------------------------------------------------
 

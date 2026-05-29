@@ -109,6 +109,7 @@ flash_upgrade:
   router_threshold: 0.65                # BERT score >= 此值 → 升格 Pro（偏保守）
   heuristic_threshold: 8.0              # 启发式 score >= 此值 → 直接升格（跳过 BERT）
   persist_turns: 1                      # 升格后保持 Pro 额外 N 轮
+  downgrade_threshold: 3.0              # 升格期间若评分 < 此值主动降回 flash（hysteresis 防振荡）
 
 # ============================================================
 # 多 provider + per-port 路由（新格式，可选）
@@ -165,6 +166,7 @@ flash_upgrade:
 #     mimo:
 #       router_threshold: 0.60   # MiMo flash 略弱于 V4-flash，温和偏向升格
 #       heuristic_threshold: 7.5
+#       downgrade_threshold: 2.5 # MiMo 降级更保守，多保留 Pro 时间
 
 # ============================================================
 # Cross-Consult 双家族机制（v0.4，默认开启）

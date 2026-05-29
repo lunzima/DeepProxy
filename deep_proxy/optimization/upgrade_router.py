@@ -14,7 +14,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
-from .flash_upgrade import _flatten_messages, _last_user_text, compute_complexity_score
+from ..utils import flatten_messages, last_user_text
+from .flash_upgrade import compute_complexity_score
 
 logger = logging.getLogger(__name__)
 
@@ -158,8 +159,9 @@ class BertUpgradeRouter(UpgradeRouter):
 
         # 仅用最后一条 user 消息评分，避免 Coding Agent 注入的巨量
         # 系统上下文（QWEN.md / memory 等）被误判为复杂请求。
-        last_user = _last_user_text(messages)
-        text = last_user if last_user else _flatten_messages(messages, user_only=True)
+        # 模型在 user-only 文本上微调，输入分布保持一致。
+        last_user = last_user_text(messages)
+        text = last_user if last_user else flatten_messages(messages, user_only=True)
         try:
             import torch
         except ImportError:

@@ -601,17 +601,23 @@ class TestMaybeUpgradeIntegration:
         router._commit_pending_upgrade(body1)
         assert router._upgrade_tracker.active_count == 1
 
-        # 第二轮：消息增长，新的最后 user，无 sentinel
+        # 第二轮：V4 thinking 模式下 assistant 带 reasoning_content（典型场景），
+        # 加上 user 历史的复杂关键词，重评估通过 downgrade_threshold → 持久 Pro
         body2 = {
             "model": "deepseek-v4-flash",
             "messages": [
                 body1["messages"][0],
-                {"role": "assistant", "content": "好的，我来设计..."},
-                {"role": "user", "content": "继续"},  # 简单追问，本身分数低
+                {
+                    "role": "assistant",
+                    "content": "好的，我来设计...",
+                    "reasoning_content": "分析分布式系统架构需求：" * 100,  # ~1300 chars
+                },
+                {"role": "user", "content": "继续"},
             ],
         }
         router._maybe_upgrade(body2)
-        # 必须命中 Step 2 cache 走 Pro，而非走 Step 3-4（"继续"的复杂度分数远低于阈值）
+        # keyword(user 累积分布式/架构/一致性等) + reasoning_score(2.6) + turn(0.67) ≈ 5.0+
+        # ≫ downgrade_threshold (3.0) → Step 2 重评估通过 → Pro
         assert body2["model"] == "deepseek-v4-pro"
 
     def test_throttle_cooldown_blocks_persist_cache_hit(self):
@@ -625,10 +631,7 @@ class TestMaybeUpgradeIntegration:
         msgs = [{"role": "user", "content": "复杂任务"}]
 
         # 人为注入 throttle 冷却状态 + tracker entry
-        from deep_proxy.optimization.flash_upgrade import (
-            conversation_fingerprint as _cfp,
-            _last_user_hash as _lh,
-        )
+        from deep_proxy.utils import conversation_fingerprint as _cfp, last_user_hash as _lh
         fp = _cfp(msgs)
         h = _lh(msgs)
         router._upgrade_throttle._state[(fp, h)] = (0, 2)  # cooldown=2

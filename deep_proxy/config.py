@@ -314,6 +314,12 @@ class FlashUpgradeConfig(BaseModel):
         default=1, ge=1, le=10,
         description="升格后保持 Pro 的额外轮次数",
     )
+    downgrade_threshold: float = Field(
+        default=3.0, ge=0.0, le=10.0,
+        description="升格状态下若当前 compute_complexity_score < 此值，主动撤销升格切回 flash。"
+                    "应显著低于 heuristic_threshold 形成 hysteresis（默认 gap = 8.0 - 3.0 = 5.0）"
+                    "防止评分轻微抖动引发反复切换。可 per_provider 覆盖。",
+    )
     per_provider: dict[str, dict] = Field(
         default_factory=dict,
         description="按 provider 名覆盖阈值，如 {'mimo': {'router_threshold': 0.65}}。"
