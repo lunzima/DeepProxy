@@ -35,7 +35,7 @@ DeepProxy 绑定**两个端口**，共享同一个 FastAPI app 实例：
 
 **多 provider 路由**（v0.2+）：每个 port 在配置中绑定一个 provider；coding_port 走 DeepSeek，writing_port 走 MiMo (`mimo-v2.5` / `mimo-v2.5-pro`)。flash_upgrade 路由复用同一 BERT checkpoint，按 per-provider 阈值与 `pro_model` 工作。`/v1/models` 每个 port 仅返回该 port 绑定 provider 的模型列表。老 `config.yaml` 不写 `providers`/`ports` 时通过 `normalize_legacy_config` 自动迁移到新结构（双端口都打 DeepSeek，向后兼容）。
 
-**Cross-Consult**（可选 v0.3+）：启用后向请求注入虚拟工具 `cross_consult`，agent 可调用它向异家族 provider 的 pro 模型请求第二视角；DeepProxy 在响应路径拦截 tool_use、代为执行、把结果以 tool_result 注入会话后重发原 provider。`pairs` map 双向声明对偶关系（无主副层级）。默认 disabled，须显式开启。见 `docs/mimo_integration.md` §12 与 `docs/superpowers/plans/2026-05-28-cross-consult.md`。
+**Cross-Consult**（可选 v0.3+）：启用后向请求注入虚拟工具 `cross_consult`，agent 可调用它向异家族 provider 的 pro 模型请求第二视角；DeepProxy 在响应路径拦截 tool_use、代为执行、把结果以 tool_result 注入会话后重发原 provider。`pairs` map 双向声明对偶关系（无主副层级）。默认 disabled，须显式开启。启用后流式 endpoint 对客户端真流式：content/reasoning 逐 token 透传、cross_consult 工具帧被抑制、consult 执行间隙发 SSE keep-alive 心跳（`stream_heartbeat_seconds`）；首 chunk prefill 与 inter-chunk idle 用独立超时预算（`first_chunk_timeout_seconds` / `call_timeout_seconds`）。见 `docs/mimo_integration.md` §12、`docs/superpowers/plans/2026-05-28-cross-consult.md` 与 `docs/superpowers/specs/2026-05-30-cross-consult-client-streaming-design.md`。
 
 ## Building and Running
 
