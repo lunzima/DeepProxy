@@ -1,7 +1,9 @@
 """CrossConsultConfig pydantic 模型。"""
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 _DEFAULT_CONSULT_SYSTEM_PROMPT = (
@@ -11,16 +13,19 @@ _DEFAULT_CONSULT_SYSTEM_PROMPT = (
 )
 
 
+_DEFAULT_REDIRECT_TAG = r"\[本轮对话使用不同家族的大语言模型\]"
+
+
 class CrossConsultConfig(BaseModel):
     """Cross-Consult 配置。pairs 对称声明 provider 间对偶关系。
 
     pairs 例：{"deepseek": "mimo", "mimo": "deepseek"}
-    设计参考 docs/mimo_integration.md §12。
+    设计参考 docs/mimo_integration.md §12 / §12.11。
     """
 
     enabled: bool = Field(
-        default=False,
-        description="主开关。默认关闭——用户须显式开启并配置 pairs。",
+        default=True,
+        description="主开关。默认开启——配置 pairs 后两个机制都激活。",
     )
     tool_name: str = Field(
         default="cross_consult",
@@ -52,8 +57,37 @@ class CrossConsultConfig(BaseModel):
         description="consult 调用时用作 system 消息的提示词。",
     )
 
+    # --- 标签重定向（§12.11）---
+    redirect_enabled: bool = Field(
+        default=True,
+        description="user 消息标签触发的整轮重定向开关。"
+                    "命中 redirect_tag_pattern 时把请求重路由到异家族 provider。",
+    )
+    redirect_persist_turns: int = Field(
+        default=2, ge=0, le=20,
+        description="标签触发后，后续 N 轮额外保持重定向（语义同 flash_upgrade.persist_turns 但独立计数）。",
+    )
+    redirect_tag_pattern: str = Field(
+        default=_DEFAULT_REDIRECT_TAG,
+        description="user 消息中触发重定向的正则。默认匹配字面 [本轮对话使用不同家族的大语言模型]，"
+                    "适度宽容（允许周围空白、全/半角方括号等变体可由用户自定义）。",
+    )
+    awareness_enabled: bool = Field(
+        default=True,
+        description="是否在 system prompt 中注入双家族状态披露。关掉只剩工具 schema 自身的简短说明。",
+    )
+
+    # 编译后的正则（PrivateAttr 避免 pydantic 校验/序列化 / 不进 dict）
+    _compiled_redirect: re.Pattern[str] | None = PrivateAttr(default=None)
+
     def pair_for(self, source_provider: str) -> str | None:
         """返回 source_provider 的对偶名；未开启或未配置返回 None。"""
         if not self.enabled:
             return None
         return self.pairs.get(source_provider)
+
+    def compiled_redirect_pattern(self) -> re.Pattern[str]:
+        """返回编译后的标签正则（lazy + 缓存）。"""
+        if self._compiled_redirect is None:
+            self._compiled_redirect = re.compile(self.redirect_tag_pattern)
+        return self._compiled_redirect

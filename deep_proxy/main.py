@@ -231,6 +231,30 @@ def _binding_for_request(request: Request):
     return provider, sampling
 
 
+def _maybe_redirect_provider(body, provider):
+    """检测 user 消息中的标签或 persist 窗口，必要时覆盖 provider。
+
+    sampling profile 不随重定向变化——标签是"换 provider"而非"换写作风格"，
+    入站 port 的 profile 含义对用户更稳定。返回（可能被覆盖的）provider。
+
+    顺序说明：本函数在 prepare_request 之前调用，因此 conversation_fingerprint
+    在此处计算的是**telemetry-strip 之前**的首条 user 内容（prepare_request
+    step 0c 才剥离 x-anthropic-* 行）。flash_upgrade.UpgradeTracker 的指纹计算
+    则在 strip 之后。两个 tracker 各自独立维护状态、互不交叉引用，所以这种
+    时机不对称今天无实际影响——但若未来需要它们共享 key 必须先对齐顺序。
+    """
+    if provider is None or config is None or router is None:
+        return provider
+    from .cross_consult import resolve_redirect
+    redirected = resolve_redirect(
+        body,
+        source_provider=provider,
+        config=config,
+        tracker=router._redirect_tracker,
+    )
+    return redirected if redirected is not None else provider
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     """聊天补全端点（完全 OpenAI 兼容）。
@@ -243,6 +267,10 @@ async def chat_completions(request: Request):
 
     body: Dict[str, Any] = await request.json()
     provider, sampling = _binding_for_request(request)
+    # cross_consult 标签重定向：在 prepare_request 之前覆盖 provider，让下游
+    # 全部步骤（模型名规范化、thinking、reasoning_effort、flash_upgrade、
+    # 工具注入）按重定向后的 provider 走。
+    provider = _maybe_redirect_provider(body, provider)
     body = await router.prepare_request(
         body, sampling_profile=sampling, provider=provider,
     )
@@ -290,6 +318,8 @@ async def anthropic_messages(request: Request):
 
     openai_body = claude_request_to_openai(anthropic_body)
     provider, sampling = _binding_for_request(request)
+    # cross_consult 标签重定向（与 OpenAI 端点一致）
+    provider = _maybe_redirect_provider(openai_body, provider)
     openai_body = await router.prepare_request(
         openai_body, sampling_profile=sampling, provider=provider,
     )

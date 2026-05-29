@@ -11,6 +11,7 @@ from typing import Any
 
 from ..config import ProxyConfig
 from ..providers import Provider
+from .awareness import build_awareness_prompt
 from .config import CrossConsultConfig
 from .executor import execute_consult
 from .schema import build_system_prompt_addendum, build_tool_schema
@@ -43,11 +44,22 @@ def inject_into_request(
     else:
         body["tools"] = [tool_schema]
 
-    # 追加 system prompt 增量
-    addendum = build_system_prompt_addendum(
+    # 追加 system prompt 增量：先 awareness（双家族披露），再原有 tool addendum
+    target_name = cc_config.pair_for(source_provider_name) or ""
+    awareness_text = ""
+    if cc_config.awareness_enabled and target_name:
+        awareness_text = build_awareness_prompt(
+            source_provider_name=source_provider_name,
+            target_provider_name=target_name,
+            tool_name=cc_config.tool_name,
+            max_calls=cc_config.max_calls_per_request,
+        )
+    tool_addendum = build_system_prompt_addendum(
         tool_name=cc_config.tool_name,
         max_calls=cc_config.max_calls_per_request,
     )
+    addendum = awareness_text + tool_addendum
+
     messages = body.get("messages")
     if isinstance(messages, list):
         # 找首条 system；无则新建一条 prepend

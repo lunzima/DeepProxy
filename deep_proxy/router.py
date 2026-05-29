@@ -48,6 +48,7 @@ from .optimization.dynamic_baskets import (
     assemble_paragraphs as _assemble_basket_paragraphs,
     scenario_from_profile as _scenario_from_profile,
 )
+from .cross_consult import RedirectTracker
 from .optimization.flash_upgrade import (
     RepeatUpgradeThrottle,
     UpgradeTracker,
@@ -81,6 +82,8 @@ class DeepProxyRouter:
         self._upgrade_tracker = UpgradeTracker()
         self._upgrade_router = self._build_upgrade_router()
         self._upgrade_throttle = RepeatUpgradeThrottle()
+        # cross_consult 标签触发的整轮 provider 重定向跟踪器
+        self._redirect_tracker = RedirectTracker()
         # LLM-based system prompt 压缩器（持久化磁盘缓存）
         # 复用 PreciseSamplingConfig 的采样预设：高确定性 + 微抖动，最适合
         # 同义改写类任务（确定性是主要诉求，微随机仅供并行重试）
@@ -120,6 +123,12 @@ class DeepProxyRouter:
         provider: Provider | None = None,  # None 时走 deepseek 兼容行为
     ) -> dict[str, Any]:
         """聊天补全请求预处理管道。
+
+        重要：cross_consult 标签触发的整轮 provider 重定向（§12.11）发生在
+        **本方法之前**，由 main.py::chat_completions 调 _maybe_redirect_provider
+        完成。本方法收到的 provider 已是重定向后的目标，不再做二次检测。
+        若未来新增直接调 prepare_request 的入口（绕过 chat_completions），
+        必须显式先调 cross_consult.resolve_redirect。
 
         Args:
             sampling_profile: 若提供（PreciseSamplingConfig / CreativeSamplingConfig

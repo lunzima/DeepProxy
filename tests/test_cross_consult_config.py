@@ -6,16 +6,21 @@ import pytest
 from deep_proxy.cross_consult.config import CrossConsultConfig
 
 
-def test_cross_consult_config_defaults_disabled():
-    """默认 disabled —— 用户必须显式开启 + 配置 pairs。"""
+def test_cross_consult_config_defaults():
+    """默认 enabled=True（plan §1）；未配置 pairs 时 pair_for 仍返回 None，无副作用。"""
     c = CrossConsultConfig()
-    assert c.enabled is False
+    assert c.enabled is True
     assert c.tool_name == "cross_consult"
     assert c.pairs == {}
+    assert c.pair_for("anything") is None  # 无 pair → 不触发
     assert c.max_calls_per_request == 3
     assert c.call_timeout_seconds == 30
     assert c.max_input_chars == 32000
     assert c.max_output_tokens == 4096
+    # §12.11 新字段默认值
+    assert c.redirect_enabled is True
+    assert c.redirect_persist_turns == 2
+    assert c.awareness_enabled is True
 
 
 def test_cross_consult_config_with_pairs():
@@ -53,12 +58,18 @@ def test_cross_consult_config_has_default_system_prompt():
     assert "self-contained" in c.consult_system_prompt or "上下文" in c.consult_system_prompt
 
 
-def test_proxyconfig_has_cross_consult_default_disabled():
+def test_proxyconfig_cross_consult_enabled_but_inert_without_pairs():
+    """默认 enabled=True 但未配置 pairs → pair_for 返回 None，机制不会激活。
+
+    这保证老 config.yaml 不配置 pairs 时升级到新默认安全（不会突然向陌生
+    provider 发请求）。
+    """
     from deep_proxy.config import ProxyConfig, normalize_legacy_config
     cfg = ProxyConfig.model_validate(normalize_legacy_config({
         "deepseek": {"api_key": "sk"},
     }))
-    assert cfg.cross_consult.enabled is False
+    assert cfg.cross_consult.enabled is True
+    # 但 pairs 未配置 → 不会触发任何注入 / 重定向
     assert cfg.cross_consult.pair_for("deepseek") is None
 
 

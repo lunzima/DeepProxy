@@ -158,18 +158,24 @@ flash_upgrade:
 #   enabled: true
 #   router_type: bert
 #   bert_checkpoint: router_model
-#   router_threshold: 0.60
-#   heuristic_threshold: 7.5
+#   router_threshold: 0.65
+#   heuristic_threshold: 8.0
 #   persist_turns: 2
 #   per_provider:
 #     mimo:
-#       router_threshold: 0.65   # MiMo 起步保守，少升格
+#       router_threshold: 0.60   # MiMo flash 略弱于 V4-flash，温和偏向升格
+#       heuristic_threshold: 7.5
 
 # ============================================================
-# Cross-Consult 虚拟工具（可选；默认 disabled）
+# Cross-Consult 双家族机制（v0.4，默认开启）
 # ============================================================
-# 让任意 port 临时调用异家族 provider 的 pro 模型获取第二视角。
-# 见 docs/mimo_integration.md §12。
+# 两个并行机制共享 enabled 主开关与 pairs map：
+#   1. tool-call: agent 主动 emit `cross_consult` 工具，向异家族 pro 模型请求单次
+#      第二视角（强制 pro、context-free、原对话继续在源 provider）。
+#   2. tag redirect: user 消息出现字面 `[本轮对话使用不同家族的大语言模型]` 时，
+#      DeepProxy 把当前轮 + 后续 N 轮重路由到异家族 provider（按对方家族自身的
+#      flash_upgrade 分级路由选档），窗口耗尽后自然回到源 provider。
+# 详见 docs/mimo_integration.md §12 / §12.11。
 #
 # cross_consult:
 #   enabled: true
@@ -181,3 +187,7 @@ flash_upgrade:
 #   call_timeout_seconds: 30            # 单次 consult 超时
 #   max_input_chars: 32000              # question + context 字符上限
 #   max_output_tokens: 4096             # consult 调用 max_tokens
+#   awareness_enabled: true             # 在 system prompt 注入双家族状态披露
+#   redirect_enabled: true              # 标签触发的整轮 provider 重定向
+#   redirect_persist_turns: 2           # 触发后额外保持重定向的轮数（含本轮共 3 轮）
+#   redirect_tag_pattern: "\\[本轮对话使用不同家族的大语言模型\\]"
