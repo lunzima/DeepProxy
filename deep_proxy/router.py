@@ -52,7 +52,12 @@ from .optimization.dynamic_baskets import (
 )
 from .compatibility.mimo_fixes import inject_top_level_reasoning_effort
 from .cross_consult import RedirectTracker
-from .cross_consult.interceptor import execute_cross_consult_loop, inject_into_request
+from .cross_consult.interceptor import (
+    build_initial_response_from_stream_tool_calls,
+    execute_cross_consult_loop,
+    inject_into_request,
+    synthesize_final_stream_chunk,
+)
 from .optimization.flash_upgrade import (
     RepeatUpgradeThrottle,
     UpgradeTracker,
@@ -534,16 +539,11 @@ class DeepProxyRouter:
                     for c in buffered_chunks:
                         yield c
                 else:
-                    # 含 cross_consult：组装完整 assistant message + 执行循环 + 重发非流式
-                    initial_response = {
-                        "choices": [{
-                            "message": {
-                                "role": "assistant", "content": None,
-                                "tool_calls": accumulated_tool_calls,
-                            },
-                            "finish_reason": "tool_calls",
-                        }],
-                    }
+                    # 含 cross_consult：组装伪非流式 initial_response → 跑 cc 循环
+                    # → 把最终响应合成一个流式 chunk 还回去
+                    initial_response = build_initial_response_from_stream_tool_calls(
+                        accumulated_tool_calls,
+                    )
                     final_result = await execute_cross_consult_loop(
                         body=body, initial_response=initial_response,
                         source_provider=provider, config=self.config,
@@ -552,20 +552,7 @@ class DeepProxyRouter:
                         process_response_fn=self.process_response,
                     )
                     final_result = self.process_response(final_result, provider=provider)
-                    msg = (final_result.get("choices") or [{}])[0].get("message") or {}
-                    delta = {"role": "assistant", "content": msg.get("content", "")}
-                    if msg.get("reasoning_content"):
-                        delta["reasoning_content"] = msg["reasoning_content"]
-                        delta["reasoning"] = msg["reasoning_content"]
-                    if msg.get("tool_calls"):
-                        delta["tool_calls"] = msg["tool_calls"]
-                    yield {
-                        "choices": [{
-                            "index": 0,
-                            "delta": delta,
-                            "finish_reason": "stop",
-                        }],
-                    }
+                    yield synthesize_final_stream_chunk(final_result)
         finally:
             accumulator.flush_to_cache(self._reasoning_cache)
             # 流自然结束（无 error frame、无异常、未被取消）才提交升格记账

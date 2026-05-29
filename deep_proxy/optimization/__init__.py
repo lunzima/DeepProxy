@@ -108,6 +108,62 @@ async def _apply_tool_call_minimal_pipeline(body: Dict[str, Any]) -> None:
     )
 
 
+def _collect_skill_lines(
+    opt: Any,
+    *,
+    body: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    is_creative: bool,
+) -> List[str]:
+    """收集 4 组 skill 文本（A/B/C；D 在外层处理 messages）。
+
+    A. 通用风格（每请求激活，按语义连贯性排序）
+    B. 求证 / 反幻觉（模型自门控；对创作豁免）
+    C. 上下文相关（仅窄触发条件下激活，e.g. json_mode / readurls 已内联）
+
+    返回的 list 按注入顺序排列；调用方负责拼接 + 注入 system prompt。
+
+    注：inject_date 不在此处——日期每天变化，若进入 skill_lines 会让 LLM
+    压缩缓存每日全失效。它在压缩之后追加到 system 末尾。
+    """
+    lines: List[str] = []
+
+    # A. 通用风格
+    if opt.avoid_negative_style:
+        lines.append(_SKILL_AVOID_AI_TICS)
+    if opt.assume_good_intent:
+        lines.append(_SKILL_ASSUME_GOOD_INTENT)
+    if opt.natural_temperament:
+        lines.append(_SKILL_NARRATOR_STANCE if is_creative else _SKILL_NATURAL_TEMPERAMENT_CODING)
+    if opt.contextual_register:
+        lines.append(_SKILL_COMPLEX_SENTENCE)
+    if opt.instruction_priority:
+        lines.append(_SKILL_INSTRUCTION_PRIORITY)
+    if opt.independent_analysis:
+        lines.append(_SKILL_INDEPENDENT_ANALYSIS)
+    if opt.reason_genuinely:
+        lines.append(_SKILL_REASON_GENUINELY)
+    if opt.cot_reset:
+        lines.append(_SKILL_COT_RESET)
+
+    # B. 求证 / 反幻觉（创作豁免）
+    if not is_creative:
+        if opt.show_math_steps:
+            lines.append(_SKILL_SHOW_MATH_STEPS)
+        if opt.prefer_multiple_sources:
+            lines.append(_SKILL_PREFER_MULTIPLE_SOURCES)
+        if opt.avoid_fabricated_citations:
+            lines.append(_SKILL_AVOID_FABRICATED_CITATIONS)
+
+    # C. 上下文相关（窄触发）
+    if opt.json_mode_hint and _is_json_mode(body):
+        lines.append(_SKILL_JSON_MODE)
+    if opt.safe_inlined_content and _has_inlined_content(messages):
+        lines.append(_SKILL_SAFE_INLINED)
+
+    return lines
+
+
 async def apply_cheap_optimizations(
     body: Dict[str, Any],
     *,
@@ -168,50 +224,10 @@ async def apply_cheap_optimizations(
         await _apply_readurls(messages, client=http_client)
 
     # 2. 内置 skills（注入到 system prompt 前缀，按通用程度排序）
-    skill_lines: List[str] = []
-
-    # A. 通用风格（每请求激活）
     is_creative = (mode == "creative")
-
-    if opt.avoid_negative_style:
-        skill_lines.append(_SKILL_AVOID_AI_TICS)
-
-    if opt.assume_good_intent:
-        skill_lines.append(_SKILL_ASSUME_GOOD_INTENT)
-
-    if is_creative:
-        if opt.natural_temperament:
-            skill_lines.append(_SKILL_NARRATOR_STANCE)
-    else:
-        if opt.natural_temperament:
-            skill_lines.append(_SKILL_NATURAL_TEMPERAMENT_CODING)
-
-    if opt.contextual_register:
-        skill_lines.append(_SKILL_COMPLEX_SENTENCE)
-    if opt.instruction_priority:
-        skill_lines.append(_SKILL_INSTRUCTION_PRIORITY)
-    if opt.independent_analysis:
-        skill_lines.append(_SKILL_INDEPENDENT_ANALYSIS)
-    if opt.reason_genuinely:
-        skill_lines.append(_SKILL_REASON_GENUINELY)
-    # 注：inject_date 不进 skill_lines（也就不进 LLM 压缩缓存键），
-    # 否则日期每天变化会让缓存每日全失效。改为在压缩后追加到 system 末尾。
-    if opt.cot_reset:
-        skill_lines.append(_SKILL_COT_RESET)
-
-    # B. 求证 / 反幻觉（模型自门控；对创作豁免）
-    if not is_creative and opt.show_math_steps:
-        skill_lines.append(_SKILL_SHOW_MATH_STEPS)
-    if not is_creative and opt.prefer_multiple_sources:
-        skill_lines.append(_SKILL_PREFER_MULTIPLE_SOURCES)
-    if not is_creative and opt.avoid_fabricated_citations:
-        skill_lines.append(_SKILL_AVOID_FABRICATED_CITATIONS)
-
-    # C. 上下文相关（仅窄触发条件下激活）
-    if opt.json_mode_hint and _is_json_mode(body):
-        skill_lines.append(_SKILL_JSON_MODE)
-    if opt.safe_inlined_content and _has_inlined_content(messages):
-        skill_lines.append(_SKILL_SAFE_INLINED)
+    skill_lines = _collect_skill_lines(
+        opt, body=body, messages=messages, is_creative=is_creative,
+    )
 
     # 把 skills + 用户原 system 拼成完整 system prompt 后整体送 LLM 压缩
     skills_text = "\n\n".join(skill_lines) if skill_lines else ""

@@ -101,6 +101,51 @@ def _extract_cross_consult_tool_calls(response: dict[str, Any], tool_name: str) 
     ]
 
 
+def build_initial_response_from_stream_tool_calls(
+    accumulated_tool_calls: list[dict],
+) -> dict[str, Any]:
+    """把流式累加的 OpenAI tool_calls 包成 execute_cross_consult_loop 期望的
+    initial_response 形状（非流式 chat completion 响应模板）。
+
+    供 router.iter_chat_chunks 在 cross_consult 触发时调用——把"流式
+    捕获到的 cc tool_call"转译成"伪非流式响应"以便复用现有 loop 入口。
+    """
+    return {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": accumulated_tool_calls,
+            },
+            "finish_reason": "tool_calls",
+        }],
+    }
+
+
+def synthesize_final_stream_chunk(final_result: dict[str, Any]) -> dict[str, Any]:
+    """把 cross_consult 循环完成后的非流式 final_result 还原成一个
+    单 chunk 的流式响应（OpenAI streaming chunk 形状）。
+
+    供 router.iter_chat_chunks 在 cc 重发完成后 yield 给客户端——客户端
+    继续按 SSE 协议解析；最终响应内容（含 reasoning_content / tool_calls）
+    完整保留在这一个合成 chunk 里。
+    """
+    msg = (final_result.get("choices") or [{}])[0].get("message") or {}
+    delta: dict[str, Any] = {"role": "assistant", "content": msg.get("content", "")}
+    if msg.get("reasoning_content"):
+        delta["reasoning_content"] = msg["reasoning_content"]
+        delta["reasoning"] = msg["reasoning_content"]
+    if msg.get("tool_calls"):
+        delta["tool_calls"] = msg["tool_calls"]
+    return {
+        "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": "stop",
+        }],
+    }
+
+
 def _parse_args(tc: dict) -> dict:
     raw = (tc.get("function") or {}).get("arguments")
     if isinstance(raw, dict):
@@ -111,6 +156,61 @@ def _parse_args(tc: dict) -> dict:
         except json.JSONDecodeError:
             return {}
     return {}
+
+
+async def _resolve_consult_tool_call(
+    tc: dict,
+    *,
+    call_count: int,
+    target_provider: Provider,
+    config: ProxyConfig,
+    cc_config: CrossConsultConfig,
+) -> tuple[str, bool]:
+    """处理单个 cross_consult tool_call：4 路验证 + 必要时调 executor。
+
+    返回 (tool_text, consumed_quota)：
+      - tool_text: tool_result 内容（成功结果 或 错误前缀字符串）
+      - consumed_quota: True 仅当真正调了 executor（quota / 缺字段 / 超长
+        三种验证错误均为 False，不算消耗）
+
+    把 4 路 if/elif/elif/else 抽出，让 execute_cross_consult_loop 主循环
+    专注 messages 追加与重发；同时验证逻辑可独立单元测试无需 mock 上游。
+    """
+    args = _parse_args(tc)
+    question = (args.get("question") or "").strip()
+    context = args.get("context") or None
+    combined_len = len(question) + (len(context) if context else 0)
+
+    # 验证 1：quota 耗尽（最高优先级——已 over budget 时不再 spend）
+    if call_count >= cc_config.max_calls_per_request:
+        return (
+            f"[DeepProxy cross_consult error] quota "
+            f"({cc_config.max_calls_per_request}) exhausted for this request",
+            False,
+        )
+    # 验证 2：必填 question 缺失
+    if not question:
+        return (
+            "[DeepProxy cross_consult error] missing required 'question' field",
+            False,
+        )
+    # 验证 3：question+context 超长
+    if combined_len > cc_config.max_input_chars:
+        return (
+            f"[DeepProxy cross_consult error] input too long "
+            f"({combined_len} chars > {cc_config.max_input_chars})",
+            False,
+        )
+
+    # 通过验证 → 实际执行
+    tool_text = await execute_consult(
+        question=question,
+        context=context,
+        target_provider=target_provider,
+        config=config,
+        cc_config=cc_config,
+    )
+    return tool_text, True
 
 
 async def execute_cross_consult_loop(
@@ -160,33 +260,12 @@ async def execute_cross_consult_loop(
         body["messages"].append(assistant_msg)
 
         for tc in tool_calls:
-            args = _parse_args(tc)
-            question = (args.get("question") or "").strip()
-            context = args.get("context") or None
-            combined_len = len(question) + (len(context) if context else 0)
-
-            if call_count >= cc_config.max_calls_per_request:
-                tool_text = (
-                    f"[DeepProxy cross_consult error] quota "
-                    f"({cc_config.max_calls_per_request}) exhausted for this request"
-                )
-            elif not question:
-                tool_text = "[DeepProxy cross_consult error] missing required 'question' field"
-            elif combined_len > cc_config.max_input_chars:
-                tool_text = (
-                    f"[DeepProxy cross_consult error] input too long "
-                    f"({combined_len} chars > {cc_config.max_input_chars})"
-                )
-            else:
-                tool_text = await execute_consult(
-                    question=question,
-                    context=context,
-                    target_provider=target_provider,
-                    config=config,
-                    cc_config=cc_config,
-                )
+            tool_text, consumed = await _resolve_consult_tool_call(
+                tc, call_count=call_count,
+                target_provider=target_provider, config=config, cc_config=cc_config,
+            )
+            if consumed:
                 call_count += 1
-
             body["messages"].append({
                 "role": "tool",
                 "tool_call_id": tc.get("id"),
