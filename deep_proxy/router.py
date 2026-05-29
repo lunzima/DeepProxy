@@ -53,12 +53,15 @@ from .optimization.dynamic_baskets import (
 from .compatibility.mimo_fixes import inject_top_level_reasoning_effort
 from .cross_consult import RedirectTracker
 from .cross_consult.interceptor import (
-    build_initial_response_from_stream_tool_calls,
     execute_cross_consult_loop,
     inject_into_request,
-    synthesize_final_stream_chunk,
 )
 from .cross_consult.streaming import stream_aggregated_call
+from .cross_consult.client_stream import (
+    TurnResult,
+    stream_cross_consult_continuation,
+    stream_one_turn,
+)
 from .optimization.flash_upgrade import (
     RepeatUpgradeThrottle,
     UpgradeTracker,
@@ -497,13 +500,13 @@ class DeepProxyRouter:
         """业务层流式 chunk 流（dict 形态）。
 
         cross_consult enabled + pair 存在 + provider 给定时，
-        在内部 buffer chunks 并检测 cross_consult tool_call；
-        触发时切到非流式 loop 并把最终响应作为单 chunk yield。
+        content/reasoning_content chunk 即时透传到客户端；cross_consult tool_call
+        帧被抑制，consult 执行期间发心跳帧，重发轮再次逐 token 透传。
 
-        - 每个 yield：OpenAI 风格的 chunk dict（带 reasoning 字段已自愈/累加）
-          或 `{"error": {...}}` 错误终止
+        - 每个 yield：OpenAI 风格的 chunk dict（带 reasoning 字段已自愈/累加）、
+          心跳哨兵 `{"_dp_heartbeat": True}`，或 `{"error": {...}}` 错误终止
         - 自然结束 = 流正常完成
-        - 期间累加 content / reasoning_content / tool_calls，结束后写 ReasoningCache
+        - 结束后写 ReasoningCache；升格记账在完全成功时提交
 
         SSE 序列化（`data:` 前缀、`[DONE]` 前哨）由调用方在协议层完成。
         """
@@ -517,69 +520,51 @@ class DeepProxyRouter:
         accumulator = StreamingReasoningAccumulator(request_messages=request_messages)
         completed_cleanly = False
         saw_error_frame = False
-        buffered_chunks: list[dict] = []
-        accumulated_tool_calls: list[dict] = []  # canonical OpenAI shape, index-sorted
 
         try:
-            async for chunk_dict in iter_litellm_chunks(
-                self.config, body, _accumulator=accumulator, provider=provider,
-            ):
-                if isinstance(chunk_dict.get("error"), dict) and not chunk_dict.get("choices"):
-                    saw_error_frame = True
-                    yield chunk_dict
-                    continue
-
-                if cc_active:
-                    # 累积 tool_call delta —— 复用 utils.merge_tool_call_deltas 保持
-                    # canonical 语义（name=覆盖, arguments=拼接）。详见 helper docstring。
-                    for ch in chunk_dict.get("choices") or []:
-                        delta = ch.get("delta") or {}
-                        tcs = delta.get("tool_calls")
-                        if isinstance(tcs, list) and tcs:
-                            accumulated_tool_calls = merge_tool_call_deltas(
-                                accumulated_tool_calls, tcs,
-                            )
-                    buffered_chunks.append(chunk_dict)
-                else:
-                    yield chunk_dict
-
-            completed_cleanly = True
-
-            # 流结束：cc_active 时判断是否触发 cross_consult
             if cc_active:
-                tool_name = self.config.cross_consult.tool_name
-                has_cc_call = any(
-                    (tc.get("function") or {}).get("name") == tool_name
-                    for tc in accumulated_tool_calls
+                turn = TurnResult()
+                initial_iter = iter_litellm_chunks(
+                    self.config, body, _accumulator=accumulator, provider=provider,
                 )
-                if not has_cc_call:
-                    # 不含 cross_consult，原样 yield buffered chunks
-                    for c in buffered_chunks:
-                        yield c
+                idle = float(self.config.cross_consult.call_timeout_seconds)
+                first = float(self.config.cross_consult.first_chunk_timeout_seconds)
+                hb = float(self.config.cross_consult.stream_heartbeat_seconds)
+                async for frame in stream_one_turn(
+                    initial_iter, turn, tool_name=self.config.cross_consult.tool_name,
+                    idle_timeout=idle, first_chunk_timeout=first, heartbeat_seconds=hb,
+                ):
+                    if frame.get("error"):
+                        saw_error_frame = True
+                    yield frame
+                if turn.errored:
+                    completed_cleanly = True
+                    return
+                if not turn.had_cc_call:
+                    # 无 cc 调用：终轮，补发 finish_reason / 非 cc tool_calls
+                    final_delta: dict[str, Any] = {}
+                    if turn.accumulated_tool_calls:
+                        final_delta["tool_calls"] = turn.accumulated_tool_calls
+                    yield {"choices": [{"index": 0, "delta": final_delta,
+                                        "finish_reason": turn.finish_reason or "stop"}]}
                 else:
-                    # 含 cross_consult：组装伪非流式 initial_response → 跑 cc 循环
-                    # → 把最终响应合成一个流式 chunk 还回去
-                    initial_response = build_initial_response_from_stream_tool_calls(
-                        accumulated_tool_calls,
-                    )
-                    cc_idle = float(self.config.cross_consult.call_timeout_seconds)
-                    cc_first = float(self.config.cross_consult.first_chunk_timeout_seconds)
-
-                    async def _resend_via_stream(cfg, b, *, provider=None):
-                        return await stream_aggregated_call(
-                            cfg, b, provider=provider,
-                            idle_timeout=cc_idle, first_chunk_timeout=cc_first,
-                        )
-
-                    final_result = await execute_cross_consult_loop(
-                        body=body, initial_response=initial_response,
-                        source_provider=provider, config=self.config,
-                        cc_config=self.config.cross_consult,
-                        call_litellm_fn=_resend_via_stream,
-                        process_response_fn=self.process_response,
-                    )
-                    final_result = self.process_response(final_result, provider=provider)
-                    yield synthesize_final_stream_chunk(final_result)
+                    async for frame in stream_cross_consult_continuation(
+                        initial_tool_calls=turn.accumulated_tool_calls,
+                        body=body, source_provider=provider, config=self.config,
+                        cc_config=self.config.cross_consult, accumulator=accumulator,
+                    ):
+                        if frame.get("error"):
+                            saw_error_frame = True
+                        yield frame
+                completed_cleanly = True
+            else:
+                async for chunk_dict in iter_litellm_chunks(
+                    self.config, body, _accumulator=accumulator, provider=provider,
+                ):
+                    if isinstance(chunk_dict.get("error"), dict) and not chunk_dict.get("choices"):
+                        saw_error_frame = True
+                    yield chunk_dict
+                completed_cleanly = True
         finally:
             accumulator.flush_to_cache(self._reasoning_cache)
             # 流自然结束（无 error frame、无异常、未被取消）才提交升格记账

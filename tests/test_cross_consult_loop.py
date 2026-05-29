@@ -181,52 +181,117 @@ async def test_chat_completions_handles_consult_error_as_tool_result(cfg_cross):
     assert result["choices"][0]["message"]["content"] == "final after error"
 
 
-async def test_iter_chat_chunks_intercepts_cross_consult_in_stream(cfg_cross):
-    """流式响应含 cross_consult tool_call 时，DeepProxy 走"内部流式聚合"补完模式。
-
-    路径覆盖：
-      - 主 provider 初始流式：含 cross_consult tool_call
-      - executor 流式调对偶 provider → 返回 "external"
-      - 重发流式调原 provider → 返回最终文本 "final"
-    """
+async def test_iter_chat_chunks_streams_cross_consult_live(cfg_cross):
+    """cc 激活时，初始 content/reasoning + 重发 content 逐帧到达客户端，cc 工具帧不可见。"""
+    from unittest.mock import patch
     from deep_proxy.router import DeepProxyRouter
 
     router = DeepProxyRouter(cfg_cross)
     provider = cfg_cross.providers["deepseek"]
 
-    initial_stream_chunks = _tool_call_chunks("tc1", {"question": "what?"})
+    async def initial_stream(config, body, *, _accumulator=None, provider=None):
+        yield {"choices": [{"index": 0, "delta": {"reasoning_content": "想一下"},
+                            "finish_reason": None}]}
+        yield {"choices": [{"index": 0, "delta": {"content": "让我咨询"},
+                            "finish_reason": None}]}
+        yield {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "cc1", "type": "function",
+             "function": {"name": "cross_consult", "arguments": '{"question":"q"}'}}]},
+            "finish_reason": None}]}
+        yield {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}
 
-    async def initial_iter(*args, **kwargs):
-        for c in initial_stream_chunks:
-            yield c
+    async def resend_stream(config, body, *, _accumulator=None, provider=None):
+        yield {"choices": [{"index": 0, "delta": {"content": "综合答案"},
+                            "finish_reason": "stop"}]}
 
-    # executor + resend 共享同一组流式 mock（按调用次数返回不同内容）
-    cc_stream_iter = _make_chunk_sequence_iter(
-        _text_chunks("external"),
-        _text_chunks("final"),
-    )
+    calls = {"n": 0}
 
-    with patch("deep_proxy.router.iter_litellm_chunks", new=initial_iter), \
-         patch("deep_proxy.cross_consult.streaming.iter_litellm_chunks",
-               new=cc_stream_iter):
+    def dispatch(config, body, *, _accumulator=None, provider=None):
+        calls["n"] += 1
+        return initial_stream(config, body) if calls["n"] == 1 else resend_stream(config, body)
+
+    async def consult_ok(**kw):
+        return "外部视角"
+
+    with patch("deep_proxy.router.iter_litellm_chunks", new=dispatch), \
+         patch("deep_proxy.cross_consult.client_stream.iter_litellm_chunks", new=dispatch), \
+         patch("deep_proxy.cross_consult.interceptor.execute_consult", new=consult_ok):
         body = {"model": "deepseek-v4-flash",
-                "messages": [{"role": "user", "content": "go"}],
-                "stream": True}
+                "messages": [{"role": "user", "content": "use cc"}]}
         body = await router.prepare_request(
             body, sampling_profile=cfg_cross.precise_sampling, provider=provider,
         )
-        out_chunks = []
-        async for chunk in router.iter_chat_chunks(body, provider=provider):
-            out_chunks.append(chunk)
+        frames = [f async for f in router.iter_chat_chunks(body, provider=provider)]
 
-    contents = []
-    for c in out_chunks:
-        for ch in c.get("choices") or []:
-            d = ch.get("delta") or ch.get("message") or {}
-            v = d.get("content")
-            if v:
-                contents.append(v)
-    assert "final" in "".join(contents)
+    deltas = [fr.get("choices", [{}])[0].get("delta", {}) for fr in frames if "choices" in fr]
+    assert {"reasoning_content": "想一下"} in deltas
+    assert {"content": "让我咨询"} in deltas
+    assert {"content": "综合答案"} in deltas
+    assert not any("tool_calls" in d and any(
+        (tc.get("function") or {}).get("name") == "cross_consult" for tc in d["tool_calls"]
+    ) for d in deltas)
+
+
+async def test_iter_chat_chunks_no_cc_call_passes_through(cfg_cross):
+    """初始流不含 cc 调用：content 透传 + 终轮 finish_reason，行为等价直通。"""
+    from unittest.mock import patch
+    from deep_proxy.router import DeepProxyRouter
+    router = DeepProxyRouter(cfg_cross)
+    provider = cfg_cross.providers["deepseek"]
+
+    async def plain(config, body, *, _accumulator=None, provider=None):
+        yield {"choices": [{"index": 0, "delta": {"content": "你好"},
+                            "finish_reason": "stop"}]}
+
+    with patch("deep_proxy.router.iter_litellm_chunks", new=plain):
+        body = {"model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "hi"}]}
+        body = await router.prepare_request(
+            body, sampling_profile=cfg_cross.precise_sampling, provider=provider,
+        )
+        frames = [f async for f in router.iter_chat_chunks(body, provider=provider)]
+    assert any(fr.get("choices", [{}])[0].get("delta", {}).get("content") == "你好"
+               for fr in frames)
+    assert any(fr.get("choices", [{}])[0].get("finish_reason") == "stop" for fr in frames)
+
+
+async def test_iter_chat_chunks_heartbeat_during_consult(cfg_cross):
+    """consult 执行慢时，客户端收到心跳帧。"""
+    import asyncio
+    from unittest.mock import patch
+    from deep_proxy.router import DeepProxyRouter
+    router = DeepProxyRouter(cfg_cross)
+    router.config.cross_consult.stream_heartbeat_seconds = 1
+    provider = cfg_cross.providers["deepseek"]
+
+    async def initial_stream(config, body, *, _accumulator=None, provider=None):
+        yield {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "cc1", "type": "function",
+             "function": {"name": "cross_consult", "arguments": '{"question":"q"}'}}]},
+            "finish_reason": "tool_calls"}]}
+
+    async def resend_stream(config, body, *, _accumulator=None, provider=None):
+        yield {"choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}]}
+
+    calls = {"n": 0}
+    def dispatch(config, body, *, _accumulator=None, provider=None):
+        calls["n"] += 1
+        return initial_stream(config, body) if calls["n"] == 1 else resend_stream(config, body)
+
+    async def slow_consult(**kw):
+        await asyncio.sleep(1.5)
+        return "外部视角"
+
+    with patch("deep_proxy.router.iter_litellm_chunks", new=dispatch), \
+         patch("deep_proxy.cross_consult.client_stream.iter_litellm_chunks", new=dispatch), \
+         patch("deep_proxy.cross_consult.interceptor.execute_consult", new=slow_consult):
+        body = {"model": "deepseek-v4-flash",
+                "messages": [{"role": "user", "content": "use cc"}]}
+        body = await router.prepare_request(
+            body, sampling_profile=cfg_cross.precise_sampling, provider=provider,
+        )
+        frames = [f async for f in router.iter_chat_chunks(body, provider=provider)]
+    assert any(f == {"_dp_heartbeat": True} for f in frames)
 
 
 async def test_resend_loop_uses_streaming_iter(cfg_cross):
@@ -318,7 +383,7 @@ async def test_loop_calls_process_response_on_each_iteration(cfg_cross):
 
 
 async def test_streaming_final_chunk_includes_reasoning_content_when_present(cfg_cross):
-    """I4 regression: 流式 cross_consult 合成 chunk 应保留 reasoning_content。"""
+    """I4 regression: 真流式 cross_consult 路径应将 reasoning_content 帧逐帧透传到客户端。"""
     from deep_proxy.router import DeepProxyRouter
 
     router = DeepProxyRouter(cfg_cross)
@@ -340,14 +405,20 @@ async def test_streaming_final_chunk_includes_reasoning_content_when_present(cfg
                       "delta": {"content": "final content"},
                       "finish_reason": "stop"}]},
     ]
-    # executor 流：随便给一段
-    executor_chunks = _text_chunks("ext")
 
-    cc_stream_iter = _make_chunk_sequence_iter(executor_chunks, resend_chunks)
+    async def consult_ok(**kw):
+        return "ext"
+
+    # client_stream.iter_litellm_chunks is called only once: for the resend after consult.
+    def dispatch(config, body, *, _accumulator=None, provider=None):
+        async def gen():
+            for c in resend_chunks:
+                yield c
+        return gen()
 
     with patch("deep_proxy.router.iter_litellm_chunks", new=initial_iter), \
-         patch("deep_proxy.cross_consult.streaming.iter_litellm_chunks",
-               new=cc_stream_iter):
+         patch("deep_proxy.cross_consult.client_stream.iter_litellm_chunks", new=dispatch), \
+         patch("deep_proxy.cross_consult.interceptor.execute_consult", new=consult_ok):
         body = {"model": "deepseek-v4-flash",
                 "messages": [{"role": "user", "content": "go"}],
                 "stream": True}
@@ -364,7 +435,7 @@ async def test_streaming_final_chunk_includes_reasoning_content_when_present(cfg
             d = ch.get("delta") or {}
             if d.get("reasoning_content") == "step by step thinking":
                 reasoning_emitted = True
-    assert reasoning_emitted, "streaming final chunk dropped reasoning_content"
+    assert reasoning_emitted, "streaming real-time forwarding dropped reasoning_content"
 
 
 async def test_chat_completions_stream_serializes_heartbeat_as_sse_comment():
