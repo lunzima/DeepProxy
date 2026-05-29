@@ -45,8 +45,8 @@ class OptimizationConfig(BaseModel):
         description="剥离客户端在 system / 首条 user 消息中嵌入的 telemetry header 行"
                     "（如 Claude Code 2.1.42+ 的 x-anthropic-billing-header）。"
                     "这些行含 session hash，每次新会话变化，破坏 DeepSeek prefix cache。"
-                    "默认开启；与 optimization.enabled 独立——即便其它 skills 全部关闭，"
-                    "本步骤仍可单独执行（仅依赖 enabled 主开关与本字段同时为 true）。",
+                    "默认开启；在 optimization 主开关启用时，独立于 compress_skills / A组等其它"
+                    "skill 开关（不受其影响）。前置条件：optimization.enabled 与本字段同时为 true。",
     )
 
     # ===========================================================
@@ -207,7 +207,7 @@ class OptimizationConfig(BaseModel):
                     "插入时机在 LLM 压缩与 dynamic_baskets 之后 —— 内容不进压缩缓存键，"
                     "每请求独立抽样，但单次注入会破坏 DeepSeek 服务端 prefix cache 命中。"
                     "全场景生效（与 sampling profile 解耦）。"
-                    "默认关闭（实验性）。",
+                    "默认关闭（实验性）。MiMo 也是 MoE 模型但行为未实测，开启需自行验证。",
     )
 
     inner_os_marker: bool = Field(
@@ -317,8 +317,9 @@ class FlashUpgradeConfig(BaseModel):
     downgrade_threshold: float = Field(
         default=3.0, ge=0.0, le=10.0,
         description="升格状态下若当前 compute_complexity_score < 此值，主动撤销升格切回 flash。"
-                    "应显著低于 heuristic_threshold 形成 hysteresis（默认 gap = 8.0 - 3.0 = 5.0）"
-                    "防止评分轻微抖动引发反复切换。可 per_provider 覆盖。",
+                    "必须严格小于 heuristic_threshold 形成 hysteresis（gap = heuristic - downgrade），"
+                    "防止评分轻微抖动引发反复切换。可 per_provider 覆盖。"
+                    "model_validator 会拒绝 downgrade >= heuristic 的配置。",
     )
     per_provider: dict[str, dict] = Field(
         default_factory=dict,

@@ -77,15 +77,6 @@ class RedirectTracker:
             self._sessions.popitem(last=False)
         return True, remaining
 
-    def is_redirected(
-        self, messages: List[Dict[str, Any]], *, source_provider_name: str,
-    ) -> bool:
-        """consume_turn 的布尔便捷封装，保留向后兼容。新代码直接用 consume_turn。"""
-        active, _ = self.consume_turn(
-            messages, source_provider_name=source_provider_name,
-        )
-        return active
-
     def set_remaining(
         self, messages: List[Dict[str, Any]], turns: int,
         *, source_provider_name: str,

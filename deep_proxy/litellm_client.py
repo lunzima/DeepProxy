@@ -7,6 +7,10 @@
   - 指数退避重试（5xx / 429）
   - 错误映射（LiteLLM 异常 → OpenAI 兼容格式）
 
+复用注意：
+  - cross_consult 在响应路径的"非流式重发循环"中复用 call_litellm；
+    _assemble_litellm_body 显式覆盖 stream=False 防止 sentinel 泄露成流式调用。
+
 不属于此模块：
   - 请求预处理管道（prepare_request）— 在 router.py
   - reasoning_content 逻辑 — 在 compatibility/reasoning_handler.py
@@ -35,8 +39,8 @@ logger = logging.getLogger(__name__)
 # 仅这些状态码触发重试（5xx + 429）
 _RETRYABLE_HTTP = {429, 500, 502, 503, 504}
 
-# LiteLLM/DeepSeek 在 message / delta 里会注入这些非标准 OpenAI 字段，
-# 严格 Zod 校验（Vercel AI SDK / Cherry Studio）会因此报"类型验证错误"。
+# LiteLLM 在 message / delta 里会注入这些非标准 OpenAI 字段（DeepSeek / MiMo
+# 均常见），严格 Zod 校验（Vercel AI SDK / Cherry Studio）会因此报"类型验证错误"。
 _NON_STANDARD_SLOT_FIELDS = ("provider_specific_fields", "audio")
 _NON_STANDARD_TOP_FIELDS = ("provider_specific_fields", "citations", "service_tier")
 # 这些字段如果是 null 必须省略（OpenAI schema 要求"省略 OR 正常类型"，不接受 null）

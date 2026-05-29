@@ -5,7 +5,8 @@
 2. 未命中 → 立即返回原文（用户请求 0 阻塞）+ 后台异步压缩；下次请求即可命中缓存
 3. 同一 key 并发到达 → 仅首个调度后台任务，其余请求正常通过原文
 
-缓存版本号 (CACHE_VERSION) 控制：升级压缩 prompt 或模型时改 +1，旧条目自动失效。
+缓存版本号 (_CACHE_VERSION) 控制：变更压缩 prompt / 目标模型 / 输出协议时改 +1，
+旧条目自动失效（与 _CACHE_VERSION 注释同步）。
 """
 
 from __future__ import annotations
@@ -155,6 +156,11 @@ class SystemPromptCompressor:
             "SystemPromptCompressor 已初始化 (model=%s, cache=%s, 已载入 %d 条)",
             self._model, self._cache_path, len(self._mem),
         )
+
+    @property
+    def cache_size(self) -> int:
+        """当前内存中缓存条目数。供健康检查公开访问。"""
+        return len(self._mem)
 
     # ------------------------------------------------------------------ I/O
 

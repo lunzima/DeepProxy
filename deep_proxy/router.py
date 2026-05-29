@@ -1,10 +1,12 @@
 """核心请求路由器。
 
-统一请求/响应管道（V4 兼容）：
+统一请求/响应管道（DeepSeek V4 + MiMo 双 provider）：
 
-  Chat 端点 → prepare_request（模型名/thinking/参数过滤/推理检查）
+  Chat 端点 → prepare_request（模型名 / thinking / 采样 / 参数过滤 / skills 优化 /
+              flash_upgrade 升格 + Direction C hysteresis 主动降格 / cross_consult 注入）
             → LiteLLM (acompletion / acompletion stream)
-            → process_response（reasoning 兼容字段）
+            → process_response（reasoning_content 兼容字段）
+            → [可选] cross_consult 响应拦截 + 重发循环（异家族 pro 模型咨询）
 
 注：FIM 端点已下线，prepare_request 仅服务 chat 请求。
 """
@@ -110,6 +112,19 @@ class DeepProxyRouter:
         if self._http_client is not None:
             await self._http_client.aclose()
             self._http_client = None
+
+    def health_snapshot(self) -> dict[str, int]:
+        """对外暴露 router 内部计数器供 /health 端点使用，避免 main.py 反复
+        穿透到内部私有属性。"""
+        return {
+            "reasoning_cache_size": len(self._reasoning_cache),
+            "upgrade_tracker_active": self._upgrade_tracker.active_count,
+            "upgrade_throttle_size": self._upgrade_throttle.size,
+            "redirect_tracker_active": self._redirect_tracker.active_count,
+            "compressor_cache_entries": (
+                self._compressor.cache_size if self._compressor is not None else 0
+            ),
+        }
 
     # ------------------------------------------------------------------
     # 预处理管道（公共方法，由 main.py 端点层调用）
@@ -502,7 +517,6 @@ class DeepProxyRouter:
                         heuristic_result.score, heur_thr)
 
         # ── Step 4: Router 决策（Layer 0） ──
-        # 注：v4-flash 处理简单编码任务效果已极好，不再对 coding_port 做阈值优惠。
         if not did_upgrade:
             router_score = self._upgrade_router.score(messages, body=body)
             if router_score >= router_thr:

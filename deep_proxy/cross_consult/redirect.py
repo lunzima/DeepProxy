@@ -1,6 +1,6 @@
 """标签触发的整轮 provider 重定向解析。
 
-工作流程（plan §3.2）：
+工作流程：
 1. 扫描 body["messages"] 中所有 user 消息，按 cc_config.compiled_redirect_pattern() 匹配
 2. 命中 → 设置 RedirectTracker(persist_turns+1)、剥离消息中所有标签匹配、返回目标 provider
 3. 未命中 → 询问 RedirectTracker 是否在 persist 窗口内，若是返回目标 provider

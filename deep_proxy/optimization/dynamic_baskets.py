@@ -22,7 +22,7 @@ _BASKET_ORDER = ("methodology", "best_practices", "moderate_encouragement")
 
 
 # ---------------------------------------------------------------------------
-# Coding 套（precise_sampling / coding_port，已定稿）
+# Coding 套（precise_sampling / coding_port）
 # ---------------------------------------------------------------------------
 
 _CODING_BASKETS: Dict[str, List[str]] = {

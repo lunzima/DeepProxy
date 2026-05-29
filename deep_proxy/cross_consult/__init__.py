@@ -8,14 +8,15 @@
   `[本轮对话使用不同家族的大语言模型]`，命中则把整轮请求重路由到异家族 provider，
   并按 redirect_persist_turns 维持若干轮窗口。多轮换家、走目标家族自身分级路由。
 """
-from .awareness import build_awareness_prompt
 from .config import CrossConsultConfig
 from .redirect import resolve_redirect
 from .redirect_tracker import RedirectTracker
 
+# 注：build_awareness_prompt 仅 interceptor.py 与测试用，不进 __all__
+# （直接 from .awareness import 即可，避免假装 public API）
+
 __all__ = [
     "CrossConsultConfig",
     "RedirectTracker",
-    "build_awareness_prompt",
     "resolve_redirect",
 ]

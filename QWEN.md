@@ -103,13 +103,15 @@ precise_sampling:    # code/math/逻辑
   top_p: [0.95, 0.95]
 
 # Flash→Pro 选择性升格（默认启用，四层架构）
+# 阈值默认值以 deep_proxy/config.py::FlashUpgradeConfig 为准
 flash_upgrade:
   enabled: true
   router_type: bert                       # BertUpgradeRouter（中文 RoBERTa-small + LoRA）
   bert_checkpoint: "router_model"         # 微调后的二分类模型
-  router_threshold: 0.60                  # BERT score >= 此值 → 升格 Pro
-  heuristic_threshold: 7.5                # 启发式 score >= 此值 → 直接升格（跳过 BERT）
-  persist_turns: 2                        # 升格后保持 Pro 额外 N 轮
+  router_threshold: 0.65                  # 全局默认；MiMo per_provider 覆盖为 0.60
+  heuristic_threshold: 8.0                # 全局默认；MiMo per_provider 覆盖为 7.5
+  persist_turns: 1                        # 升格后保持 Pro 额外 N 轮
+  downgrade_threshold: 3.0                # 升格期间 score < 此值主动降回 flash（hysteresis；MiMo 2.5）
 ```
 
 详细配置见 [`config.example.yaml`](config.example.yaml)（模板）或 `config.py`（含每个字段的中文注释）。

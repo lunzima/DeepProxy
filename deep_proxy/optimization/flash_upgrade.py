@@ -71,6 +71,11 @@ class RepeatUpgradeThrottle:
         while len(self._state) > self._max_size:
             self._state.popitem(last=False)
 
+    @property
+    def size(self) -> int:
+        """当前跟踪的 (fingerprint, last_user_hash) 条目数。供健康检查公开访问。"""
+        return len(self._state)
+
     def in_cooldown(self, messages: List[Dict[str, Any]]) -> bool:
         """只读查询：当前 (fingerprint, last_user) 是否处于冷却期。
 
@@ -270,7 +275,7 @@ class UpgradeTracker:
 # 1. 来源：提取自主流 CLI/Router 开源项目的路由逻辑，覆盖所有升格场景类别。
 # 2. 双语：每组同时提供简体中文和英文变体，匹配用户的实际输入语言。
 # 3. 优先级：按升格信号的明确度降序排列——用户明确要求 > 技术复杂度 > 运营/安全 > 文学/创作。
-# 4. 排除多模态：DeepSeek V4 仅支持文本，剔除图像/网页搜索等视觉相关关键词。
+# 4. 排除多模态：当前所有支持的 provider（DeepSeek V4 / MiMo）均为文本-only，剔除图像/网页搜索相关词。
 # 5. 假阳性过滤：避免过于通用的英文单词（如 plan、derive、performance）单独作为触发词。
 
 _COMPLEXITY_KEYWORDS = [

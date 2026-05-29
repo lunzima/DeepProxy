@@ -81,8 +81,10 @@ class RuleUpgradeRouter(UpgradeRouter):
         self._scale = base_scale
 
     def score(self, messages: List[Dict[str, Any]], **kwargs) -> float:
-        # Sentinel / extra_body 强制升格信号（即使 _maybe_upgrade 已在前置检查，
-        # 独立调用时仍需保留以保证 public API 完整性）
+        # 强制升格信号：今天 _maybe_upgrade Step 1 已先于 Step 4 (BERT) 处理过
+        # sentinel / extra_body，本类只在通过 _maybe_upgrade 调用时被命中作为
+        # fallback，因此这里的检查目前是冗余的。保留它让 RuleUpgradeRouter 作为
+        # standalone 工具（如测试 / 调试 / 未来直接调用）时仍能识别强制信号。
         from .flash_upgrade import has_upgrade_sentinel, extra_body_requests_upgrade
         if has_upgrade_sentinel(messages):
             return 1.0

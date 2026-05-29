@@ -209,12 +209,8 @@ async def health():
         result["flash_upgrade_enabled"] = config.flash_upgrade.enabled
         result["router_type"] = config.flash_upgrade.router_type
         result["writing_basket_kind"] = config.optimization.writing_basket_kind
-        result["reasoning_cache_size"] = len(router._reasoning_cache)
-        result["upgrade_tracker_active"] = router._upgrade_tracker.active_count
-        result["upgrade_throttle_size"] = len(router._upgrade_throttle._state)
-        result["compressor_cache_entries"] = (
-            len(router._compressor._mem) if router._compressor is not None else 0
-        )
+        # 路由器内部计数器从公开方法读，避免穿透私有属性
+        result.update(router.health_snapshot())
     return result
 
 
