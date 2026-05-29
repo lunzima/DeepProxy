@@ -16,6 +16,15 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Generic, TypeVar
 
 from ..utils import merge_tool_call_deltas
+from ..config import ProxyConfig
+from ..litellm_client import iter_litellm_chunks
+from ..providers import Provider
+from .config import CrossConsultConfig
+from .interceptor import (
+    _extract_cross_consult_tool_calls,
+    _resolve_consult_tool_call,
+    build_initial_response_from_stream_tool_calls,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,3 +163,95 @@ async def stream_one_turn(
         fwd = _client_facing_chunk(chunk)
         if fwd is not None:
             yield fwd
+
+
+async def stream_cross_consult_continuation(
+    *,
+    initial_tool_calls: list[dict],
+    body: dict[str, Any],
+    source_provider: Provider,
+    config: ProxyConfig,
+    cc_config: CrossConsultConfig,
+    accumulator: Any,
+) -> AsyncGenerator[Any, None]:
+    """execute_cross_consult_loop 的流式变体：执行 consult（间隙发心跳）+ 重发
+    （逐 chunk 透传）+ 跨轮循环。yield 客户端帧 / 心跳帧 / error 帧。
+
+    initial_tool_calls：初始轮已累加的 tool_calls（含至少一个 cross_consult 调用）。
+    """
+    target_name = cc_config.pair_for(source_provider.name)
+    target_provider = config.providers.get(target_name) if target_name else None
+    if target_provider is None:
+        return  # 无对偶，无可继续（调用方已透传初始内容）
+
+    idle = float(cc_config.call_timeout_seconds)
+    first = float(cc_config.first_chunk_timeout_seconds)
+    hb = float(cc_config.stream_heartbeat_seconds)
+
+    turn_tool_calls = initial_tool_calls
+    turn_content = ""
+    call_count = 0
+    max_turns = cc_config.max_calls_per_request * 2 + 1
+
+    for _turn in range(max_turns):
+        pseudo = build_initial_response_from_stream_tool_calls(turn_tool_calls)
+        # 终轮判定：本轮无 cross_consult 调用 -> 调用方已/将透传，停止
+        cc_calls = _extract_cross_consult_tool_calls(pseudo, cc_config.tool_name)
+        if not cc_calls:
+            return
+
+        # 追加 assistant 消息（含本轮 content + 全部 tool_calls）到历史
+        body["messages"].append({
+            "role": "assistant",
+            "content": turn_content or None,
+            "tool_calls": turn_tool_calls,
+        })
+
+        for tc in cc_calls:
+            tool_text = None
+            async for frame in with_heartbeat(
+                _resolve_consult_tool_call(
+                    tc, call_count=call_count,
+                    target_provider=target_provider, config=config, cc_config=cc_config,
+                ),
+                heartbeat_seconds=hb,
+            ):
+                if isinstance(frame, _Done):
+                    tool_text, consumed = frame.value
+                    if consumed:
+                        call_count += 1
+                else:
+                    yield frame  # 心跳
+            body["messages"].append({
+                "role": "tool",
+                "tool_call_id": tc.get("id"),
+                "content": tool_text,
+            })
+
+        # 重发：流式，逐 chunk 透传；复用同一 accumulator 写缓存
+        resend_iter = iter_litellm_chunks(
+            config, body, _accumulator=accumulator, provider=source_provider,
+        )
+        turn = TurnResult()
+        async for frame in stream_one_turn(
+            resend_iter, turn, tool_name=cc_config.tool_name,
+            idle_timeout=idle, first_chunk_timeout=first, heartbeat_seconds=hb,
+        ):
+            yield frame
+        if turn.errored:
+            return
+        turn_tool_calls = turn.accumulated_tool_calls
+        turn_content = turn.content
+        # 终轮（无 cc 调用）：把本轮 finish_reason / 非 cc tool_calls 作为终结帧透传
+        if not turn.had_cc_call:
+            final_delta: dict[str, Any] = {}
+            if turn_tool_calls:
+                final_delta["tool_calls"] = turn_tool_calls
+            yield {"choices": [{
+                "index": 0,
+                "delta": final_delta,
+                "finish_reason": turn.finish_reason or "stop",
+            }]}
+            return
+
+    logger.warning("cross_consult stream continuation hit hard turn limit (%d)", max_turns)
