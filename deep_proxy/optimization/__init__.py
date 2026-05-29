@@ -111,52 +111,34 @@ async def _apply_tool_call_minimal_pipeline(body: Dict[str, Any]) -> None:
 async def apply_cheap_optimizations(
     body: Dict[str, Any],
     *,
+    opt: Any,  # OptimizationConfig 或任何带相同 18 个 bool flag 属性的对象
     mode: Literal["coding", "creative"] = "coding",
-    # A. 通用风格 skills (always active)
-    avoid_negative_style: bool = True,
-    natural_temperament: bool = True,
-    contextual_register: bool = True,
-    assume_good_intent: bool = True,
-    instruction_priority: bool = True,
-    independent_analysis: bool = True,
-    reason_genuinely: bool = True,
-    inject_date: bool = True,
-    cot_reset: bool = True,
-    # B. 求证 / 反幻觉 skills (model self-gates)
-    show_math_steps: bool = True,
-    prefer_multiple_sources: bool = True,
-    avoid_fabricated_citations: bool = True,
-    # C. 上下文相关 skills (narrow triggers)
-    json_mode_hint: bool = True,
-    safe_inlined_content: bool = True,
-    # D. 消息转换 (mutates messages)
-    re2: bool = True,
-    cot_reflection: bool = True,
-    readurls: bool = True,
-    # E. tools 场景专项（与上方所有 skills 互斥：has_tools 时只跑这条最小化 pipeline）
-    tool_call_chinese_cot: bool = True,
     # 元功能：LLM-based system prompt 压缩（首次调一次模型，结果磁盘缓存复用）
     compressor: Optional[Any] = None,  # SystemPromptCompressor 实例；None 跳过压缩
     http_client: httpx.AsyncClient | None = None,
 ) -> Dict[str, Any]:
     """对请求体施加廉价的提示词优化（原地修改并返回 body）。
 
-    mode 参数控制两条 skills 路径：
-    - "coding"（默认）：使用 _SKILL_AVOID_NEGATIVE_STYLE_CODING +
-      _SKILL_NATURAL_TEMPERAMENT_CODING（原版 skills，适合 code/math/技术分析）
-    - "creative"：使用 _SKILL_AVOID_AI_TICS + _SKILL_NARRATOR_STANCE
-      （不抑制情感表达，匹配通用创作要求）。B 组求证/反幻觉 skills 在
-      creative 模式下跳过（math/citation/sources 对创作无益且增加合规心态）。
+    opt 参数收所有 skill 开关（duck-typed —— OptimizationConfig 实例直接传入，
+    测试可用 SimpleNamespace 或任何同名属性对象）。新增 skill 不再需要修改
+    本函数签名 / router 调用点，只在 opt config 上加字段即可。
 
-    分为四组：
-    - A. 通用风格 skills（avoid_negative_style / assume_good_intent /
-      natural_temperament / contextual_register / instruction_priority /
-      independent_analysis / reason_genuinely / cot_reset / inject_date）
-      （排序按语义连贯性：交互契约→输出风格→推理自主性→推理元认知）
-    - B. 求证 / 反幻觉 skills（show_math_steps / prefer_multiple_sources /
-      avoid_fabricated_citations）
-    - C. 上下文相关 skills（json_mode_hint / safe_inlined_content）
-    - D. 消息转换（re2 / cot_reflection / readurls）
+    mode 参数控制两条 skills 路径：
+    - "coding"（默认）：natural_temperament 用 _SKILL_NATURAL_TEMPERAMENT_CODING
+      （原版人格素描，适合 code/math/技术分析）
+    - "creative"：natural_temperament 用 _SKILL_NARRATOR_STANCE
+      （叙事者立场，匹配通用创作要求）。B 组求证/反幻觉 skills 在 creative
+      模式下跳过（math/citation/sources 对创作无益且增加合规心态）。
+
+    分为四组（具体 skill 名见 OptimizationConfig 字段）：
+    - A. 通用风格：avoid_negative_style / assume_good_intent / natural_temperament /
+      contextual_register / instruction_priority / independent_analysis /
+      reason_genuinely / cot_reset / inject_date
+    - B. 求证 / 反幻觉：show_math_steps / prefer_multiple_sources /
+      avoid_fabricated_citations
+    - C. 上下文相关：json_mode_hint / safe_inlined_content
+    - D. 消息转换：re2 / cot_reflection / readurls
+    - E. tools 场景专项：tool_call_chinese_cot（与上方所有互斥）
 
     跳过条件：
     - 没有 messages
@@ -177,64 +159,58 @@ async def apply_cheap_optimizations(
     # tools 场景：完整 pipeline 跳过，但走最小化中文 CoT 锚定（如开启）
     # 详见: docs/superpowers/specs/2026-05-10-tool-call-chinese-cot-design.md
     if has_tools(body):
-        if tool_call_chinese_cot:
+        if opt.tool_call_chinese_cot:
             await _apply_tool_call_minimal_pipeline(body)
         return body
 
     # 1. readurls 最前：先把链接展开为内联文本，让后续 skills 能看到 [Content from ...]
-    if readurls:
+    if opt.readurls:
         await _apply_readurls(messages, client=http_client)
 
     # 2. 内置 skills（注入到 system prompt 前缀，按通用程度排序）
     skill_lines: List[str] = []
 
     # A. 通用风格（每请求激活）
-    #
-    # avoid_negative_style：coding + creative 共用 _SKILL_AVOID_AI_TICS（通用 AI 口癖禁止）
-    # natural_temperament：按 mode 选择路径
-    #   - coding：_SKILL_NATURAL_TEMPERAMENT_CODING（原版人格素描）
-    #   - creative：_SKILL_NARRATOR_STANCE（叙事者立场，通用创作要求编码）
-    # 其余 A 组 skills 两种模式共用
     is_creative = (mode == "creative")
 
-    if avoid_negative_style:
+    if opt.avoid_negative_style:
         skill_lines.append(_SKILL_AVOID_AI_TICS)
 
-    if assume_good_intent:
+    if opt.assume_good_intent:
         skill_lines.append(_SKILL_ASSUME_GOOD_INTENT)
 
     if is_creative:
-        if natural_temperament:
+        if opt.natural_temperament:
             skill_lines.append(_SKILL_NARRATOR_STANCE)
     else:
-        if natural_temperament:
+        if opt.natural_temperament:
             skill_lines.append(_SKILL_NATURAL_TEMPERAMENT_CODING)
 
-    if contextual_register:
+    if opt.contextual_register:
         skill_lines.append(_SKILL_COMPLEX_SENTENCE)
-    if instruction_priority:
+    if opt.instruction_priority:
         skill_lines.append(_SKILL_INSTRUCTION_PRIORITY)
-    if independent_analysis:
+    if opt.independent_analysis:
         skill_lines.append(_SKILL_INDEPENDENT_ANALYSIS)
-    if reason_genuinely:
+    if opt.reason_genuinely:
         skill_lines.append(_SKILL_REASON_GENUINELY)
     # 注：inject_date 不进 skill_lines（也就不进 LLM 压缩缓存键），
     # 否则日期每天变化会让缓存每日全失效。改为在压缩后追加到 system 末尾。
-    if cot_reset:
+    if opt.cot_reset:
         skill_lines.append(_SKILL_COT_RESET)
 
     # B. 求证 / 反幻觉（模型自门控；对创作豁免）
-    if not is_creative and show_math_steps:
+    if not is_creative and opt.show_math_steps:
         skill_lines.append(_SKILL_SHOW_MATH_STEPS)
-    if not is_creative and prefer_multiple_sources:
+    if not is_creative and opt.prefer_multiple_sources:
         skill_lines.append(_SKILL_PREFER_MULTIPLE_SOURCES)
-    if not is_creative and avoid_fabricated_citations:
+    if not is_creative and opt.avoid_fabricated_citations:
         skill_lines.append(_SKILL_AVOID_FABRICATED_CITATIONS)
 
     # C. 上下文相关（仅窄触发条件下激活）
-    if json_mode_hint and _is_json_mode(body):
+    if opt.json_mode_hint and _is_json_mode(body):
         skill_lines.append(_SKILL_JSON_MODE)
-    if safe_inlined_content and _has_inlined_content(messages):
+    if opt.safe_inlined_content and _has_inlined_content(messages):
         skill_lines.append(_SKILL_SAFE_INLINED)
 
     # 把 skills + 用户原 system 拼成完整 system prompt 后整体送 LLM 压缩
@@ -270,15 +246,15 @@ async def apply_cheap_optimizations(
     # 2.5 inject_date：在压缩之后追加到 system 末尾。
     # 日期每天变化，若进入压缩缓存键会让缓存每日全部失效；放在压缩外，
     # 同时位于 system 末尾确保最新日期始终对模型可见。
-    if inject_date:
+    if opt.inject_date:
         append_to_system_message(messages, _date_skill_line(), dedup=True)
 
     # 3. RE2
-    if re2:
+    if opt.re2:
         _apply_re2(messages)
 
     # 4. CoT Reflection
-    if cot_reflection and _cot_eligible(body):
+    if opt.cot_reflection and _cot_eligible(body):
         _apply_cot_reflection(messages)
         body["_deepproxy_strip_cot"] = True
 

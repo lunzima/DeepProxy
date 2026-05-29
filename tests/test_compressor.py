@@ -14,6 +14,26 @@ from deep_proxy.optimization.compressor import (
     _CACHE_VERSION,
     SystemPromptCompressor,
 )
+from types import SimpleNamespace
+
+
+# OptimizationConfig 18 个 skill flag 字段（与 deep_proxy.config 同步）
+_OPT_FLAG_FIELDS = (
+    "avoid_negative_style", "natural_temperament", "contextual_register",
+    "assume_good_intent", "instruction_priority", "independent_analysis",
+    "reason_genuinely", "inject_date", "cot_reset",
+    "show_math_steps", "prefer_multiple_sources", "avoid_fabricated_citations",
+    "json_mode_hint", "safe_inlined_content",
+    "re2", "cot_reflection", "readurls",
+    "tool_call_chinese_cot",
+)
+
+
+def _opt(**overrides) -> SimpleNamespace:
+    """duck-typed opt（全 flag 默认 False，按需启用）。"""
+    defaults = {name: False for name in _OPT_FLAG_FIELDS}
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
 
 
 def _make_compressor(tmp_path: Path, **kwargs) -> SystemPromptCompressor:
@@ -220,14 +240,7 @@ class TestCompressedCombinedSystem:
             ],
         }
         await apply_cheap_optimizations(
-            body,
-            avoid_negative_style=True, natural_temperament=False, contextual_register=False,
-            assume_good_intent=False,
-            instruction_priority=False, independent_analysis=False, inject_date=False,
-            show_math_steps=False, prefer_multiple_sources=False,
-            avoid_fabricated_citations=False, json_mode_hint=False,
-            safe_inlined_content=False, re2=False, cot_reflection=False,
-            readurls=False, compressor=c,
+            body, opt=_opt(avoid_negative_style=True), compressor=c,
         )
         await c.wait_inflight()  # 等后台压缩完成
         # 压缩器看到的输入应同时含 skill 文本和用户 system 文本
@@ -259,15 +272,7 @@ class TestCompressedCombinedSystem:
                 ],
             }
 
-        kwargs = dict(
-            avoid_negative_style=True, natural_temperament=False, contextual_register=False,
-            assume_good_intent=False, instruction_priority=False,
-            independent_analysis=False, inject_date=False,
-            show_math_steps=False, prefer_multiple_sources=False,
-            avoid_fabricated_citations=False, json_mode_hint=False,
-            safe_inlined_content=False, re2=False, cot_reflection=False,
-            readurls=False, compressor=c,
-        )
+        kwargs = dict(opt=_opt(avoid_negative_style=True), compressor=c)
         # 第 1 次：传输原文
         b1 = make_body()
         await apply_cheap_optimizations(b1, **kwargs)
@@ -292,13 +297,7 @@ class TestCompressedCombinedSystem:
 
         body = {"messages": [{"role": "user", "content": "hi"}]}
         await apply_cheap_optimizations(
-            body, avoid_negative_style=True, contextual_register=False,
-            assume_good_intent=False, instruction_priority=False,
-            independent_analysis=False, inject_date=False,
-            show_math_steps=False, prefer_multiple_sources=False,
-            avoid_fabricated_citations=False, json_mode_hint=False,
-            safe_inlined_content=False, re2=False, cot_reflection=False,
-            readurls=False, compressor=c,
+            body, opt=_opt(avoid_negative_style=True), compressor=c,
         )
         await c.wait_inflight()
         assert len(seen) == 1
@@ -318,16 +317,7 @@ class TestCompressedCombinedSystem:
         c._call_llm = must_not_call  # type: ignore[assignment]
 
         body = {"messages": [{"role": "user", "content": "hi"}]}
-        await apply_cheap_optimizations(
-            body, avoid_negative_style=False, natural_temperament=False, contextual_register=False,
-            assume_good_intent=False, instruction_priority=False,
-            independent_analysis=False, reason_genuinely=False,
-            inject_date=False, cot_reset=False,
-            show_math_steps=False, prefer_multiple_sources=False,
-            avoid_fabricated_citations=False, json_mode_hint=False,
-            safe_inlined_content=False, re2=False, cot_reflection=False,
-            readurls=False, compressor=c,
-        )
+        await apply_cheap_optimizations(body, opt=_opt(), compressor=c)
         # 没有 system 消息插入
         assert all(m.get("role") != "system" for m in body["messages"])
 
@@ -352,13 +342,7 @@ class TestCompressedCombinedSystem:
             ],
         }
         await apply_cheap_optimizations(
-            body, avoid_negative_style=True, contextual_register=False,
-            assume_good_intent=False, instruction_priority=False,
-            independent_analysis=False, inject_date=False,
-            show_math_steps=False, prefer_multiple_sources=False,
-            avoid_fabricated_citations=False, json_mode_hint=False,
-            safe_inlined_content=False, re2=False, cot_reflection=False,
-            readurls=False, compressor=c,
+            body, opt=_opt(avoid_negative_style=True), compressor=c,
         )
         # 多模态 system 原样保留
         sys_msgs = [m for m in body["messages"] if m["role"] == "system"]

@@ -272,34 +272,10 @@ class DeepProxyRouter:
 
         # 5. 廉价提示词优化 + 内置 skills（in-process，0 额外上游调用）
         if self.config.optimization.enabled:
-            opt = self.config.optimization
             await apply_cheap_optimizations(
                 body,
+                opt=self.config.optimization,
                 mode=_opt_mode,
-                # A. 通用风格
-                avoid_negative_style=opt.avoid_negative_style,
-                natural_temperament=opt.natural_temperament,
-                contextual_register=opt.contextual_register,
-                assume_good_intent=opt.assume_good_intent,
-                instruction_priority=opt.instruction_priority,
-                independent_analysis=opt.independent_analysis,
-                reason_genuinely=opt.reason_genuinely,
-                inject_date=opt.inject_date,
-                cot_reset=opt.cot_reset,
-                # B. 求证 / 反幻觉
-                show_math_steps=opt.show_math_steps,
-                prefer_multiple_sources=opt.prefer_multiple_sources,
-                avoid_fabricated_citations=opt.avoid_fabricated_citations,
-                # C. 上下文相关
-                json_mode_hint=opt.json_mode_hint,
-                safe_inlined_content=opt.safe_inlined_content,
-                # D. 消息转换
-                re2=opt.re2,
-                cot_reflection=opt.cot_reflection,
-                readurls=opt.readurls,
-                # E. tools 场景专项
-                tool_call_chinese_cot=opt.tool_call_chinese_cot,
-                # LLM 压缩器（首次慢、后续命中缓存秒返回）
                 compressor=self._compressor,
                 http_client=self._get_http_client(),
             )

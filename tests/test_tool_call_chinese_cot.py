@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from deep_proxy.config import OptimizationConfig
 from deep_proxy.optimization import apply_cheap_optimizations
 from deep_proxy.optimization.skills_general import (
     _SKILL_AVOID_AI_TICS,
@@ -27,6 +28,11 @@ from deep_proxy.optimization.tool_call_chinese_cot import (
     has_tool_call_cn_cot_marker,
     inject_user_marker,
 )
+
+
+def _default_opt(**overrides) -> OptimizationConfig:
+    """构造默认配置（与生产 OptimizationConfig() 等价），按需 overrides 单字段。"""
+    return OptimizationConfig(**overrides)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -136,7 +142,7 @@ class TestToolsBranchInjection:
                 {"role": "user", "content": "继续。"},
             ]
         )
-        await apply_cheap_optimizations(body)
+        await apply_cheap_optimizations(body, opt=_default_opt())
 
         # system 前缀含 4 条 skills + 用户原 system
         sys_content = body["messages"][0]["content"]
@@ -161,7 +167,7 @@ class TestToolsBranchInjection:
             ]
         )
         # 即使把所有 kwargs 都开到 True（默认就是），tools 路径仍只跑最小化 pipeline
-        await apply_cheap_optimizations(body)
+        await apply_cheap_optimizations(body, opt=_default_opt())
 
         sys_content = body["messages"][0]["content"]
         # B 组的 show_math_steps 不应出现
@@ -179,7 +185,7 @@ class TestToolsBranchInjection:
                 {"role": "user", "content": original_user},
             ]
         )
-        await apply_cheap_optimizations(body, tool_call_chinese_cot=False)
+        await apply_cheap_optimizations(body, opt=_default_opt(tool_call_chinese_cot=False))
 
         # system / user 内容完全保持原样
         assert body["messages"][0]["content"] == original_sys
@@ -196,7 +202,7 @@ class TestToolsBranchInjection:
             ],
             thinking={"type": "disabled"},
         )
-        await apply_cheap_optimizations(body)
+        await apply_cheap_optimizations(body, opt=_default_opt())
 
         assert body["messages"][0]["content"] == original_sys
         assert body["messages"][1]["content"] == original_user
@@ -209,7 +215,7 @@ class TestToolsBranchInjection:
             ],
             thinking={"type": "enabled"},
         )
-        await apply_cheap_optimizations(body)
+        await apply_cheap_optimizations(body, opt=_default_opt())
 
         # user 末尾有 marker
         assert body["messages"][-1]["content"].endswith(TOOL_CALL_CN_COT_USER_MARKER)
@@ -218,7 +224,7 @@ class TestToolsBranchInjection:
         """thinking 字段缺失时按 enabled 处理（V4 服务端默认）。"""
         body = _tools_body([{"role": "user", "content": "q"}])
         # 没设 thinking
-        await apply_cheap_optimizations(body)
+        await apply_cheap_optimizations(body, opt=_default_opt())
         # 应当注入
         assert body["messages"][-1]["content"].endswith(TOOL_CALL_CN_COT_USER_MARKER)
 
@@ -233,7 +239,7 @@ class TestNoToolsUnaffected:
                 {"role": "user", "content": "q"},
             ]
         }
-        await apply_cheap_optimizations(body)
+        await apply_cheap_optimizations(body, opt=_default_opt())
         # user 不应被追加 tool_call_chinese_cot 的 user marker
         # （但可能被原 pipeline 的其他 skills 修改 system）
         for msg in body["messages"]:
@@ -254,7 +260,7 @@ class TestCoexistsWithThinkSteering:
         # 先打 inner_os_marker（模拟 router.py 流程：creative mode 后追加）
         inject_inner_os_marker(body["messages"])
         # 再走 apply_cheap_optimizations（tools 分流注入 tool_call_chinese_cot user marker）
-        await apply_cheap_optimizations(body)
+        await apply_cheap_optimizations(body, opt=_default_opt())
 
         user_content = body["messages"][-1]["content"]
         # 两个 marker 都在
@@ -269,8 +275,8 @@ class TestIdempotentOnRetry:
 
     async def test_double_apply_is_noop(self):
         body = _tools_body([{"role": "user", "content": "q"}])
-        await apply_cheap_optimizations(body)
+        await apply_cheap_optimizations(body, opt=_default_opt())
         snapshot = [dict(m) for m in body["messages"]]
         # 二次穿过
-        await apply_cheap_optimizations(body)
+        await apply_cheap_optimizations(body, opt=_default_opt())
         assert body["messages"] == snapshot

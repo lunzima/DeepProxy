@@ -1,6 +1,8 @@
 """测试 in-process 廉价提示词优化（CoT Reflection / RE2 / readurls）—— 忠实于 optillm。"""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
@@ -11,24 +13,35 @@ from deep_proxy.optimization import (
 from deep_proxy.optimization.skills_general import _COT_SYSTEM_PROMPT
 
 
+# OptimizationConfig 的 18 个 skill flag 字段名（与 deep_proxy.config 同步）
+_OPT_FLAG_FIELDS = (
+    "avoid_negative_style", "natural_temperament", "contextual_register",
+    "assume_good_intent", "instruction_priority", "independent_analysis",
+    "reason_genuinely", "inject_date", "cot_reset",
+    "show_math_steps", "prefer_multiple_sources", "avoid_fabricated_citations",
+    "json_mode_hint", "safe_inlined_content",
+    "re2", "cot_reflection", "readurls",
+    "tool_call_chinese_cot",
+)
+
+
+def _opt(**overrides):
+    """构造 duck-typed opt 对象（全 flag 默认 False，按需 overrides 启用）。
+
+    apply_cheap_optimizations 通过 opt.<field> 读取，SimpleNamespace 完美匹配。
+    """
+    defaults = {name: False for name in _OPT_FLAG_FIELDS}
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
 def _make_body(messages, **extra):
     return {"messages": messages, **extra}
 
 
 async def _apply(body, **kwargs):
     """缩写：默认全关，按需启用单项。"""
-    defaults = {
-        "cot_reflection": False, "re2": False, "readurls": False,
-        "json_mode_hint": False, "inject_date": False, "safe_inlined_content": False,
-        "avoid_negative_style": False, "natural_temperament": False, "contextual_register": False,
-        "assume_good_intent": False, "instruction_priority": False,
-        "show_math_steps": False, "avoid_fabricated_citations": False,
-        "independent_analysis": False, "prefer_multiple_sources": False,
-        "reason_genuinely": False, "cot_reset": False,
-        "tool_call_chinese_cot": False,
-    }
-    defaults.update(kwargs)
-    return await apply_cheap_optimizations(body, **defaults)
+    return await apply_cheap_optimizations(body, opt=_opt(**kwargs))
 
 
 class TestRe2:
@@ -255,19 +268,7 @@ class TestReadUrls:
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             b = _make_body([{"role": "user", "content": "Look at https://example.com/page"}])
-            # 用关键字传 http_client
-            await apply_cheap_optimizations(
-                b, cot_reflection=False, re2=False, readurls=True,
-                json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, natural_temperament=False,
-                assume_good_intent=False,
-                instruction_priority=False,
-                show_math_steps=False, avoid_fabricated_citations=False,
-                independent_analysis=False, prefer_multiple_sources=False,
-                reason_genuinely=False,
-                cot_reset=False, contextual_register=False,
-                http_client=client,
-            )
+            await apply_cheap_optimizations(b, opt=_opt(readurls=True), http_client=client)
         content = b["messages"][0]["content"]
         assert "[Content from example.com:" in content
 
@@ -278,18 +279,7 @@ class TestReadUrls:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             original = "Try https://broken.test/x please"
             b = _make_body([{"role": "user", "content": original}])
-            await apply_cheap_optimizations(
-                b, cot_reflection=False, re2=False, readurls=True,
-                json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, natural_temperament=False,
-                assume_good_intent=False,
-                instruction_priority=False,
-                show_math_steps=False, avoid_fabricated_citations=False,
-                independent_analysis=False, prefer_multiple_sources=False,
-                reason_genuinely=False,
-                cot_reset=False, contextual_register=False,
-                http_client=client,
-            )
+            await apply_cheap_optimizations(b, opt=_opt(readurls=True), http_client=client)
         # fail-open：失败不修改
         assert b["messages"][0]["content"] == original
 
@@ -314,18 +304,7 @@ class TestReadUrls:
             b = _make_body([
                 {"role": "user", "content": "Compare https://a.com and https://b.com"},
             ])
-            await apply_cheap_optimizations(
-                b, cot_reflection=False, re2=False, readurls=True,
-                json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, natural_temperament=False,
-                assume_good_intent=False,
-                instruction_priority=False,
-                show_math_steps=False, avoid_fabricated_citations=False,
-                independent_analysis=False, prefer_multiple_sources=False,
-                reason_genuinely=False,
-                cot_reset=False, contextual_register=False,
-                http_client=client,
-            )
+            await apply_cheap_optimizations(b, opt=_opt(readurls=True), http_client=client)
         c = b["messages"][0]["content"]
         assert "[Content from a.com:" in c
         assert "[Content from b.com:" in c
@@ -338,18 +317,7 @@ class TestReadUrls:
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             b = _make_body([{"role": "user", "content": "https://big.test/x"}])
-            await apply_cheap_optimizations(
-                b, cot_reflection=False, re2=False, readurls=True,
-                json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, natural_temperament=False,
-                assume_good_intent=False,
-                instruction_priority=False,
-                show_math_steps=False, avoid_fabricated_citations=False,
-                independent_analysis=False, prefer_multiple_sources=False,
-                reason_genuinely=False,
-                cot_reset=False, contextual_register=False,
-                http_client=client,
-            )
+            await apply_cheap_optimizations(b, opt=_opt(readurls=True), http_client=client)
         c = b["messages"][0]["content"]
         # 截断后应包含 ... 后缀
         assert "..." in c
@@ -368,18 +336,7 @@ class TestReadUrls:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             original = "See https://files.test/spec.pdf"
             b = _make_body([{"role": "user", "content": original}])
-            await apply_cheap_optimizations(
-                b, cot_reflection=False, re2=False, readurls=True,
-                json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, natural_temperament=False,
-                assume_good_intent=False,
-                instruction_priority=False,
-                show_math_steps=False, avoid_fabricated_citations=False,
-                independent_analysis=False, prefer_multiple_sources=False,
-                reason_genuinely=False,
-                cot_reset=False, contextual_register=False,
-                http_client=client,
-            )
+            await apply_cheap_optimizations(b, opt=_opt(readurls=True), http_client=client)
         # 内容未被注入（不应有 [Content from ...]）
         assert "[Content from" not in b["messages"][0]["content"]
 
@@ -396,18 +353,7 @@ class TestReadUrls:
         text = " ".join(urls)
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             b = _make_body([{"role": "user", "content": text}])
-            await apply_cheap_optimizations(
-                b, cot_reflection=False, re2=False, readurls=True,
-                json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, natural_temperament=False,
-                assume_good_intent=False,
-                instruction_priority=False,
-                show_math_steps=False, avoid_fabricated_citations=False,
-                independent_analysis=False, prefer_multiple_sources=False,
-                reason_genuinely=False,
-                cot_reset=False, contextual_register=False,
-                http_client=client,
-            )
+            await apply_cheap_optimizations(b, opt=_opt(readurls=True), http_client=client)
         c = b["messages"][0]["content"]
         # 至多 _READURLS_MAX_PER_MSG 个 [Content from ...]
         assert c.count("[Content from") == _READURLS_MAX_PER_MSG
@@ -423,18 +369,7 @@ class TestReadUrls:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             b = _make_body([{"role": "user",
                              "content": "A: https://fail.test/x B: https://ok.test/y"}])
-            await apply_cheap_optimizations(
-                b, cot_reflection=False, re2=False, readurls=True,
-                json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, natural_temperament=False,
-                assume_good_intent=False,
-                instruction_priority=False,
-                show_math_steps=False, avoid_fabricated_citations=False,
-                independent_analysis=False, prefer_multiple_sources=False,
-                reason_genuinely=False,
-                cot_reset=False, contextual_register=False,
-                http_client=client,
-            )
+            await apply_cheap_optimizations(b, opt=_opt(readurls=True), http_client=client)
         c = b["messages"][0]["content"]
         # 失败 URL 未注入；成功 URL 已注入
         assert "[Content from ok.test:" in c
@@ -449,18 +384,7 @@ class TestReadUrls:
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             b = _make_body([{"role": "user", "content": "https://huge.test/x"}])
-            await apply_cheap_optimizations(
-                b, cot_reflection=False, re2=False, readurls=True,
-                json_mode_hint=False, inject_date=False, safe_inlined_content=False,
-                avoid_negative_style=False, natural_temperament=False,
-                assume_good_intent=False,
-                instruction_priority=False,
-                show_math_steps=False, avoid_fabricated_citations=False,
-                independent_analysis=False, prefer_multiple_sources=False,
-                reason_genuinely=False,
-                cot_reset=False, contextual_register=False,
-                http_client=client,
-            )
+            await apply_cheap_optimizations(b, opt=_opt(readurls=True), http_client=client)
         c = b["messages"][0]["content"]
         # 注入成功（截断后仍是有效内容），且包含 ... 截断标记
         assert "[Content from huge.test:" in c
@@ -484,17 +408,7 @@ class TestCreativeMode:
         """creative mode 下 avoid_negative_style 应注入通用 _SKILL_AVOID_AI_TICS，
         不含旧 coding 版的特定指令。"""
         b = _make_body([{"role": "user", "content": "hello"}])
-        await apply_cheap_optimizations(
-            b, mode="creative",
-            avoid_negative_style=True, natural_temperament=False,
-            contextual_register=False, assume_good_intent=False,
-            instruction_priority=False, independent_analysis=False,
-            reason_genuinely=False, inject_date=False,
-            show_math_steps=False, prefer_multiple_sources=False,
-            avoid_fabricated_citations=False, json_mode_hint=False,
-            safe_inlined_content=False, re2=False, cot_reflection=False,
-            readurls=False, cot_reset=False,
-        )
+        await apply_cheap_optimizations(b, opt=_opt(avoid_negative_style=True), mode="creative")
         system_text = self._find_system_text(b)
         # 通用版含"无实质确认"（从旧 coding 版合并进来的）
         assert "无实质确认" in system_text
@@ -508,17 +422,7 @@ class TestCreativeMode:
         """coding mode 使用与 creative 相同的 _SKILL_AVOID_AI_TICS 通用版，
         不再使用旧的编码版。"""
         b = _make_body([{"role": "user", "content": "hello"}])
-        await apply_cheap_optimizations(
-            b, mode="coding",
-            avoid_negative_style=True, natural_temperament=False,
-            contextual_register=False, assume_good_intent=False,
-            instruction_priority=False, independent_analysis=False,
-            reason_genuinely=False, inject_date=False,
-            show_math_steps=False, prefer_multiple_sources=False,
-            avoid_fabricated_citations=False, json_mode_hint=False,
-            safe_inlined_content=False, re2=False, cot_reflection=False,
-            readurls=False, cot_reset=False,
-        )
+        await apply_cheap_optimizations(b, opt=_opt(avoid_negative_style=True), mode="coding")
         system_text = self._find_system_text(b)
         # 通用版有的（coding 也应有）
         assert "无实质确认" in system_text
@@ -530,17 +434,7 @@ class TestCreativeMode:
     async def test_creative_mode_uses_narrator_stance(self):
         """creative mode 下 natural_temperament 应注入 _SKILL_NARRATOR_STANCE。"""
         b = _make_body([{"role": "user", "content": "hello"}])
-        await apply_cheap_optimizations(
-            b, mode="creative",
-            avoid_negative_style=False, natural_temperament=True,
-            contextual_register=False, assume_good_intent=False,
-            instruction_priority=False, independent_analysis=False,
-            reason_genuinely=False, inject_date=False,
-            show_math_steps=False, prefer_multiple_sources=False,
-            avoid_fabricated_citations=False, json_mode_hint=False,
-            safe_inlined_content=False, re2=False, cot_reflection=False,
-            readurls=False, cot_reset=False,
-        )
+        await apply_cheap_optimizations(b, opt=_opt(natural_temperament=True), mode="creative")
         system_text = self._find_system_text(b)
         assert "叙事者不替他们降温" in system_text
         assert "以动词和名词为主力" in system_text
@@ -551,15 +445,9 @@ class TestCreativeMode:
         """creative mode 下 B 组求证 skills 全部跳过。"""
         b = _make_body([{"role": "user", "content": "hello"}])
         await apply_cheap_optimizations(
-            b, mode="creative",
-            avoid_negative_style=False, natural_temperament=False,
-            contextual_register=False, assume_good_intent=False,
-            instruction_priority=False, independent_analysis=False,
-            reason_genuinely=False, inject_date=False,
-            show_math_steps=True, prefer_multiple_sources=True,
-            avoid_fabricated_citations=True, json_mode_hint=False,
-            safe_inlined_content=False, re2=False, cot_reflection=False,
-            readurls=False, cot_reset=False,
+            b, opt=_opt(show_math_steps=True, prefer_multiple_sources=True,
+                        avoid_fabricated_citations=True),
+            mode="creative",
         )
         system_text = self._find_system_text(b)
         # B 组全文不应出现
@@ -571,15 +459,9 @@ class TestCreativeMode:
         """mode="coding" 下 B 组求证 skills 正常注入。"""
         b = _make_body([{"role": "user", "content": "hello"}])
         await apply_cheap_optimizations(
-            b, mode="coding",
-            avoid_negative_style=False, natural_temperament=False,
-            contextual_register=False, assume_good_intent=False,
-            instruction_priority=False, independent_analysis=False,
-            reason_genuinely=False, inject_date=False,
-            show_math_steps=True, prefer_multiple_sources=True,
-            avoid_fabricated_citations=True, json_mode_hint=False,
-            safe_inlined_content=False, re2=False, cot_reflection=False,
-            readurls=False, cot_reset=False,
+            b, opt=_opt(show_math_steps=True, prefer_multiple_sources=True,
+                        avoid_fabricated_citations=True),
+            mode="coding",
         )
         system_text = self._find_system_text(b)
         assert "推导过程和关键中间步骤" in system_text
