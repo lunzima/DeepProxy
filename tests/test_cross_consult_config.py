@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from deep_proxy.cross_consult.config import CrossConsultConfig
 
@@ -105,7 +106,7 @@ def test_cross_consult_config_stream_heartbeat_default():
 
 
 def test_cross_consult_config_stream_heartbeat_bounds():
-    with pytest.raises(Exception):  # ValidationError
+    with pytest.raises(ValidationError):
         CrossConsultConfig(stream_heartbeat_seconds=0)
-    with pytest.raises(Exception):  # ValidationError
+    with pytest.raises(ValidationError):
         CrossConsultConfig(stream_heartbeat_seconds=121)
