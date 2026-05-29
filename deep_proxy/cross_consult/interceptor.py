@@ -122,30 +122,6 @@ def build_initial_response_from_stream_tool_calls(
     }
 
 
-def synthesize_final_stream_chunk(final_result: dict[str, Any]) -> dict[str, Any]:
-    """把 cross_consult 循环完成后的非流式 final_result 还原成一个
-    单 chunk 的流式响应（OpenAI streaming chunk 形状）。
-
-    供 router.iter_chat_chunks 在 cc 重发完成后 yield 给客户端——客户端
-    继续按 SSE 协议解析；最终响应内容（含 reasoning_content / tool_calls）
-    完整保留在这一个合成 chunk 里。
-    """
-    msg = (final_result.get("choices") or [{}])[0].get("message") or {}
-    delta: dict[str, Any] = {"role": "assistant", "content": msg.get("content", "")}
-    if msg.get("reasoning_content"):
-        delta["reasoning_content"] = msg["reasoning_content"]
-        delta["reasoning"] = msg["reasoning_content"]
-    if msg.get("tool_calls"):
-        delta["tool_calls"] = msg["tool_calls"]
-    return {
-        "choices": [{
-            "index": 0,
-            "delta": delta,
-            "finish_reason": "stop",
-        }],
-    }
-
-
 def _parse_args(tc: dict) -> dict:
     raw = (tc.get("function") or {}).get("arguments")
     if isinstance(raw, dict):
