@@ -97,3 +97,15 @@ def test_proxyconfig_loads_cross_consult_from_yaml():
     assert cfg.cross_consult.enabled is True
     assert cfg.cross_consult.pair_for("deepseek") == "mimo"
     assert cfg.cross_consult.max_calls_per_request == 2
+
+
+def test_cross_consult_config_stream_heartbeat_default():
+    cc = CrossConsultConfig()
+    assert cc.stream_heartbeat_seconds == 10
+
+
+def test_cross_consult_config_stream_heartbeat_bounds():
+    with pytest.raises(Exception):  # ValidationError
+        CrossConsultConfig(stream_heartbeat_seconds=0)
+    with pytest.raises(Exception):  # ValidationError
+        CrossConsultConfig(stream_heartbeat_seconds=121)

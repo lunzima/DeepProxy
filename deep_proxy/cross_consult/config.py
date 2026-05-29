@@ -53,6 +53,11 @@ class CrossConsultConfig(BaseModel):
                     "其 time-to-first-chunk 可能远超 inter-chunk idle 预算；首 chunk "
                     "因此单独给更宽预算，避免健康上游在预填充阶段被误杀。",
     )
+    stream_heartbeat_seconds: int = Field(
+        default=10, ge=1, le=120,
+        description="客户端真流式下，静默间隙（consult 执行 / 重发 prefill）期间发送 "
+                    "SSE keep-alive 注释帧的间隔秒数。须显著小于客户端 idle-read 超时。",
+    )
     max_input_chars: int = Field(
         default=32000, ge=100,
         description="question + context 合并后的字符上限；超出返回错误 tool_result。",
