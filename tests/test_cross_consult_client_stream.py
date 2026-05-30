@@ -197,11 +197,14 @@ async def test_stream_one_turn_closes_upstream_on_early_close():
     """消费者提前关闭生成器（客户端断连 → GeneratorExit）时，上游异步生成器被
     aclose，其 finally 确定性运行（关闭 httpx 流 / 释放连接），不依赖 GC。"""
     closed = {"hit": False}
+    # 用永不 set 的 Event 模拟"上游下一 chunk 迟迟不来"——cancel 时立即解除，
+    # 不像 asyncio.sleep 那样在 loop 上残留计时器句柄（避免跨测试 loop 污染/flaky）。
+    never = asyncio.Event()
 
     async def slow_gen():
         try:
             yield _delta_chunk(content="first")
-            await asyncio.sleep(10)  # 模拟上游下一 chunk 迟迟不来
+            await never.wait()  # 永远阻塞，直到被 cancel
             yield _delta_chunk(content="never")
         finally:
             closed["hit"] = True

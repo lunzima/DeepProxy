@@ -58,7 +58,9 @@ from .cross_consult.interceptor import (
 )
 from .cross_consult.streaming import stream_aggregated_call
 from .cross_consult.client_stream import (
+    STREAM_ERRORED,
     TurnResult,
+    make_terminal_frame,
     stream_cross_consult_continuation,
     stream_one_turn,
 )
@@ -544,19 +546,17 @@ class DeepProxyRouter:
                     return
                 if not turn.had_cc_call:
                     # 无 cc 调用：终轮，补发 finish_reason / 非 cc tool_calls
-                    final_delta: dict[str, Any] = {}
-                    if turn.accumulated_tool_calls:
-                        final_delta["tool_calls"] = turn.accumulated_tool_calls
-                    yield {"choices": [{"index": 0, "delta": final_delta,
-                                        "finish_reason": turn.finish_reason or "stop"}]}
+                    yield make_terminal_frame(turn.finish_reason, turn.accumulated_tool_calls)
                 else:
                     async for frame in stream_cross_consult_continuation(
                         initial_tool_calls=turn.accumulated_tool_calls,
                         body=body, source_provider=provider, config=self.config,
                         cc_config=self.config.cross_consult, accumulator=accumulator,
+                        initial_content=turn.content,
                     ):
-                        # 重发轮 errored 哨兵：标记不干净，吞掉不透传客户端
-                        if frame.get("_dp_stream_errored"):
+                        # 重发轮 errored 哨兵（单例，按 identity 识别）：标记不干净，
+                        # 吞掉不透传客户端
+                        if frame is STREAM_ERRORED:
                             saw_error_frame = True
                             continue
                         if isinstance(frame.get("error"), dict) and not frame.get("choices"):

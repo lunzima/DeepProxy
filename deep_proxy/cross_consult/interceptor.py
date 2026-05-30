@@ -85,7 +85,7 @@ def inject_into_request(
 # 响应路径拦截 + 重发循环（非流式）
 # ---------------------------------------------------------------------------
 
-def _extract_cross_consult_tool_calls(response: dict[str, Any], tool_name: str) -> list[dict]:
+def extract_cross_consult_tool_calls(response: dict[str, Any], tool_name: str) -> list[dict]:
     """从 response.choices[0] 提取所有 name == tool_name 的 tool_calls。
 
     只处理 choices[0]——DeepProxy 不支持 n>1，与下游 append assistant_msg
@@ -107,8 +107,9 @@ def build_initial_response_from_stream_tool_calls(
     """把流式累加的 OpenAI tool_calls 包成 execute_cross_consult_loop 期望的
     initial_response 形状（非流式 chat completion 响应模板）。
 
-    供 router.iter_chat_chunks 在 cross_consult 触发时调用——把"流式
-    捕获到的 cc tool_call"转译成"伪非流式响应"以便复用现有 loop 入口。
+    供 client_stream.stream_cross_consult_continuation 在每轮起点调用——把"流式
+    累加到的 cc tool_call"转译成"伪非流式响应"以复用 extract_cross_consult_tool_calls
+    的终轮判定逻辑。
     """
     return {
         "choices": [{
@@ -134,7 +135,7 @@ def _parse_args(tc: dict) -> dict:
     return {}
 
 
-async def _resolve_consult_tool_call(
+async def resolve_consult_tool_call(
     tc: dict,
     *,
     call_count: int,
@@ -210,6 +211,11 @@ async def execute_cross_consult_loop(
 
     防无限循环：硬轮次上限 = max_calls_per_request * 2 + 1，
     确保 quota 耗尽场景下 agent 最多再得到一次重发机会后必定退出。
+
+    与 client_stream.stream_cross_consult_continuation 是**并行实现，按设计分叉**：
+    本函数走非流式（call_litellm_fn 返回 dict、最终返回 dict），后者走客户端真流式
+    （iter_litellm_chunks 逐 chunk yield 帧）。两者共享 resolve_consult_tool_call 与同一
+    轮次/配额策略；I/O 形状（dict vs 帧流）不可合并。改配额/轮次规则时两处同步。
     """
     if not cc_config.enabled:
         return initial_response
@@ -227,7 +233,7 @@ async def execute_cross_consult_loop(
     max_turns = cc_config.max_calls_per_request * 2 + 1
 
     for _turn in range(max_turns):
-        tool_calls = _extract_cross_consult_tool_calls(response, cc_config.tool_name)
+        tool_calls = extract_cross_consult_tool_calls(response, cc_config.tool_name)
         if not tool_calls:
             return response
 
@@ -236,7 +242,7 @@ async def execute_cross_consult_loop(
         body["messages"].append(assistant_msg)
 
         for tc in tool_calls:
-            tool_text, consumed = await _resolve_consult_tool_call(
+            tool_text, consumed = await resolve_consult_tool_call(
                 tc, call_count=call_count,
                 target_provider=target_provider, config=config, cc_config=cc_config,
             )

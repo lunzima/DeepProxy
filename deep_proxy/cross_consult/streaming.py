@@ -7,6 +7,10 @@
 
 输出形状刻意贴近非流式 chat.completion 响应，让现有的 process_response / extract_*
 工具链与 cross_consult interceptor 无需感知差异。
+
+注：本模块仅供**内部聚合**——executor.py 的 consult 调用，以及非流式
+chat_completions 路径经 stream_aggregated_call 的重发。面向客户端的**真流式**
+（逐 token 透传 + 心跳）见 client_stream.py。
 """
 from __future__ import annotations
 
@@ -57,6 +61,9 @@ async def aggregate_stream_to_response(
         None / 0 / 负数 = 退回 idle_timeout 守护首 chunk（向后兼容）。
       - idle_timeout：首 chunk 之后，相邻 chunk 间允许的最长无活动时间（真正的
         mid-stream hang tripwire）。0 / 负数 = 不限。
+
+    与 client_stream.stream_one_turn 的相似是**刻意分叉**，勿合并：本函数内部聚合成
+    dict（不发心跳、wait_for 即可），后者面向客户端真流式（yield + 心跳）。
     """
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -156,9 +163,11 @@ async def stream_aggregated_call(
 ) -> dict[str, Any]:
     """`call_litellm_fn` 兼容签名的流式封装。
 
-    供 execute_cross_consult_loop 的 call_litellm_fn 参数复用——保持 (config, body,
-    *, provider) -> dict 接口不变，但内部走流式，避免在重发时被墙钟超时拦截。
-    错误（_dp_error）映射成空 message 让 loop 自然终止，由外层错误监控处理。
+    供非流式 chat_completions 路径的 execute_cross_consult_loop 作 call_litellm_fn
+    复用——保持 (config, body, *, provider) -> dict 接口不变，但内部走流式，避免在
+    重发时被墙钟超时拦截。错误（_dp_error）映射成一条 content 为错误前缀串
+    （"[DeepProxy cross_consult resend error] ..."）的 assistant message，让 loop
+    收到有意义响应后自然终止，由外层错误监控处理。
     """
     result = await aggregate_stream_to_response(
         config, body, provider=provider,

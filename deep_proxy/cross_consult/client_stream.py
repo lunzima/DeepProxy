@@ -1,12 +1,16 @@
 """客户端真流式：cross_consult 激活时逐 token 透传 + 抑制虚拟工具帧 + 心跳桥接。
 
-三单元：
+三个流式单元：
   - with_heartbeat：包裹 consult await，期间周期 yield 心跳帧
   - stream_one_turn：消费单轮上游 chunk 流，content/reasoning 即时透传、
-    tool_calls 累加到轮末判定、间隙发心跳
+    tool_calls 累加到轮末判定（结果写入传入的 TurnResult）、间隙发心跳
   - stream_cross_consult_continuation：execute_cross_consult_loop 的流式变体
 
-心跳 sentinel = {"_dp_heartbeat": True}（dict），由协议层序列化成 SSE 注释帧。
+辅助：TurnResult（单轮累加结果容器）、make_terminal_frame（终轮帧构造）。
+
+哨兵（均为模块级单例 dict，不透传客户端）：
+  - _HEARTBEAT {"_dp_heartbeat": True}：协议层序列化成 SSE 注释帧 / Anthropic ping
+  - STREAM_ERRORED {"_dp_stream_errored": True}：通知 iter_chat_chunks 重发轮 errored
 """
 from __future__ import annotations
 
@@ -17,12 +21,13 @@ from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Generic, TypeV
 
 from ..utils import merge_tool_call_deltas
 from ..config import ProxyConfig
+from ..compatibility.reasoning_handler import StreamingReasoningAccumulator
 from ..litellm_client import iter_litellm_chunks
 from ..providers import Provider
 from .config import CrossConsultConfig
 from .interceptor import (
-    _extract_cross_consult_tool_calls,
-    _resolve_consult_tool_call,
+    extract_cross_consult_tool_calls,
+    resolve_consult_tool_call,
     build_initial_response_from_stream_tool_calls,
 )
 
@@ -30,9 +35,9 @@ logger = logging.getLogger(__name__)
 
 _HEARTBEAT: dict[str, Any] = {"_dp_heartbeat": True}
 
-# 内部哨兵：continuation 在重发轮 errored（超时/error）退出时 yield，供
-# iter_chat_chunks 识别并设 saw_error_frame（不提交升格记账）。不透传给客户端。
-_STREAM_ERRORED: dict[str, Any] = {"_dp_stream_errored": True}
+# 跨模块哨兵（单例）：continuation 在重发轮 errored（超时/error）退出时 yield，供
+# iter_chat_chunks 按 identity 识别并设 saw_error_frame（不提交升格记账）。不透传给客户端。
+STREAM_ERRORED: dict[str, Any] = {"_dp_stream_errored": True}
 
 T = TypeVar("T")
 
@@ -103,7 +108,9 @@ def _client_facing_chunk(chunk: dict) -> dict | None:
 
 
 def _accumulate_turn(chunk: dict, result: TurnResult, tool_name: str) -> None:
-    """把一个 chunk 的 tool_calls / content / finish_reason 累加进 result。"""
+    """把一个 chunk 的 content / tool_calls / finish_reason 累加进 result，并据累加后的
+    tool_calls 重算 result.had_cc_call（是否已出现 name==tool_name 的调用——continuation
+    据此判定终轮）。"""
     for ch in chunk.get("choices") or []:
         delta = ch.get("delta") or {}
         if isinstance(delta.get("content"), str):
@@ -122,6 +129,22 @@ def _accumulate_turn(chunk: dict, result: TurnResult, tool_name: str) -> None:
     )
 
 
+def make_terminal_frame(finish_reason: str | None, tool_calls: list[dict]) -> dict:
+    """构造终轮 choice 帧：带 finish_reason（及可选非 cc tool_calls）。
+
+    抽出供三处终轮帧复用：iter_chat_chunks 的 no-cc-call 分支、
+    stream_cross_consult_continuation 的终轮判定与硬轮次上限退出，保证形状一致。
+    """
+    delta: dict[str, Any] = {}
+    if tool_calls:
+        delta["tool_calls"] = tool_calls
+    return {"choices": [{
+        "index": 0,
+        "delta": delta,
+        "finish_reason": finish_reason or "stop",
+    }]}
+
+
 async def stream_one_turn(
     chunk_iter: AsyncIterator[dict],
     result: TurnResult,
@@ -136,6 +159,10 @@ async def stream_one_turn(
 
     心跳/预算：等待下一 chunk 时每 heartbeat_seconds 无 chunk 发一次心跳；累计等待
     超过预算（首 chunk 用 first_chunk_timeout，之后 idle_timeout）视为 hang。
+
+    与 streaming.aggregate_stream_to_response 的相似是**刻意分叉**，勿合并：本函数
+    面向客户端真流式（yield chunk + 心跳、持久化 __anext__ task 防丢 chunk），后者
+    内部聚合成 dict（不发心跳、wait_for 即可）。两者数据流方向相反。
     """
     it = chunk_iter.__aiter__() if hasattr(chunk_iter, "__aiter__") else chunk_iter
     got_first = False
@@ -209,12 +236,23 @@ async def stream_cross_consult_continuation(
     source_provider: Provider,
     config: ProxyConfig,
     cc_config: CrossConsultConfig,
-    accumulator: Any,
+    accumulator: StreamingReasoningAccumulator,
+    initial_content: str = "",
 ) -> AsyncGenerator[Any, None]:
     """execute_cross_consult_loop 的流式变体：执行 consult（间隙发心跳）+ 重发
     （逐 chunk 透传）+ 跨轮循环。yield 客户端帧 / 心跳帧 / error 帧。
 
     initial_tool_calls：初始轮已累加的 tool_calls（含至少一个 cross_consult 调用）。
+    initial_content：初始轮已累加的 assistant 文本（前导文本）。须随首条 assistant
+        消息一并写入对话历史——否则模型在 tool_call 前说的前导文本会从重发上下文
+        丢失，与非流式 execute_cross_consult_loop（直接 append 完整 message）行为分叉。
+
+    终轮帧契约：除 error 退出（yield STREAM_ERRORED）外，本生成器在返回前总会 yield
+    一个带 finish_reason 的终轮 choice 帧（终轮判定 / 无 cc 调用 / 硬轮次上限三处统一）。
+
+    与 interceptor.execute_cross_consult_loop 是**并行实现，按设计分叉**：本函数走客户端
+    真流式（yield 帧），后者走非流式（返回 dict）。共享 resolve_consult_tool_call 与同一
+    轮次/配额策略；改配额/轮次规则时两处同步。
     """
     target_name = cc_config.pair_for(source_provider.name)
     target_provider = config.providers.get(target_name) if target_name else None
@@ -226,14 +264,14 @@ async def stream_cross_consult_continuation(
     hb = float(cc_config.stream_heartbeat_seconds)
 
     turn_tool_calls = initial_tool_calls
-    turn_content = ""
+    turn_content = initial_content
     call_count = 0
     max_turns = cc_config.max_calls_per_request * 2 + 1
 
     for _turn in range(max_turns):
         pseudo = build_initial_response_from_stream_tool_calls(turn_tool_calls)
         # 终轮判定：本轮无 cross_consult 调用 -> 调用方已/将透传，停止
-        cc_calls = _extract_cross_consult_tool_calls(pseudo, cc_config.tool_name)
+        cc_calls = extract_cross_consult_tool_calls(pseudo, cc_config.tool_name)
         if not cc_calls:
             return
 
@@ -247,7 +285,7 @@ async def stream_cross_consult_continuation(
         for tc in cc_calls:
             tool_text = None
             async for frame in with_heartbeat(
-                _resolve_consult_tool_call(
+                resolve_consult_tool_call(
                     tc, call_count=call_count,
                     target_provider=target_provider, config=config, cc_config=cc_config,
                 ),
@@ -278,20 +316,16 @@ async def stream_cross_consult_continuation(
         if turn.errored:
             # 重发轮超时/error：通知调用方设 saw_error_frame（不提交升格记账），
             # 该哨兵被 iter_chat_chunks 吞掉，不透传给客户端。
-            yield _STREAM_ERRORED
+            yield STREAM_ERRORED
             return
         turn_tool_calls = turn.accumulated_tool_calls
         turn_content = turn.content
         # 终轮（无 cc 调用）：把本轮 finish_reason / 非 cc tool_calls 作为终结帧透传
         if not turn.had_cc_call:
-            final_delta: dict[str, Any] = {}
-            if turn_tool_calls:
-                final_delta["tool_calls"] = turn_tool_calls
-            yield {"choices": [{
-                "index": 0,
-                "delta": final_delta,
-                "finish_reason": turn.finish_reason or "stop",
-            }]}
+            yield make_terminal_frame(turn.finish_reason, turn_tool_calls)
             return
 
+    # 硬轮次上限：内容已逐 chunk 透传完毕，补一个 finish_reason=stop 终轮帧让客户端
+    # 正常收尾（对齐 no-cc-call 退出路径；否则客户端只收到 [DONE] 而无终轮 choice）。
     logger.warning("cross_consult stream continuation hit hard turn limit (%d)", max_turns)
+    yield make_terminal_frame("stop", turn_tool_calls)
