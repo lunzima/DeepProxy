@@ -131,3 +131,49 @@ async def test_list_models_union_across_pool_families():
     # 去重：每个 id 仅一次
     all_ids = [m["id"] for m in res["data"]]
     assert len(all_ids) == len(set(all_ids))
+
+
+# ---------------------------------------------------------------------------
+# redirect × pool tier 保持（code review #1）
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_preserves_pro_tier_across_redirect():
+    from deep_proxy.pool import reconcile_redirected_pool_model
+    cfg = _cfg_with_pool(_FULL_POOL)
+    ds = cfg.providers["deepseek"]
+    mimo = cfg.providers["mimo"]
+    # 选中 deepseek pro，redirect 切到 mimo → mimo 的 pro（tier 保持）
+    out = reconcile_redirected_pool_model("deepseek-v4-pro", ds, mimo)
+    assert out == "mimo-v2.5-pro"
+
+
+def test_reconcile_preserves_flash_tier_across_redirect():
+    from deep_proxy.pool import reconcile_redirected_pool_model
+    cfg = _cfg_with_pool(_FULL_POOL)
+    ds = cfg.providers["deepseek"]
+    mimo = cfg.providers["mimo"]
+    out = reconcile_redirected_pool_model("mimo-v2.5", mimo, ds)
+    assert out == "deepseek-v4-flash"
+
+
+def test_reconcile_noop_when_provider_unchanged():
+    from deep_proxy.pool import reconcile_redirected_pool_model
+    cfg = _cfg_with_pool(_FULL_POOL)
+    mimo = cfg.providers["mimo"]
+    # post is pre → 原样返回
+    assert reconcile_redirected_pool_model("mimo-v2.5-pro", mimo, mimo) == "mimo-v2.5-pro"
+
+
+def test_reconcile_noop_when_no_pool():
+    from deep_proxy.pool import reconcile_redirected_pool_model
+    cfg = _cfg_with_pool(_FULL_POOL)
+    ds = cfg.providers["deepseek"]
+    mimo = cfg.providers["mimo"]
+    assert reconcile_redirected_pool_model(None, ds, mimo) is None
+
+
+def test_empty_pool_list_rejected():
+    """model_pool: [] 显式空列表 → fail-fast（spec 要求非空）。"""
+    with pytest.raises(ValidationError):
+        _cfg_with_pool([])

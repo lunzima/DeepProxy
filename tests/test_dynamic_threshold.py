@@ -63,6 +63,15 @@ def test_window_evicts_old_decisions():
     assert c.factor == 0.8
 
 
+def test_min_samples_exceeding_window_rejected():
+    """min_samples > window 会让控制器永久暖机（inert）→ config 层应拒绝。"""
+    import pytest
+    from pydantic import ValidationError
+    from deep_proxy.config import DynamicThresholdConfig
+    with pytest.raises(ValidationError):
+        DynamicThresholdConfig(window=10, min_samples=20)
+
+
 def test_samples_property_counts_window():
     """samples 反映当前窗口样本数（供 health / 测试观测）。"""
     c = DynamicThresholdController(window=5, min_samples=10)

@@ -306,13 +306,21 @@ async def chat_completions(request: Request):
 
     body: Dict[str, Any] = await request.json()
     provider, sampling, port, selected_model = _binding_for_request(request)
-    # pool 选中的模型覆盖客户端请求的 model（逐请求重掷），在 redirect/prepare 之前
+    # pool 选中的模型覆盖客户端请求的 model（逐请求重掷）
     if selected_model is not None:
         body["model"] = selected_model
     # telemetry 剥离必须先于 redirect/prepare_request，否则两个 tracker 的
     # conversation_fingerprint 会包含 session-变化的 header → persist 窗口失稳
     _strip_telemetry_if_enabled(body)
+    pre_redirect_provider = provider
     provider = _maybe_redirect_provider(body, provider)
+    # redirect 切换 provider 后，保持 pool 选中的 tier（flash/pro）映射到新 provider，
+    # 维持"pro 起始 → pin 在 pro"不变式（见 pool.reconcile_redirected_pool_model）
+    if selected_model is not None:
+        from .pool import reconcile_redirected_pool_model
+        body["model"] = reconcile_redirected_pool_model(
+            selected_model, pre_redirect_provider, provider,
+        )
     body = await router.prepare_request(
         body, sampling_profile=sampling, provider=provider, port=port,
     )
@@ -365,7 +373,14 @@ async def anthropic_messages(request: Request):
         openai_body["model"] = selected_model
     # telemetry 剥离 + cross_consult 标签重定向（顺序同 OpenAI 端点）
     _strip_telemetry_if_enabled(openai_body)
+    pre_redirect_provider = provider
     provider = _maybe_redirect_provider(openai_body, provider)
+    # redirect 切换 provider 后保持 pool tier（同 OpenAI 端点）
+    if selected_model is not None:
+        from .pool import reconcile_redirected_pool_model
+        openai_body["model"] = reconcile_redirected_pool_model(
+            selected_model, pre_redirect_provider, provider,
+        )
     openai_body = await router.prepare_request(
         openai_body, sampling_profile=sampling, provider=provider, port=port,
     )

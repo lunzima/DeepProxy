@@ -62,3 +62,63 @@ def test_binding_pool_provider_varies_with_pick(monkeypatch):
     monkeypatch.setattr(main, "config", _pooled_cfg())
     names = {main._binding_for_request(_fake_request(8001))[0].name for _ in range(200)}
     assert names == {"deepseek", "mimo"}
+
+
+# ---------------------------------------------------------------------------
+# pool × cross-consult redirect 集成（code review #1）
+# ---------------------------------------------------------------------------
+
+
+def _redirect_cfg() -> ProxyConfig:
+    return ProxyConfig.model_validate({
+        "providers": {
+            "deepseek": {
+                "name": "deepseek", "api_base": "https://api.deepseek.com",
+                "api_key": "sk-test", "litellm_prefix": "deepseek/",
+                "flash_model": "deepseek-v4-flash", "pro_model": "deepseek-v4-pro",
+            },
+            "mimo": {
+                "name": "mimo", "api_base": "https://m/v1", "api_key": "tp-test",
+                "litellm_prefix": "openai/", "flash_model": "mimo-v2.5",
+                "pro_model": "mimo-v2.5-pro",
+            },
+        },
+        "ports": [
+            {"port": 8001, "provider": "mimo", "sampling": "creative", "model_pool": [
+                {"provider": "deepseek", "model": "deepseek-v4-pro", "weight": 1},
+            ]},
+        ],
+        "deepseek": {"api_key": "sk-test"},
+        "cross_consult": {
+            "enabled": True, "redirect_enabled": True,
+            "pairs": {"deepseek": "mimo", "mimo": "deepseek"},
+            "redirect_tag_pattern": r"\[换族\]",
+        },
+        "flash_upgrade": {"router_type": "rule"},
+    })
+
+
+def test_pool_pro_pick_preserves_pro_tier_through_redirect(monkeypatch):
+    """选中 deepseek-v4-pro + redirect 标签 → 切到 mimo 后保持 pro（mimo-v2.5-pro），
+    不被降回 flash（复刻端点 redirect→reconcile 序列）。"""
+    from deep_proxy.router import DeepProxyRouter
+    from deep_proxy.pool import reconcile_redirected_pool_model
+
+    cfg = _redirect_cfg()
+    router = DeepProxyRouter(cfg)
+    monkeypatch.setattr(main, "config", cfg)
+    monkeypatch.setattr(main, "router", router)
+
+    # pool 只有 deepseek-v4-pro 一项 → 必选中它
+    provider, _, port, selected = main._binding_for_request(_fake_request(8001))
+    assert selected == "deepseek-v4-pro"
+    assert provider.name == "deepseek"
+
+    body = {"model": selected, "messages": [{"role": "user", "content": "你好 [换族]"}]}
+    # 端点序列：strip → redirect → reconcile
+    main._strip_telemetry_if_enabled(body)
+    pre = provider
+    provider = main._maybe_redirect_provider(body, provider)
+    assert provider.name == "mimo"  # redirect 生效
+    body["model"] = reconcile_redirected_pool_model(selected, pre, provider)
+    assert body["model"] == "mimo-v2.5-pro"  # pro tier 保持，未降回 flash

@@ -293,6 +293,16 @@ class DynamicThresholdConfig(BaseModel):
     kp: float = Field(default=0.5, gt=0.0, description="比例增益")
     min_samples: int = Field(default=10, ge=1, description="暖机阈值：样本不足时 f=1.0")
 
+    @model_validator(mode="after")
+    def _validate_min_samples(self):
+        """min_samples > window 时窗口永远填不满，控制器被永久钉在暖机（f=1.0，inert）。"""
+        if self.min_samples > self.window:
+            raise ValueError(
+                f"min_samples ({self.min_samples}) 不能大于 window ({self.window})，"
+                f"否则窗口永远填不满、控制器永久暖机失效"
+            )
+        return self
+
 
 class FlashUpgradeConfig(BaseModel):
     """Flash→Pro 选择性升格（默认启用，四层架构）。
@@ -557,8 +567,13 @@ class ProxyConfig(BaseModel):
         """
         for binding in self.ports:
             pool = binding.model_pool
-            if not pool:
+            if pool is None:
                 continue
+            if len(pool) == 0:
+                raise ValueError(
+                    f"port {binding.port} 的 model_pool 为空列表；"
+                    f"删除 model_pool 字段以退回单一 provider 路由，或填入至少一个条目"
+                )
             for entry in pool:
                 prov = self.providers.get(entry.provider)
                 if prov is None:
