@@ -54,9 +54,9 @@ ports:
   - port: 8001              # → creative_sampling（高多样性，RP/创作/通用写作）
     provider: mimo          # home provider：/v1/models 默认 + pool 兜底；不用 MiMo 时改回 deepseek
     sampling: creative
-    # （可选）加权模型桶：逐请求加权随机选 (provider, model)，跨 provider 家族轮询。
-    # flash 起始 → BERT/启发式可升格；pro 起始 → pin 在 pro。删除整个 model_pool 块
-    # 即退回单一 provider 路由。每个条目的 model 必须是该 provider 的 flash_model 或 pro_model。
+    # 加权模型桶（默认启用）：逐请求加权随机选 (provider, model)，跨 provider 家族轮询。
+    # flash 起始 → BERT/启发式可升格；pro 起始 → pin 在 pro。每个条目的 model 必须是
+    # 该 provider 的 flash_model 或 pro_model。如需退回单一 provider 路由，删除整个 model_pool 块。
     model_pool:
       - { provider: deepseek, model: deepseek-v4-flash, weight: 1 }
       - { provider: mimo,     model: mimo-v2.5,         weight: 1 }
