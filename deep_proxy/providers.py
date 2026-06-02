@@ -47,11 +47,26 @@ class Provider(BaseModel):
     context_window: int = Field(default=1000000, gt=0)
 
 
+class PoolEntry(BaseModel):
+    """加权模型桶的单个条目：(provider, model) + 相对权重。"""
+
+    provider: str = Field(description="必须匹配 providers 字典中的某个 key")
+    model: str = Field(description="必须等于该 provider 的 flash_model 或 pro_model")
+    weight: float = Field(default=1.0, gt=0, description="加权随机的相对权重（> 0）")
+
+
 class PortBinding(BaseModel):
-    """单个监听端口的绑定：provider + sampling profile。"""
+    """单个监听端口的绑定：provider + sampling profile（+ 可选加权模型桶）。"""
 
     port: int = Field(ge=1024, le=65535)
     provider: str = Field(description="必须匹配 providers 字典中的某个 key")
     sampling: Literal["precise", "creative"] = Field(
         description="precise → PreciseSamplingConfig；creative → CreativeSamplingConfig",
+    )
+    model_pool: list[PoolEntry] | None = Field(
+        default=None,
+        description="加权随机模型桶。给定时该 port 逐请求从池中选 (provider, model)，"
+                    "覆盖单一 provider 路由；provider 字段仍作为 home/兜底"
+                    "（/v1/models 默认）。条目的 provider/model 合法性由 "
+                    "ProxyConfig 的 model_validator 校验（providers 字典就绪后）。",
     )

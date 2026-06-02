@@ -115,19 +115,24 @@ class TestPortToProfileMapping:
         old = m.config
         try:
             m.config = cfg
-            _, sp_coding = m._binding_for_request(_Req(8000))
+            _, sp_coding, port_coding, sel_coding = m._binding_for_request(_Req(8000))
             assert sp_coding is cfg.precise_sampling
-            _, sp_writing = m._binding_for_request(_Req(8001))
+            assert port_coding == 8000
+            assert sel_coding is None  # 无 pool
+            _, sp_writing, port_writing, sel_writing = m._binding_for_request(_Req(8001))
             assert sp_writing is cfg.creative_sampling
-            # 未配置端口 → (None, None)
-            provider_none, sp_none = m._binding_for_request(_Req(9999))
+            assert port_writing == 8001
+            assert sel_writing is None
+            # 未配置端口 → (None, None, None, None)
+            provider_none, sp_none, _, _ = m._binding_for_request(_Req(9999))
             assert provider_none is None
             assert sp_none is None
-            # 无 scope.server → (None, None)
+            # 无 scope.server → (None, None, None, None)
             class _BadReq:
                 scope = {}
-            provider_bad, sp_bad = m._binding_for_request(_BadReq())
+            provider_bad, sp_bad, port_bad, sel_bad = m._binding_for_request(_BadReq())
             assert provider_bad is None
             assert sp_bad is None
+            assert port_bad is None
         finally:
             m.config = old

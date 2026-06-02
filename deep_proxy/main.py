@@ -193,8 +193,21 @@ async def list_models(request: Request):
     """
     await _check_api_key(request)
     _ensure_router_ready()
-    provider, _ = _binding_for_request(request)
-    return await router.list_models(provider=provider)
+    provider, _, port, _ = _binding_for_request(request)
+    # pool 配置时列出池内 provider 家族并集
+    pool_providers = None
+    binding = config.binding_for_port(port) if (config and port is not None) else None
+    if binding is not None and binding.model_pool:
+        seen: set[str] = set()
+        pool_providers = []
+        for entry in binding.model_pool:
+            p = config.providers.get(entry.provider)
+            if p is not None and p.name not in seen:
+                pool_providers.append(p)
+                seen.add(p.name)
+        # home provider 作为排序锚点
+        provider = config.provider_for_port(port)
+    return await router.list_models(provider=provider, pool_providers=pool_providers)
 
 
 @app.get("/health")
@@ -215,16 +228,28 @@ async def health():
 
 
 def _binding_for_request(request: Request):
-    """按入站端口返回 (provider, sampling_profile) 元组；端口未配置返回 (None, None)。"""
+    """按入站端口返回 (provider, sampling_profile, port, selected_model)。
+
+    端口未配置返回 (None, None, None, None)。
+
+    若该 port 配置了 model_pool（writing-port 加权模型桶）：逐请求加权随机选一个
+    (provider, model)，provider 覆盖单一绑定、selected_model 为选中的模型 ID
+    （供端点覆盖 body["model"]）。无 pool 时 selected_model 为 None。
+    """
     if config is None:
-        return None, None
+        return None, None, None, None
     server = request.scope.get("server")
     port = server[1] if server else None
     if port is None:
-        return None, None
+        return None, None, None, None
     provider = config.provider_for_port(port)
     sampling = config.sampling_profile_for_port(port)
-    return provider, sampling
+    selected_model = None
+    binding = config.binding_for_port(port)
+    if binding is not None and binding.model_pool:
+        from .pool import select_pool_target
+        provider, selected_model = select_pool_target(binding, config)
+    return provider, sampling, port, selected_model
 
 
 def _strip_telemetry_if_enabled(body: Dict[str, Any]) -> None:
@@ -280,13 +305,16 @@ async def chat_completions(request: Request):
     _ensure_router_ready()
 
     body: Dict[str, Any] = await request.json()
-    provider, sampling = _binding_for_request(request)
+    provider, sampling, port, selected_model = _binding_for_request(request)
+    # pool 选中的模型覆盖客户端请求的 model（逐请求重掷），在 redirect/prepare 之前
+    if selected_model is not None:
+        body["model"] = selected_model
     # telemetry 剥离必须先于 redirect/prepare_request，否则两个 tracker 的
     # conversation_fingerprint 会包含 session-变化的 header → persist 窗口失稳
     _strip_telemetry_if_enabled(body)
     provider = _maybe_redirect_provider(body, provider)
     body = await router.prepare_request(
-        body, sampling_profile=sampling, provider=provider,
+        body, sampling_profile=sampling, provider=provider, port=port,
     )
     is_stream = body.get("stream", False)
 
@@ -331,12 +359,15 @@ async def anthropic_messages(request: Request):
     requested_model = anthropic_body.get("model", "")
 
     openai_body = claude_request_to_openai(anthropic_body)
-    provider, sampling = _binding_for_request(request)
+    provider, sampling, port, selected_model = _binding_for_request(request)
+    # pool 选中的模型覆盖客户端请求的 model（逐请求重掷）
+    if selected_model is not None:
+        openai_body["model"] = selected_model
     # telemetry 剥离 + cross_consult 标签重定向（顺序同 OpenAI 端点）
     _strip_telemetry_if_enabled(openai_body)
     provider = _maybe_redirect_provider(openai_body, provider)
     openai_body = await router.prepare_request(
-        openai_body, sampling_profile=sampling, provider=provider,
+        openai_body, sampling_profile=sampling, provider=provider, port=port,
     )
     is_stream = openai_body.get("stream", False)
 

@@ -23,7 +23,7 @@
 客户端 (OpenAI SDK / Anthropic SDK) ──→ DeepProxy (:8000 / :8001)
   ├─ [兼容层] 参数过滤 / 老模型别名 / reasoning / 错误映射 / Anthropic↔OpenAI 翻译
   ├─ [模型层] 三生态 /v1/models（OpenAI/OpenRouter/Anthropic 同条目共存：定价 / 上下文长度 / display_name / 仿冒别名）
-  ├─ [升格层] Flash→Pro 选择路由器（BERT 二分类 + 启发式快速路径，per-provider 阈值）
+  ├─ [升格层] Flash→Pro 选择路由器（BERT 二分类 + 启发式快速路径，per-provider 阈值 + per-port 动态阈值闭环）
   ├─ [优化层] In-process 提示词 skills（0 额外 LLM 调用）
   └─ [路由层] LiteLLM ──┬──→ DeepSeek API (api.deepseek.com)        # :8000 coding/precise
                         └──→ MiMo API (token-plan-cn.xiaomimimo.com) # :8001 writing/creative
@@ -34,6 +34,10 @@ DeepProxy 绑定**两个端口**，共享同一个 FastAPI app 实例：
 - **writing_port** (默认 `8001`) → `CreativeSamplingConfig`（高多样性，RP/创作/写作）
 
 **多 provider 路由**（v0.2+）：每个 port 在配置中绑定一个 provider；coding_port 走 DeepSeek，writing_port 走 MiMo (`mimo-v2.5` / `mimo-v2.5-pro`)。flash_upgrade 路由复用同一 BERT checkpoint，按 per-provider 阈值与 `pro_model` 工作。`/v1/models` 每个 port 仅返回该 port 绑定 provider 的模型列表。老 `config.yaml` 不写 `providers`/`ports` 时通过 `normalize_legacy_config` 自动迁移到新结构（双端口都打 DeepSeek，向后兼容）。
+
+**Writing-port 加权模型桶**（v0.4+）：port 可选配 `model_pool`（`PortBinding.model_pool`），逐请求加权随机选一个 `(provider, model)`，跨 deepseek/mimo 家族轮询（无会话粘滞）。选择在 `main.py::_binding_for_request` 完成、覆盖 `body["model"]` 后进入既有 `prepare_request` 管道：flash 起始仍可被 BERT/启发式升格，pro 起始 pin 在 pro。条目 model 必须是该 provider 的 flash/pro（`ProxyConfig` 加载期校验）。pool 配置时 `/v1/models` 返回池内 provider 家族并集。见 `deep_proxy/pool.py`。
+
+**Per-port 动态阈值控制器**（v0.4+）：`flash_upgrade.dynamic_threshold` 闭环反馈调整 `router_threshold`/`heuristic_threshold`，在配置值 ±`band` 带内浮动，把**仅升格可及请求**（flash 起始；不含 pool 直接 pro / sentinel / throttle / persist 命中）的升格率驱动到 `1-flash_floor`（默认 40% flash 均衡）。每 port 独立 `DynamicThresholdController`（滑动窗口 + 比例控制 + 暖机），`controller=None` 时行为与历史完全等价。见 `deep_proxy/optimization/dynamic_threshold.py`。
 
 **Cross-Consult**（可选 v0.3+）：启用后向请求注入虚拟工具 `cross_consult`，agent 可调用它向异家族 provider 的 pro 模型请求第二视角；DeepProxy 在响应路径拦截 tool_use、代为执行、把结果以 tool_result 注入会话后重发原 provider。`pairs` map 双向声明对偶关系（无主副层级）。默认 disabled，须显式开启。启用后流式 endpoint 对客户端真流式：content/reasoning 逐 token 透传、cross_consult 工具帧被抑制、consult 执行间隙发 SSE keep-alive 心跳（`stream_heartbeat_seconds`）；首 chunk prefill 与 inter-chunk idle 用独立超时预算（`first_chunk_timeout_seconds` / `call_timeout_seconds`）。见 `docs/mimo_integration.md` §12、`docs/superpowers/plans/2026-05-28-cross-consult.md` 与 `docs/superpowers/specs/2026-05-30-cross-consult-client-streaming-design.md`。
 

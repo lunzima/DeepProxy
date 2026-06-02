@@ -64,6 +64,7 @@ from .cross_consult.client_stream import (
     stream_cross_consult_continuation,
     stream_one_turn,
 )
+from .optimization.dynamic_threshold import DynamicThresholdController
 from .optimization.flash_upgrade import (
     RepeatUpgradeThrottle,
     UpgradeTracker,
@@ -104,6 +105,8 @@ class DeepProxyRouter:
         )
         # cross_consult 标签触发的整轮 provider 重定向跟踪器
         self._redirect_tracker = RedirectTracker()
+        # Per-port 动态阈值控制器注册表（惰性创建，仅 dynamic_threshold.enabled 时）
+        self._threshold_controllers: dict[int, DynamicThresholdController] = {}
         # LLM-based system prompt 压缩器（持久化磁盘缓存）
         # 复用 PreciseSamplingConfig 的采样预设：高确定性 + 微抖动，最适合
         # 同义改写类任务（确定性是主要诉求，微随机仅供并行重试）
@@ -178,6 +181,7 @@ class DeepProxyRouter:
         *,
         sampling_profile: Any = None,
         provider: Provider | None = None,  # None 时走 deepseek 兼容行为
+        port: int | None = None,           # 入站端口；解析 per-port 动态阈值控制器
     ) -> dict[str, Any]:
         """聊天补全请求预处理管道。
 
@@ -245,7 +249,7 @@ class DeepProxyRouter:
         #     provider=None 时退回老路径（仅匹配硬编码 V4_FLASH）。
         upgrade_target = provider.flash_model if provider is not None else V4_FLASH
         if self.config.flash_upgrade.enabled and model == upgrade_target:
-            self._maybe_upgrade(body, provider=provider)
+            self._maybe_upgrade(body, provider=provider, controller=self._controller_for_port(port))
             model = body.get("model", "")
 
         # 1. 默认 reasoning_effort 注入（仅当未显式 disabled 且未指定）
@@ -409,6 +413,23 @@ class DeepProxyRouter:
     # Flash→Pro 升格路由（Layer 0–3）
     # ------------------------------------------------------------------
 
+    def _controller_for_port(self, port: int | None) -> DynamicThresholdController | None:
+        """按 port 惰性取/建动态阈值控制器；未启用或 port 为 None 返回 None。"""
+        dt = self.config.flash_upgrade.dynamic_threshold
+        if port is None or not dt.enabled:
+            return None
+        ctrl = self._threshold_controllers.get(port)
+        if ctrl is None:
+            ctrl = DynamicThresholdController(
+                flash_floor=dt.flash_floor,
+                band=dt.band,
+                window=dt.window,
+                kp=dt.kp,
+                min_samples=dt.min_samples,
+            )
+            self._threshold_controllers[port] = ctrl
+        return ctrl
+
     def _build_upgrade_router(self):
         """初始化升格决策器（Layer 0）。"""
         cfg = self.config.flash_upgrade
@@ -431,13 +452,14 @@ class DeepProxyRouter:
         body: dict[str, Any],
         *,
         provider: Provider | None = None,
+        controller: DynamicThresholdController | None = None,
     ) -> None:
         """Flash→Pro 升格路由 — shim 委托给 UpgradeDecisionEngine。
 
-        历史 API 保留（46 个 test_flash_upgrade 用例直接调用本方法）；
-        实际策略实现见 optimization/upgrade_decision.py。
+        历史 API 保留（46 个 test_flash_upgrade 用例直接调用本方法，controller
+        默认 None → 行为不变）；实际策略实现见 optimization/upgrade_decision.py。
         """
-        self._upgrade_engine.apply(body, provider=provider)
+        self._upgrade_engine.apply(body, provider=provider, controller=controller)
 
     def process_response(
         self, response: dict[str, Any], *, provider: Provider | None = None,
@@ -595,12 +617,40 @@ class DeepProxyRouter:
                 return
         yield SSE_DONE
 
-    async def list_models(self, *, provider: Provider | None = None) -> dict[str, Any]:
+    async def _build_provider_models(self, provider: Provider | None) -> list[dict[str, Any]]:
+        """构建单个 provider 的模型条目列表（不含响应外壳）。
+
+        - provider.name == "mimo"：本地 MIMO_MODELS（跳过上游拉取）
+        - provider=None 或 deepseek：上游拉取 + 本地兜底 + 别名/路由合并
+        """
+        if provider is not None and provider.name == "mimo":
+            return build_models_list(raw=[], provider=provider)
+        raw = await fetch_upstream_models(
+            self.config.deepseek.api_key,
+            self.config.deepseek.api_base,
+            self._get_http_client(),
+        )
+        return build_models_list(
+            raw,
+            expose_legacy_models=self.config.deepseek.expose_legacy_models,
+            model_routes=self._model_routes_dicts,
+            provider=provider,
+        )
+
+    async def list_models(
+        self,
+        *,
+        provider: Provider | None = None,
+        pool_providers: list[Provider] | None = None,
+    ) -> dict[str, Any]:
         """列出可用模型（同时兼容 OpenAI / OpenRouter / Anthropic 三种生态）。
 
         provider 给定时按 provider 派发列表：
           - provider.name == "mimo"：跳过上游拉取，直接用本地 MIMO_MODELS
           - provider=None 或 provider.name == "deepseek"：现有行为（上游拉取 + 本地兜底）
+
+        pool_providers 给定时（writing-port 配置了 model_pool）：列出池内各 provider
+        家族的**并集**，按 home provider（provider 参数）优先排序、按 id 去重。
 
         优先从 DeepSeek 上游 `GET /v1/models` 拉取真实清单；上游不可用时退化到
         内置 V4 模型列表（含 `[1m]` 变体）。`expose_legacy_models=True` 会附加老别名；
@@ -609,20 +659,23 @@ class DeepProxyRouter:
         响应同时含 OpenAI 的 `object=list` 和 Anthropic 的 `first_id/last_id/has_more`
         分页字段；条目层 normalize_model_entry 同时输出两套生态字段。
         """
-        if provider is not None and provider.name == "mimo":
-            models = build_models_list(raw=[], provider=provider)
+        if pool_providers:
+            # home 优先，其余按给定顺序追加（按 name 去重 provider）
+            ordered_provs: list[Provider] = []
+            seen_names: set[str] = set()
+            for p in ([provider] if provider is not None else []) + list(pool_providers):
+                if p is not None and p.name not in seen_names:
+                    ordered_provs.append(p)
+                    seen_names.add(p.name)
+            models = []
+            seen_ids: set[str] = set()
+            for p in ordered_provs:
+                for m in await self._build_provider_models(p):
+                    if m["id"] not in seen_ids:
+                        models.append(m)
+                        seen_ids.add(m["id"])
         else:
-            raw = await fetch_upstream_models(
-                self.config.deepseek.api_key,
-                self.config.deepseek.api_base,
-                self._get_http_client(),
-            )
-            models = build_models_list(
-                raw,
-                expose_legacy_models=self.config.deepseek.expose_legacy_models,
-                model_routes=self._model_routes_dicts,
-                provider=provider,
-            )
+            models = await self._build_provider_models(provider)
         return {
             # OpenAI 列表标识
             "object": "list",

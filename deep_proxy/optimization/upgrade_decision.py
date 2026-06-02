@@ -31,6 +31,9 @@ from .flash_upgrade import (
 
 logger = logging.getLogger(__name__)
 
+# heuristic 阈值动态缩放后的下钳裕度：保住 heuristic > downgrade 的 hysteresis 不变式
+_HEUR_EPS = 0.01
+
 
 @dataclass(frozen=True)
 class _ProviderParams:
@@ -70,13 +73,24 @@ class UpgradeDecisionEngine:
 
     # ------------------------------------------------------------------ entry
 
-    def apply(self, body: Dict[str, Any], *, provider: Optional[Provider] = None) -> None:
+    def apply(
+        self,
+        body: Dict[str, Any],
+        *,
+        provider: Optional[Provider] = None,
+        controller: Optional[Any] = None,
+    ) -> None:
         """根据 5 步策略 mutate body['model']；升格时同步 stash pending commit。
 
-        与原 router._maybe_upgrade 行为完全等价（API 不变）。
+        与原 router._maybe_upgrade 行为完全等价（controller=None 时 API 不变）。
+
+        controller: DynamicThresholdController | None。给定时：
+          - 阈值在决策前乘以 controller.factor（±band 浮动）
+          - 仅 Step 3/4 阈值驱动决策在末尾 controller.record(did_upgrade)
+            （sentinel/cooldown/persist 命中短路前不记录）
         """
         messages = body.get("messages", [])
-        params = self._resolve_params(provider)
+        params = self._resolve_params(provider, controller)
 
         # 短路链：任一 step 返回 True 表示已 mutate body + 决定完成
         if self._step_sentinel(body, messages, params):
@@ -89,29 +103,42 @@ class UpgradeDecisionEngine:
         # 拆两步避免单步既能"清+落+短路"又能"清+不短路"的混乱语义。
         if self._step_persist_cache_hit(body, messages, params):
             return
-        self._step_compute_and_commit(body, messages, params)
+        self._step_compute_and_commit(body, messages, params, controller)
 
     # ----------------------------------------------------------- step helpers
 
-    def _resolve_params(self, provider: Optional[Provider]) -> _ProviderParams:
+    def _resolve_params(
+        self, provider: Optional[Provider], controller: Optional[Any] = None,
+    ) -> _ProviderParams:
         cfg = self._cfg
         if provider is not None:
-            return _ProviderParams(
-                pro_model=provider.pro_model,
-                flash_model=provider.flash_model,
-                provider_name=provider.name,
-                router_thr=cfg.threshold_for_provider(provider.name, "router_threshold"),
-                heur_thr=cfg.threshold_for_provider(provider.name, "heuristic_threshold"),
-                downgrade_thr=cfg.threshold_for_provider(provider.name, "downgrade_threshold"),
+            router_thr = cfg.threshold_for_provider(provider.name, "router_threshold")
+            heur_thr = cfg.threshold_for_provider(provider.name, "heuristic_threshold")
+            downgrade_thr = cfg.threshold_for_provider(provider.name, "downgrade_threshold")
+            pro_model, flash_model, provider_name = (
+                provider.pro_model, provider.flash_model, provider.name,
             )
-        # provider=None 兜底：硬编码 V4 默认 + 全局阈值（与原实现一致）
+        else:
+            # provider=None 兜底：硬编码 V4 默认 + 全局阈值（与原实现一致）
+            router_thr = cfg.router_threshold
+            heur_thr = cfg.heuristic_threshold
+            downgrade_thr = cfg.downgrade_threshold
+            pro_model, flash_model, provider_name = V4_PRO, V4_FLASH, "deepseek"
+
+        # 动态阈值：决策前乘以 controller.factor（±band），并钳制。
+        # router 钳到 [0,1]；heuristic 钳到 (downgrade, 10] 以保住 hysteresis 不变式。
+        if controller is not None:
+            f = controller.factor
+            router_thr = min(1.0, max(0.0, router_thr * f))
+            heur_thr = min(10.0, max(downgrade_thr + _HEUR_EPS, heur_thr * f))
+
         return _ProviderParams(
-            pro_model=V4_PRO,
-            flash_model=V4_FLASH,
-            provider_name="deepseek",
-            router_thr=cfg.router_threshold,
-            heur_thr=cfg.heuristic_threshold,
-            downgrade_thr=cfg.downgrade_threshold,
+            pro_model=pro_model,
+            flash_model=flash_model,
+            provider_name=provider_name,
+            router_thr=router_thr,
+            heur_thr=heur_thr,
+            downgrade_thr=downgrade_thr,
         )
 
     def _stash_pending(
@@ -199,7 +226,7 @@ class UpgradeDecisionEngine:
 
     def _step_compute_and_commit(
         self, body: Dict[str, Any], messages: List[Dict[str, Any]],
-        params: _ProviderParams,
+        params: _ProviderParams, controller: Optional[Any] = None,
     ) -> None:
         """Steps 3-5：启发式 + Router + throttle 提交。
 
@@ -253,3 +280,8 @@ class UpgradeDecisionEngine:
         if did_upgrade:
             body["model"] = params.pro_model
             self._stash_pending(body, messages, params)
+
+        # 动态阈值控制器：仅此处（阈值驱动决策）记录最终 served 结果。
+        # sentinel/cooldown/persist 命中在 apply 短路前返回，不到这里。
+        if controller is not None:
+            controller.record(did_upgrade)

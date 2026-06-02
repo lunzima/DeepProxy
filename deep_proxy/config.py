@@ -9,7 +9,7 @@ from typing import List, Optional
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from .providers import Provider, PortBinding
+from .providers import Provider, PortBinding, PoolEntry
 from .cross_consult import CrossConsultConfig
 
 
@@ -272,6 +272,28 @@ class OptimizationConfig(BaseModel):
     )
 
 
+class DynamicThresholdConfig(BaseModel):
+    """Per-port 动态阈值控制器配置（闭环反馈）。
+
+    把 BERT/启发式升格阈值在配置值 ±band 带内浮动，使**阈值驱动**的升格率收敛到
+    target = 1 - flash_floor，保证快速模型份额不低于 flash_floor。全局生效
+    （一份配置应用到每个 port，各 port 独立窗口/f 状态）。
+    """
+
+    enabled: bool = Field(default=True, description="是否启用动态阈值控制器")
+    flash_floor: float = Field(
+        default=0.40, gt=0.0, lt=1.0,
+        description="均衡点 flash 份额（仅升格可及请求母体）。控制器把升格率驱动到 1-flash_floor。",
+    )
+    band: float = Field(
+        default=0.20, ge=0.0, le=1.0,
+        description="阈值 ±调整带（相对配置值的乘性浮动幅度，如 0.20 = ±20%）。",
+    )
+    window: int = Field(default=50, ge=1, description="滑动窗口样本数")
+    kp: float = Field(default=0.5, gt=0.0, description="比例增益")
+    min_samples: int = Field(default=10, ge=1, description="暖机阈值：样本不足时 f=1.0")
+
+
 class FlashUpgradeConfig(BaseModel):
     """Flash→Pro 选择性升格（默认启用，四层架构）。
 
@@ -328,6 +350,10 @@ class FlashUpgradeConfig(BaseModel):
         default_factory=dict,
         description="按 provider 名覆盖阈值，如 {'mimo': {'router_threshold': 0.65}}。"
                     "未覆盖的字段 fallback 到顶层默认值。",
+    )
+    dynamic_threshold: DynamicThresholdConfig = Field(
+        default_factory=DynamicThresholdConfig,
+        description="Per-port 动态阈值控制器（闭环反馈，把升格率驱动到 1-flash_floor）。",
     )
 
     def threshold_for_provider(self, provider_name: str, key: str) -> float:
@@ -521,6 +547,39 @@ class ProxyConfig(BaseModel):
         description="Cross-Consult 虚拟工具配置（默认 disabled）。"
                     "见 docs/mimo_integration.md §12。",
     )
+
+    @model_validator(mode="after")
+    def _validate_model_pools(self):
+        """校验每个 port 的 model_pool 条目：provider 存在 + model 是该 provider
+        的 flash_model 或 pro_model（保证升格语义良定：flash→可升格，pro→pin）。
+
+        在 providers 字典就绪后运行（mode=after）。fail-fast：违反即抛 ValueError。
+        """
+        for binding in self.ports:
+            pool = binding.model_pool
+            if not pool:
+                continue
+            for entry in pool:
+                prov = self.providers.get(entry.provider)
+                if prov is None:
+                    raise ValueError(
+                        f"port {binding.port} 的 model_pool 引用了未知 provider "
+                        f"'{entry.provider}'（providers 中不存在）"
+                    )
+                if entry.model not in (prov.flash_model, prov.pro_model):
+                    raise ValueError(
+                        f"port {binding.port} 的 model_pool 条目 model='{entry.model}' "
+                        f"必须是 provider '{entry.provider}' 的 flash_model "
+                        f"({prov.flash_model}) 或 pro_model ({prov.pro_model})"
+                    )
+        return self
+
+    def binding_for_port(self, port: int) -> PortBinding | None:
+        """按入站端口查找 PortBinding；端口未配置返回 None。"""
+        for binding in self.ports:
+            if binding.port == port:
+                return binding
+        return None
 
     def provider_for_port(self, port: int) -> Provider | None:
         """按入站端口查找绑定的 Provider；端口未配置返回 None。"""

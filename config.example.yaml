@@ -52,8 +52,16 @@ ports:
     provider: deepseek
     sampling: precise
   - port: 8001              # → creative_sampling（高多样性，RP/创作/通用写作）
-    provider: mimo          # 不用 MiMo 时改回 deepseek
+    provider: mimo          # home provider：/v1/models 默认 + pool 兜底；不用 MiMo 时改回 deepseek
     sampling: creative
+    # （可选）加权模型桶：逐请求加权随机选 (provider, model)，跨 provider 家族轮询。
+    # flash 起始 → BERT/启发式可升格；pro 起始 → pin 在 pro。删除整个 model_pool 块
+    # 即退回单一 provider 路由。每个条目的 model 必须是该 provider 的 flash_model 或 pro_model。
+    model_pool:
+      - { provider: deepseek, model: deepseek-v4-flash, weight: 1 }
+      - { provider: mimo,     model: mimo-v2.5,         weight: 1 }
+      - { provider: deepseek, model: deepseek-v4-pro,   weight: 1 }
+      - { provider: mimo,     model: mimo-v2.5-pro,     weight: 1 }
 
 # ============================================================
 # Cross-Consult 双家族机制（默认开启）
@@ -189,6 +197,16 @@ flash_upgrade:
       router_threshold: 0.60            # MiMo flash 略弱于 V4-flash，温和偏向升格
       heuristic_threshold: 7.5          # 启发式门槛同步前移（hysteresis gap=2.5）
       downgrade_threshold: 5.0          # 与全局一致
+  # Per-port 动态阈值控制器（闭环反馈，默认开启）：把 router/heuristic 阈值在配置值 ±band
+  # 带内浮动，使"仅升格可及请求"母体（不含 pool 直接选中的 pro / sentinel / throttle /
+  # persist 命中）的升格率收敛到 1-flash_floor，保证快速模型份额不低于 flash_floor。
+  dynamic_threshold:
+    enabled: true
+    flash_floor: 0.40                   # 均衡点 flash 份额（可调，0<x<1）
+    band: 0.20                          # 阈值 ±调整带（可调，如 0.20=±20%）
+    window: 50                          # 滑动窗口样本数（可调）
+    kp: 0.5                             # 比例增益（可调）
+    min_samples: 10                     # 暖机阈值：样本不足时 f=1.0（可调）
 
 # ============================================================
 # 模型路由（可选）：自定义模型名映射
