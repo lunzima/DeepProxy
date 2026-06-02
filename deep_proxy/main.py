@@ -78,6 +78,20 @@ async def lifespan(app: FastAPI):
         config.host, config.writing_port,
         config.optimization.writing_basket_kind,
     )
+    # 启动诊断横幅：明确打印加载到的配置里每个 port 的 model_pool 状态，
+    # 便于确认运行进程到底加载了哪份配置（排查 round-robin 未生效）。
+    for _b in config.ports:
+        _pool = [(e.provider, e.model, e.weight) for e in (_b.model_pool or [])]
+        logger.info(
+            "[startup] port=%s provider=%s sampling=%s model_pool=%s",
+            _b.port, _b.provider, _b.sampling,
+            _pool if _pool else "（无）",
+        )
+    _dt = config.flash_upgrade.dynamic_threshold
+    logger.info(
+        "[startup] dynamic_threshold enabled=%s flash_floor=%s band=%s",
+        _dt.enabled, _dt.flash_floor, _dt.band,
+    )
 
     yield
 
