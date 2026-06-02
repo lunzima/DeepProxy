@@ -32,8 +32,12 @@ _UNSUPPORTED_OPENAI_PARAMS = {
 }
 
 
-def map_litellm_error(exc: Exception) -> HTTPException:
-    """将 LiteLLM 异常映射为标准的 OpenAI 格式 HTTP 错误。"""
+def litellm_error_to_dict(exc: Exception) -> tuple[int, Dict[str, object]]:
+    """映射 LiteLLM 异常 → (status_code, OpenAI 形状 error dict)。
+
+    单一映射源：map_litellm_error 包成 HTTPException，流式路径的 _build_error_dict 直接
+    取 dict（无需构造 HTTPException 再拆）。
+    """
     status_code = 500
     error_type = "api_error"
     message = str(exc)
@@ -51,17 +55,15 @@ def map_litellm_error(exc: Exception) -> HTTPException:
         status_code = exc.status_code or 500
         error_type = _DEEPSEEK_ERROR_MAP.get(status_code, (500, "api_error"))[1]
 
-    return HTTPException(
-        status_code=status_code,
-        detail={
-            "error": {
-                "message": message,
-                "type": error_type,
-                "param": None,
-                "code": status_code,
-            }
-        },
-    )
+    return status_code, {
+        "message": message, "type": error_type, "param": None, "code": status_code,
+    }
+
+
+def map_litellm_error(exc: Exception) -> HTTPException:
+    """将 LiteLLM 异常映射为标准的 OpenAI 格式 HTTP 错误。"""
+    status_code, error = litellm_error_to_dict(exc)
+    return HTTPException(status_code=status_code, detail={"error": error})
 
 
 def strip_unsupported_params(body: dict) -> dict:

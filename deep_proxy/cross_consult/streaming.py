@@ -22,7 +22,7 @@ from typing import Any, AsyncGenerator, Awaitable, Callable
 from ..config import ProxyConfig
 from ..litellm_client import iter_litellm_chunks
 from ..providers import Provider
-from ..utils import merge_tool_call_deltas
+from ..utils import is_error_frame, merge_tool_call_deltas
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ async def aggregate_stream_to_response(
             }
         chunk_count += 1
 
-        if isinstance(chunk.get("error"), dict) and not chunk.get("choices"):
+        if is_error_frame(chunk):
             err = chunk["error"]
             msg = err.get("message") if isinstance(err, dict) else None
             return {"_dp_error": msg or str(err)}

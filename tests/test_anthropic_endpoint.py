@@ -7,6 +7,7 @@ import pytest
 
 from deep_proxy.compatibility.anthropic_translator import (
     claude_request_to_openai,
+    openai_error_to_claude,
     openai_response_to_claude,
     openai_stream_to_claude,
 )
@@ -488,6 +489,48 @@ class TestOpenAIStreamToClaude:
                            if _parse_event(e)[0] == "error")
         assert err_payload["error"]["message"] == "boom"
 
+    async def test_streaming_error_inner_shape_normalized_to_anthropic(self):
+        """流式上游错误帧（iter_litellm_chunks 产出 OpenAI 形状 {message,type,param,code}）
+        翻成 Anthropic error 事件时,内层须规范化为 {type,message},不泄漏 param/code
+        （与非流式 openai_error_to_claude 路径一致——端点趋同）。"""
+        async def fake():
+            yield {"error": {"message": "boom", "type": "rate_limit_error",
+                             "param": None, "code": 429}}
+
+        events = await _collect(openai_stream_to_claude(fake(), requested_model="x"))
+        err = next(_parse_event(e)[1] for e in events
+                   if _parse_event(e)[0] == "error")
+        assert err["type"] == "error"
+        assert err["error"] == {"type": "rate_limit_error", "message": "boom"}
+        assert "param" not in err["error"]
+        assert "code" not in err["error"]
+
+    async def test_error_after_open_text_block_closes_block_first(self):
+        """流中途错误（已有未关闭的 text block）：规范化——先发 content_block_stop
+        配对已开的块，再发 error 事件。保证 SSE 块结构平衡（每个 start 配对 stop），
+        与 OpenAI 端点 data:{error}+[DONE] 的干净终止行为趋同。"""
+        async def fake():
+            yield {"choices": [{"delta": {"content": "part"}, "index": 0}]}
+            yield {"error": {"message": "boom", "type": "api_error"}}
+
+        events = await _collect(openai_stream_to_claude(fake(), requested_model="x"))
+        names = [_parse_event(e)[0] for e in events]
+        assert names.count("content_block_start") == names.count("content_block_stop")
+        # content_block_stop 必须在 error 之前
+        assert "error" in names
+        assert names.index("content_block_stop") < names.index("error")
+
+    async def test_error_after_open_thinking_block_closes_block_first(self):
+        """reasoning 块未关时错误：同样先关 thinking 块再发 error。"""
+        async def fake():
+            yield {"choices": [{"delta": {"reasoning_content": "think"}, "index": 0}]}
+            yield {"error": {"message": "boom", "type": "api_error"}}
+
+        events = await _collect(openai_stream_to_claude(fake(), requested_model="x"))
+        names = [_parse_event(e)[0] for e in events]
+        assert names.count("content_block_start") == names.count("content_block_stop")
+        assert names.index("content_block_stop") < names.index("error")
+
     async def test_heartbeat_translated_to_ping_event(self):
         """cross_consult 心跳哨兵 → Anthropic ping 事件（保持连接温热）。"""
         async def fake():
@@ -598,3 +641,70 @@ class TestOpenAIStreamToClaude:
         # 期间应有 thinking 的 content_block_stop
         between = parsed[thinking_delta_idx:text_delta_idx]
         assert any(n == "content_block_stop" for n, _ in between)
+
+
+class TestOpenAIErrorToClaude:
+    """非流式上游错误体 OpenAI 形状 → Anthropic 形状（端点行为趋同：
+    /v1/messages 上游错误须返回 Anthropic 错误体，而非泄漏 OpenAI 形状）。"""
+
+    def test_reshapes_openai_error_envelope(self):
+        detail = {"error": {"message": "rate limited", "type": "rate_limit_error",
+                            "param": None, "code": 429}}
+        out = openai_error_to_claude(detail)
+        assert out == {"type": "error",
+                       "error": {"type": "rate_limit_error", "message": "rate limited"}}
+
+    def test_string_detail_wrapped_as_api_error(self):
+        out = openai_error_to_claude("代理未就绪")
+        assert out["type"] == "error"
+        assert out["error"]["type"] == "api_error"
+        assert out["error"]["message"] == "代理未就绪"
+
+    def test_idempotent_on_anthropic_shape(self):
+        already = {"type": "error", "error": {"type": "api_error", "message": "x"}}
+        assert openai_error_to_claude(already) == already
+
+
+class TestAnthropicEndpointUpstreamErrorShape:
+    """端点级：/v1/messages 非流式上游错误（map_litellm_error 产出 OpenAI 形状
+    HTTPException）必须以 Anthropic 错误体返回、状态码保持不变。"""
+
+    def setup_method(self):
+        from fastapi.testclient import TestClient
+        from fastapi import HTTPException
+        from deep_proxy import main as main_mod
+        from deep_proxy.config import DeepSeekConfig, ProxyConfig
+        from deep_proxy.main import app
+        from deep_proxy.router import DeepProxyRouter
+
+        cfg = ProxyConfig(
+            api_key=None,  # 关闭代理鉴权，专注错误体形状
+            deepseek=DeepSeekConfig(api_key="sk-upstream", api_base="https://api.deepseek.com"),
+        )
+        main_mod.config = cfg
+        main_mod.router = DeepProxyRouter(cfg)
+        self._main_mod = main_mod
+        self._HTTPException = HTTPException
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    def test_upstream_429_returns_anthropic_error_body(self):
+        async def _raise(*a, **k):
+            raise self._HTTPException(
+                status_code=429,
+                detail={"error": {"message": "rate limited", "type": "rate_limit_error",
+                                  "param": None, "code": 429}},
+            )
+
+        self._main_mod.router.chat_completions = _raise
+        r = self.client.post(
+            "/v1/messages",
+            json={"model": "claude-x", "max_tokens": 16,
+                  "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 429
+        body = r.json()
+        # Anthropic 形状：顶层 type=error + error.{type,message}，不含 OpenAI 的 param/code
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "rate_limit_error"
+        assert body["error"]["message"] == "rate limited"
+        assert "param" not in body["error"]

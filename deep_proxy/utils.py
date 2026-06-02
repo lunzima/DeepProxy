@@ -356,8 +356,26 @@ def conversation_fingerprint(messages: List[Dict[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 流式协议常量
+# 流式协议常量 / 帧谓词
 # ---------------------------------------------------------------------------
 
 SSE_DONE = "data: [DONE]\n\n"
 """OpenAI SSE 协议流结束标记。"""
+
+
+def is_error_frame(chunk: Dict[str, Any]) -> bool:
+    """OpenAI 风格纯错误终止帧判定：error 是 dict 且无 choices。
+
+    iter_litellm_chunks 在上游错误时产出 {"error": {...}}（无 choices）。这是项目内
+    "错误帧"的唯一规范判定，供所有流式消费/序列化方复用，避免裸字面量散布多处。
+    """
+    return isinstance(chunk.get("error"), dict) and not chunk.get("choices")
+
+
+def is_heartbeat(chunk: Dict[str, Any]) -> bool:
+    """心跳哨兵帧判定（`{"_dp_heartbeat": True}`）。
+
+    client_stream 在等待间隙产出心跳，协议层据此发 SSE 注释帧 / Anthropic ping。
+    判定集中于此，避免键名 `_dp_heartbeat` 在多个协议层硬编码。
+    """
+    return bool(chunk.get("_dp_heartbeat"))

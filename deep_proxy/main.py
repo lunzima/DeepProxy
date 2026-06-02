@@ -116,6 +116,39 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(HTTPException)
+async def _clean_http_exception_handler(request: Request, exc: HTTPException):
+    """端点错误体形状趋同：让每个端点返回**协议干净**的错误体。
+
+    各 raise 处已构造好协议正确的 dict detail（OpenAI 形状 {"error":{...}} /
+    Anthropic 形状 {"type":"error","error":{...}}）。FastAPI 默认会把它再包一层
+    {"detail": ...}，导致两端的 SDK 都无法解析错误（且把分歧藏在内层）。这里直接
+    把 detail 作为顶层响应体返回，去掉包裹。
+
+    **Anthropic 端点（/v1/messages）统一收敛为 Anthropic 形状**：这是所有 raise 点
+    （auth / 503 未就绪 / prepare_request / 上游 chat_completions 等）的单一汇聚处，
+    比逐端点 try/except 更可靠——prepare_request 在 try 之外抛错也能被覆盖。
+    openai_error_to_claude 对已是 Anthropic 形状的 detail 幂等、对字符串 detail 包成
+    api_error，故无论 detail 原形状如何，Anthropic 客户端总拿到合规错误体。
+
+    其余端点：dict detail 原样作顶层返回；非 dict（纯字符串）保留 {"detail": ...}。
+    """
+    from .compatibility.anthropic_translator import openai_error_to_claude
+
+    detail = exc.detail
+    headers = getattr(exc, "headers", None)
+    if request.url.path.startswith("/v1/messages"):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=openai_error_to_claude(detail), headers=headers,
+        )
+    if isinstance(detail, dict):
+        return JSONResponse(status_code=exc.status_code, content=detail, headers=headers)
+    return JSONResponse(
+        status_code=exc.status_code, content={"detail": detail}, headers=headers,
+    )
+
+
 def _mask(token: str) -> str:
     """掩码 token 用于诊断日志：保留前 6 + 后 2 字符，中间打码。"""
     if not token:
@@ -185,6 +218,20 @@ def _ensure_router_ready():
     """检查路由器是否就绪，未就绪则返回 503。"""
     if router is None:
         raise HTTPException(status_code=503, detail="代理未就绪")
+
+
+def _internal_error_openai(e: Exception) -> HTTPException:
+    """内部错误 → OpenAI 形状 500 HTTPException。
+
+    两端点的 except Exception 统一用本工厂：Anthropic 端点的 500 经全局
+    _clean_http_exception_handler 按 /v1/messages 路径收敛为 Anthropic 形状，故无需在
+    端点内各写一份形状。
+    """
+    return HTTPException(
+        status_code=500,
+        detail={"error": {"message": f"内部错误: {e}", "type": "api_error",
+                          "param": None, "code": 500}},
+    )
 
 
 def _extract_bearer_token(auth_header: str) -> str | None:
@@ -319,17 +366,18 @@ def _maybe_redirect_provider(body, provider):
     return redirected if redirected is not None else provider
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
-    """聊天补全端点（完全 OpenAI 兼容）。
+async def _prepare_inbound(
+    request: Request, body: Dict[str, Any],
+) -> tuple[Any, Dict[str, Any], bool]:
+    """两端点共享的入站流水：binding → pool model 覆盖 → telemetry 剥离 → redirect →
+    pool tier reconcile → prepare_request。返回 (provider, prepared_body, is_stream)。
 
-    根据入站端口选择采样 profile 并强制覆盖 body 中的 4 个采样参数
-    （temperature / top_p / presence_penalty / frequency_penalty）。
+    `body` 被原地改写（model 覆盖 + telemetry 剥离）；但 prepare_request 返回**新** dict，
+    故 prepared body 经返回值传出——调用方必须使用返回值，不能依赖原地修改。
+
+    OpenAI 端点传入原始 OpenAI body；Anthropic 端点传入 claude_request_to_openai 后的
+    openai_body——本 helper 只操作"一个 OpenAI 形状 body dict"，对其来源无感知。
     """
-    await _check_api_key(request)
-    _ensure_router_ready()
-
-    body: Dict[str, Any] = await request.json()
     provider, sampling, port, selected_model = _binding_for_request(request)
     # pool 选中的模型覆盖客户端请求的 model（逐请求重掷）
     if selected_model is not None:
@@ -346,10 +394,24 @@ async def chat_completions(request: Request):
         body["model"] = reconcile_redirected_pool_model(
             selected_model, pre_redirect_provider, provider,
         )
-    body = await router.prepare_request(
+    prepared = await router.prepare_request(
         body, sampling_profile=sampling, provider=provider, port=port,
     )
-    is_stream = body.get("stream", False)
+    return provider, prepared, prepared.get("stream", False)
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    """聊天补全端点（完全 OpenAI 兼容）。
+
+    根据入站端口选择采样 profile 并强制覆盖 body 中的 4 个采样参数
+    （temperature / top_p / presence_penalty / frequency_penalty）。
+    """
+    await _check_api_key(request)
+    _ensure_router_ready()
+
+    body: Dict[str, Any] = await request.json()
+    provider, body, is_stream = await _prepare_inbound(request, body)
 
     if is_stream:
         return StreamingResponse(
@@ -364,11 +426,7 @@ async def chat_completions(request: Request):
         raise
     except Exception as e:
         logger.error("请求处理异常: %s", str(e))
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"message": f"内部错误: {str(e)}", "type": "api_error",
-                              "param": None, "code": 500}},
-        ) from e
+        raise _internal_error_openai(e) from e
 
 
 @app.post("/v1/messages")
@@ -392,24 +450,7 @@ async def anthropic_messages(request: Request):
     requested_model = anthropic_body.get("model", "")
 
     openai_body = claude_request_to_openai(anthropic_body)
-    provider, sampling, port, selected_model = _binding_for_request(request)
-    # pool 选中的模型覆盖客户端请求的 model（逐请求重掷）
-    if selected_model is not None:
-        openai_body["model"] = selected_model
-    # telemetry 剥离 + cross_consult 标签重定向（顺序同 OpenAI 端点）
-    _strip_telemetry_if_enabled(openai_body)
-    pre_redirect_provider = provider
-    provider = _maybe_redirect_provider(openai_body, provider)
-    # redirect 切换 provider 后保持 pool tier（同 OpenAI 端点）
-    if selected_model is not None:
-        from .pool import reconcile_redirected_pool_model
-        openai_body["model"] = reconcile_redirected_pool_model(
-            selected_model, pre_redirect_provider, provider,
-        )
-    openai_body = await router.prepare_request(
-        openai_body, sampling_profile=sampling, provider=provider, port=port,
-    )
-    is_stream = openai_body.get("stream", False)
+    provider, openai_body, is_stream = await _prepare_inbound(request, openai_body)
 
     if is_stream:
         async def _claude_sse():
@@ -427,13 +468,11 @@ async def anthropic_messages(request: Request):
         )
         return JSONResponse(content=claude_result)
     except HTTPException:
+        # 形状收敛交给全局 _clean_http_exception_handler（按 /v1/messages 路径统一改写成
+        # Anthropic 形状）。这里仅原样上抛——务必先于下面的 except Exception，否则
+        # HTTPException 会被当成内部错误吞成 500、丢失原状态码。
         raise
     except Exception as e:
         logger.error("Anthropic 请求处理异常: %s", str(e))
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "type": "error",
-                "error": {"type": "api_error", "message": f"内部错误: {str(e)}"},
-            },
-        ) from e
+        # OpenAI 形状工厂；全局 handler 按 /v1/messages 收敛成 Anthropic 形状。
+        raise _internal_error_openai(e) from e

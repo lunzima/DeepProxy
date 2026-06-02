@@ -522,6 +522,33 @@ def normalize_legacy_config(raw: dict) -> dict:
     return raw
 
 
+class StreamingConfig(BaseModel):
+    """普通（非 cross_consult）流式路径的 idle 超时守护配置。
+
+    cross_consult 路径用 CrossConsultConfig 的同名字段，本配置只管 cc 未激活时的
+    直通流式。两套超时刻意独立：cc 重发携带更大上下文，TTFT 预算需求不同。
+
+    超时**不报错**：触发后注入一条"上游超时、可重试"的 assistant content + clean
+    finish，让主 agent 知道而非静默收到空轮后停止（见 client_stream 根因修复）。
+    """
+
+    first_chunk_timeout_seconds: int = Field(
+        default=120, ge=1, le=600,
+        description="等待首个 chunk（prefill / TTFT + 推理预热）的上限秒数。超出视为"
+                    "上游繁忙/网络慢 → 注入优雅超时通知并收尾（非错误）。",
+    )
+    idle_timeout_seconds: int = Field(
+        default=30, ge=1, le=600,
+        description="首 chunk 之后相邻 chunk 间允许的最长无活动秒数（mid-stream hang "
+                    "tripwire）。超出 → 注入优雅超时通知并收尾（非错误）。",
+    )
+    heartbeat_seconds: int = Field(
+        default=10, ge=1, le=120,
+        description="等待间隙发送 SSE keep-alive 注释帧 / Anthropic ping 的间隔秒数，"
+                    "保持连接温热、防客户端 idle-read 超时。须显著小于客户端读超时。",
+    )
+
+
 class ProxyConfig(BaseModel):
     """代理服务器主配置。"""
 
@@ -556,6 +583,10 @@ class ProxyConfig(BaseModel):
         default_factory=CrossConsultConfig,
         description="Cross-Consult 虚拟工具配置（默认 disabled）。"
                     "见 docs/mimo_integration.md §12。",
+    )
+    streaming: StreamingConfig = Field(
+        default_factory=StreamingConfig,
+        description="普通（非 cross_consult）流式路径的 idle 超时守护配置。",
     )
 
     @model_validator(mode="after")

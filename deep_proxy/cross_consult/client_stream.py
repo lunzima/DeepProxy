@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Generic, TypeVar
 
-from ..utils import merge_tool_call_deltas
+from ..utils import is_error_frame, merge_tool_call_deltas
 from ..config import ProxyConfig
 from ..compatibility.reasoning_handler import StreamingReasoningAccumulator
 from ..litellm_client import iter_litellm_chunks
@@ -80,6 +80,12 @@ class TurnResult:
     had_cc_call: bool = False
     finish_reason: str | None = None
     errored: bool = False
+    # 超时专属元数据（区别于上游 error frame）：errored=True 且 timed_out=True 时，
+    # 调用方据 phase/seconds 构造优雅超时通知（make_timeout_notice_frames），
+    # 而非静默返回空轮。timed_out=False 的 errored 表示真实上游 error frame。
+    timed_out: bool = False
+    timeout_phase: str | None = None    # "first_chunk" | "mid_stream"
+    timeout_seconds: float | None = None
 
 
 def _client_facing_chunk(chunk: dict) -> dict | None:
@@ -132,8 +138,8 @@ def _accumulate_turn(chunk: dict, result: TurnResult, tool_name: str) -> None:
 def make_terminal_frame(finish_reason: str | None, tool_calls: list[dict]) -> dict:
     """构造终轮 choice 帧：带 finish_reason（及可选非 cc tool_calls）。
 
-    抽出供三处终轮帧复用：iter_chat_chunks 的 no-cc-call 分支、
-    stream_cross_consult_continuation 的终轮判定与硬轮次上限退出，保证形状一致。
+    供多处终轮帧复用（iter_chat_chunks 的 no-cc-call 分支、stream_cross_consult_continuation
+    的终轮判定与硬轮次上限退出、make_timeout_notice_frames 的收尾帧），保证形状一致。
     """
     delta: dict[str, Any] = {}
     if tool_calls:
@@ -143,6 +149,126 @@ def make_terminal_frame(finish_reason: str | None, tool_calls: list[dict]) -> di
         "delta": delta,
         "finish_reason": finish_reason or "stop",
     }]}
+
+
+def _timeout_notice_text(phase: str | None, seconds: float | None) -> str:
+    """超时优雅通知正文。明确告知主 agent 这是**超时而非错误**、可重试，区分
+    首 chunk 未达（疑似上游繁忙 / prefill 慢）与 mid-stream 停顿（输出中途断流）。"""
+    secs = f"{seconds:g}s" if seconds and seconds > 0 else "超时窗口"
+    if phase == "mid_stream":
+        return (
+            f"[DeepProxy] 上游在输出过程中连续 {secs} 没有新内容，本轮已中断。"
+            "这不是错误，也不是最终答案——上游可能仍在繁忙或网络缓慢。"
+            "请直接重试本次请求以继续。"
+        )
+    return (
+        f"[DeepProxy] 上游在 {secs} 内未返回任何响应（疑似上游繁忙或网络缓慢），本轮已中断。"
+        "这不是错误，也不是最终答案。请直接重试本次请求以继续。"
+    )
+
+
+def make_timeout_notice_frames(result: TurnResult) -> list[dict]:
+    """据 TurnResult 的超时元数据构造**优雅通知帧**：一条 assistant content delta
+    （告知主 agent 上游超时、可重试）+ 一个 finish_reason=stop 终轮帧。
+
+    刻意走 content + clean finish（而非 error frame / HTTP 错误码）：让客户端把它当
+    一次普通完成的 turn 收尾——agent 读到通知文本后自行决定重试，而不是收到空轮后
+    静默停止推理（见本模块修复的根因），也不会因错误码中断会话。
+    """
+    notice = _timeout_notice_text(result.timeout_phase, result.timeout_seconds)
+    return [
+        {"choices": [{"index": 0, "delta": {"content": notice}, "finish_reason": None}]},
+        make_terminal_frame("stop", []),
+    ]
+
+
+@dataclass
+class _Timeout:
+    """consume_with_heartbeat 的超时哨兵：携带 phase（first_chunk / mid_stream）与
+    触发的预算秒数，供调用方写入 TurnResult 并据 phase 构造通知文案。"""
+    phase: str
+    seconds: float
+
+
+async def consume_with_heartbeat(
+    chunk_iter: AsyncIterator[dict],
+    *,
+    idle_timeout: float,
+    first_chunk_timeout: float,
+    heartbeat_seconds: float,
+    log_label: str,
+) -> AsyncGenerator[Any, None]:
+    """共享的"心跳化 idle-timeout 上游消费器"：消费上游 chunk 流并产出三类元素——
+
+      - 上游 chunk dict（原样）
+      - `_HEARTBEAT`（等待间隙的心跳哨兵）
+      - `_Timeout(phase, seconds)`（首 chunk 超 first_chunk_timeout / 相邻 chunk 间隔超
+        idle_timeout；产出后即 return）
+
+    StopAsyncIteration（上游自然结束）→ 静默 return。finally 负责 cancel 仍 in-flight 的
+    `__anext__` task + drain + aclose 上游，确保连接确定性释放（不依赖 GC）。
+
+    本函数只承载 "持久化 __anext__ task + 心跳 tick + first/inter-chunk 预算切换 + 超时
+    检测 + 清理" 这套并发骨架；**per-chunk 处理与超时收尾留给调用方**（stream_one_turn
+    累加/抑制 cc 工具帧并由 router 发通知；stream_with_idle_timeout 原样透传 + finish 短路
+    并内联发通知）。它不写 TurnResult——超时元数据由各调用方据 `_Timeout` 自行写入，
+    使 finish-then-hang 等"超时但不算错"的收尾无副作用。
+
+    **调用方契约**：须在自身 finally 里 `await gen.aclose()` 本生成器，以便任何退出路径
+    （正常 return / 异常 / 消费者断连触发的 GeneratorExit）都能确定性触发这里的 finally
+    清理——`async for` 自身不会自动 aclose 内层生成器。
+
+    与 streaming.aggregate_stream_to_response 的相似是**刻意分叉**，勿合并：后者用
+    asyncio.wait_for（每轮新 task、无心跳、无 waited 累加）内部聚合成 dict，数据流方向相反。
+    """
+    it = chunk_iter.__aiter__() if hasattr(chunk_iter, "__aiter__") else chunk_iter
+    got_first = False
+    # 持久化的 __anext__ task：跨心跳 tick 复用，仅在 chunk 真正到达后才重建，
+    # 避免每次 timeout 重拉而丢弃 in-flight 读。
+    task: asyncio.Future = asyncio.ensure_future(it.__anext__())
+    waited = 0.0
+    try:
+        while True:
+            budget = idle_timeout if got_first else first_chunk_timeout
+            step = heartbeat_seconds
+            if budget and budget > 0:  # budget<=0 表示禁用该阶段超时（永不 trip）
+                step = min(heartbeat_seconds, max(0.0, budget - waited))
+            done, _ = await asyncio.wait(
+                {task}, timeout=step if step > 0 else heartbeat_seconds,
+            )
+            if task not in done:
+                waited += step
+                if budget and budget > 0 and waited >= budget:
+                    phase = "first_chunk" if not got_first else "mid_stream"
+                    logger.warning("%s %s timeout after %.1fs", log_label, phase, budget)
+                    yield _Timeout(phase, budget)
+                    return
+                yield _HEARTBEAT
+                continue
+            try:
+                chunk = task.result()
+            except StopAsyncIteration:
+                return
+            got_first = True
+            waited = 0.0
+            task = asyncio.ensure_future(it.__anext__())
+            yield chunk
+    finally:
+        # 取消仍 in-flight 的 __anext__ task 并 drain（避免 "Task was destroyed but it is
+        # pending" 警告），再 aclose 上游异步生成器促其 finally 运行（关闭 httpx 流 /
+        # 释放连接），不依赖 GC 的非确定性回收。
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+        aclose = getattr(it, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except BaseException:
+                pass
 
 
 async def stream_one_turn(
@@ -157,76 +283,85 @@ async def stream_one_turn(
     """消费单轮上游 chunk 流：content/reasoning 即时透传；tool_calls 累加（不透传）
     留到轮末判定；等待间隙发心跳；error frame / 超预算 -> result.errored=True 并终止。
 
-    心跳/预算：等待下一 chunk 时每 heartbeat_seconds 无 chunk 发一次心跳；累计等待
-    超过预算（首 chunk 用 first_chunk_timeout，之后 idle_timeout）视为 hang。
-
-    与 streaming.aggregate_stream_to_response 的相似是**刻意分叉**，勿合并：本函数
-    面向客户端真流式（yield chunk + 心跳、持久化 __anext__ task 防丢 chunk），后者
-    内部聚合成 dict（不发心跳、wait_for 即可）。两者数据流方向相反。
+    超时仅写 result 元数据（errored/timed_out/phase/seconds）后 return——通知帧由调用方
+    （router.iter_chat_chunks 初始轮 / continuation 重发轮）据 result.timed_out 构造。
+    并发骨架与清理委托给 consume_with_heartbeat。
     """
-    it = chunk_iter.__aiter__() if hasattr(chunk_iter, "__aiter__") else chunk_iter
-    got_first = False
-    # 持久化的 __anext__ task：跨心跳 tick 复用，仅在 chunk 真正到达后才重建，
-    # 避免每次 timeout 重拉而丢弃 in-flight 读。
-    task: asyncio.Future = asyncio.ensure_future(it.__anext__())
-    waited = 0.0
+    gen = consume_with_heartbeat(
+        chunk_iter, idle_timeout=idle_timeout, first_chunk_timeout=first_chunk_timeout,
+        heartbeat_seconds=heartbeat_seconds, log_label="stream_one_turn",
+    )
     try:
-        while True:
-            budget = idle_timeout if got_first else first_chunk_timeout
-            step = heartbeat_seconds
-            if budget and budget > 0:
-                step = min(heartbeat_seconds, max(0.0, budget - waited))
-            done, _ = await asyncio.wait(
-                {task}, timeout=step if step > 0 else heartbeat_seconds,
-            )
-            if task not in done:
-                waited += step
-                if budget and budget > 0 and waited >= budget:
-                    logger.warning(
-                        "stream_one_turn %s timeout after %.1fs",
-                        "first_chunk" if not got_first else "mid_stream", budget,
-                    )
-                    result.errored = True
-                    return
-                yield _HEARTBEAT
-                continue
-            # chunk 到达
-            try:
-                chunk = task.result()
-            except StopAsyncIteration:
+        async for item in gen:
+            if isinstance(item, _Timeout):
+                result.errored = True
+                result.timed_out = True
+                result.timeout_phase = item.phase
+                result.timeout_seconds = item.seconds
                 return
-            got_first = True
-            waited = 0.0
-            task = asyncio.ensure_future(it.__anext__())
-
-            if isinstance(chunk.get("error"), dict) and not chunk.get("choices"):
+            if item is _HEARTBEAT:
+                yield item
+                continue
+            chunk = item
+            if is_error_frame(chunk):
                 result.errored = True
                 yield chunk
                 return
-
             _accumulate_turn(chunk, result, tool_name)
             fwd = _client_facing_chunk(chunk)
             if fwd is not None:
                 yield fwd
     finally:
-        # 任何退出路径（超时 return / error return / StopAsyncIteration /
-        # 消费者 aclose() 触发的 GeneratorExit）都清理上游：
-        #   1) 取消仍 in-flight 的 __anext__ task 并 drain，避免 "Task was destroyed
-        #      but it is pending" 警告；drain 后上游才无 pending __anext__，可安全 aclose。
-        #   2) aclose 上游异步生成器，促使其 finally 运行（关闭 httpx 流 / 释放连接），
-        #      不依赖 GC 的非确定性回收。
-        if not task.done():
-            task.cancel()
-        try:
-            await task
-        except BaseException:
-            pass
-        aclose = getattr(it, "aclose", None)
-        if aclose is not None:
-            try:
-                await aclose()
-            except BaseException:
-                pass
+        # 见 consume_with_heartbeat 的调用方契约：任何退出路径都 aclose 底层消费器，
+        # 触发其 finally 清理上游（async for 自身不会自动 aclose 内层生成器）。
+        await gen.aclose()
+
+
+async def stream_with_idle_timeout(
+    chunk_iter: AsyncIterator[dict],
+    *,
+    result: TurnResult,
+    idle_timeout: float,
+    first_chunk_timeout: float,
+    heartbeat_seconds: float,
+) -> AsyncGenerator[Any, None]:
+    """普通（非 cross_consult）流式路径的 idle 超时守护：逐 chunk **原样透传**
+    （不抑制 tool_calls / finish_reason），等待间隙发心跳；超预算时设 result.errored/
+    timed_out 并内联 yield 优雅超时通知（content + finish_reason=stop）并终止。
+
+    与 stream_one_turn 的区别：本函数原样透传（无 cross_consult 工具帧累加/抑制），且
+    超时通知由本函数内联发出（普通路径无 router 侧的 continuation 编排）。两者共享同一
+    consume_with_heartbeat 骨架，差异收敛到 per-chunk 处理与超时收尾两处。
+    """
+    gen = consume_with_heartbeat(
+        chunk_iter, idle_timeout=idle_timeout, first_chunk_timeout=first_chunk_timeout,
+        heartbeat_seconds=heartbeat_seconds, log_label="stream_with_idle_timeout",
+    )
+    saw_finish = False  # 上游是否已发过 finish_reason（本轮逻辑上已收尾）
+    try:
+        async for item in gen:
+            if isinstance(item, _Timeout):
+                # 上游已发 finish_reason 却不收尾（finish-then-hang）：本轮逻辑上已正常
+                # 结束，直接退出，**不**再注入通知/第二个 finish_reason（否则一条流出现
+                # 两个 finish，违反协议）。
+                if saw_finish:
+                    return
+                result.errored = True
+                result.timed_out = True
+                result.timeout_phase = item.phase
+                result.timeout_seconds = item.seconds
+                for frame in make_timeout_notice_frames(result):
+                    yield frame
+                return
+            if item is _HEARTBEAT:
+                yield item
+                continue
+            chunk = item
+            if any(c.get("finish_reason") for c in (chunk.get("choices") or [])):
+                saw_finish = True
+            yield chunk  # 原样透传（含 error frame / tool_calls / finish_reason）
+    finally:
+        await gen.aclose()
 
 
 async def stream_cross_consult_continuation(
@@ -314,7 +449,13 @@ async def stream_cross_consult_continuation(
         ):
             yield frame
         if turn.errored:
-            # 重发轮超时/error：通知调用方设 saw_error_frame（不提交升格记账），
+            # 重发轮超时：先 yield 优雅超时通知（content + finish_reason=stop），让 agent
+            # 读到"上游超时、可重试"而非静默收到空轮后停止推理（根因修复）。真实上游 error
+            # frame（timed_out=False）已在上面的 stream_one_turn 循环里逐帧透传，不重复发。
+            if turn.timed_out:
+                for frame in make_timeout_notice_frames(turn):
+                    yield frame
+            # STREAM_ERRORED：通知调用方设 saw_error_frame（不提交升格记账），
             # 该哨兵被 iter_chat_chunks 吞掉，不透传给客户端。
             yield STREAM_ERRORED
             return

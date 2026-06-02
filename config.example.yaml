@@ -92,6 +92,18 @@ cross_consult:
   redirect_tag_pattern: "\\[本轮对话使用不同家族的大语言模型\\]"
 
 # ============================================================
+# 普通（非 cross_consult）流式路径的 idle 超时守护
+# 上游卡住时不再静默挂起 / 返回空轮——注入一条"上游超时、可重试"的 assistant
+# content + clean finish（finish_reason=stop），让主 agent 知道而非停止推理。
+# 不报错（无 HTTP 错误码 / error frame）。cross_consult 路径用上面 cross_consult
+# 的同名字段，两套超时独立。
+# ============================================================
+streaming:
+  first_chunk_timeout_seconds: 120        # 首 chunk（prefill/TTFT+推理预热）上限秒；超出 → 优雅通知收尾
+  idle_timeout_seconds: 30                # 首 chunk 后相邻 chunk 间最长无活动秒（mid-stream hang tripwire）
+  heartbeat_seconds: 10                   # 等待间隙发 SSE keep-alive / Anthropic ping 的间隔秒，须 << 客户端读超时
+
+# ============================================================
 # 廉价提示词优化 + 内置 skills（in-process，0 额外 LLM 调用）
 # 按通用程度分四组（A 最通用 → D 最具体）。
 # ============================================================

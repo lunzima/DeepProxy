@@ -29,7 +29,7 @@ from .compatibility.reasoning_handler import (
     process_streaming_delta,
     recover_reasoning_content,
 )
-from .compatibility.error_mapper import map_litellm_error
+from .compatibility.error_mapper import litellm_error_to_dict, map_litellm_error
 from .config import ProxyConfig
 from .providers import Provider
 from .utils import retry_async, strip_api_version
@@ -213,8 +213,8 @@ def _assemble_litellm_body(
 
 
 def _build_error_dict(e: Exception) -> dict:
-    """将异常映射为 OpenAI 风格错误 dict。"""
-    return map_litellm_error(e).detail.get("error", {"message": str(e)})
+    """将异常映射为 OpenAI 风格错误 dict（不构造 HTTPException）。"""
+    return litellm_error_to_dict(e)[1]
 
 
 async def call_litellm(

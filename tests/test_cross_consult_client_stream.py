@@ -33,7 +33,9 @@ async def test_with_heartbeat_fast_awaitable_no_ping():
     assert isinstance(frames[0], _Done) and frames[0].value == 42
 
 
-from deep_proxy.cross_consult.client_stream import stream_one_turn, TurnResult
+from deep_proxy.cross_consult.client_stream import (
+    stream_one_turn, TurnResult, make_timeout_notice_frames, stream_with_idle_timeout,
+)
 
 
 def _delta_chunk(**delta):
@@ -136,6 +138,157 @@ async def test_stream_one_turn_forwards_error_frame():
     assert res.errored is True
 
 
+async def test_stream_one_turn_records_first_chunk_timeout_metadata():
+    """超时（区别于上游 error frame）须在 result 上留下足够元数据，供调用方
+    构造优雅通知（phase + budget），而非静默返回空轮。"""
+    async def hang_gen():
+        await asyncio.sleep(1.0)
+        yield _delta_chunk(content="never")
+
+    res = TurnResult()
+    _ = [f async for f in stream_one_turn(
+        hang_gen(), res, tool_name="cross_consult",
+        idle_timeout=5.0, first_chunk_timeout=0.2, heartbeat_seconds=0.1,
+    )]
+    assert res.errored is True
+    assert res.timed_out is True
+    assert res.timeout_phase == "first_chunk"
+    assert res.timeout_seconds == 0.2
+
+
+async def test_stream_one_turn_records_mid_stream_timeout_metadata():
+    async def slow_gen():
+        yield _delta_chunk(content="a")
+        await asyncio.sleep(1.0)
+        yield _delta_chunk(content="never")
+
+    res = TurnResult()
+    _ = [f async for f in stream_one_turn(
+        slow_gen(), res, tool_name="cross_consult",
+        idle_timeout=0.2, first_chunk_timeout=5.0, heartbeat_seconds=0.1,
+    )]
+    assert res.timed_out is True
+    assert res.timeout_phase == "mid_stream"
+    assert res.timeout_seconds == 0.2
+
+
+def test_make_timeout_notice_frames_first_chunk():
+    res = TurnResult(timed_out=True, timeout_phase="first_chunk", timeout_seconds=120.0)
+    frames = make_timeout_notice_frames(res)
+    assert len(frames) == 2
+    content = frames[0]["choices"][0]["delta"]["content"]
+    assert "[DeepProxy]" in content and "120" in content
+    assert frames[0]["choices"][0]["finish_reason"] is None
+    # 终轮帧：clean finish（非 error），让 agent 当普通一轮收尾
+    assert frames[1]["choices"][0]["finish_reason"] == "stop"
+
+
+def test_make_timeout_notice_frames_mid_stream_distinct_text():
+    first = make_timeout_notice_frames(
+        TurnResult(timed_out=True, timeout_phase="first_chunk", timeout_seconds=10.0))
+    mid = make_timeout_notice_frames(
+        TurnResult(timed_out=True, timeout_phase="mid_stream", timeout_seconds=10.0))
+    first_text = first[0]["choices"][0]["delta"]["content"]
+    mid_text = mid[0]["choices"][0]["delta"]["content"]
+    assert first_text != mid_text
+    # mid_stream 语义关键词 + 前缀 + 秒数（避免仅"不相等"的弱断言）
+    assert "[DeepProxy]" in mid_text
+    assert "输出过程中" in mid_text and "10" in mid_text
+    assert mid[1]["choices"][0]["finish_reason"] == "stop"
+
+
+async def test_stream_with_idle_timeout_forwards_chunks_verbatim():
+    """普通（非 cc）流式路径：原样透传，不抑制 tool_calls / finish_reason。"""
+    chunks = [
+        _delta_chunk(content="a"),
+        {"choices": [{"index": 0, "delta": {"tool_calls": [
+            {"index": 0, "id": "t", "type": "function",
+             "function": {"name": "foo", "arguments": "{}"}}]},
+            "finish_reason": None}]},
+        _finish_chunk("tool_calls"),
+    ]
+    res = TurnResult()
+    out = [f async for f in stream_with_idle_timeout(
+        _iter(chunks), result=res,
+        idle_timeout=5.0, first_chunk_timeout=5.0, heartbeat_seconds=5.0,
+    )]
+    assert any("tool_calls" in d.get("choices", [{}])[0].get("delta", {}) for d in out)
+    assert any(d.get("choices", [{}])[0].get("finish_reason") == "tool_calls" for d in out)
+    assert res.timed_out is False
+    assert res.errored is False
+
+
+async def test_stream_with_idle_timeout_emits_notice_on_timeout():
+    async def hang_gen():
+        await asyncio.sleep(1.0)
+        yield _delta_chunk(content="never")
+
+    res = TurnResult()
+    out = [f async for f in stream_with_idle_timeout(
+        hang_gen(), result=res,
+        idle_timeout=5.0, first_chunk_timeout=0.2, heartbeat_seconds=0.1,
+    )]
+    assert res.timed_out is True
+    assert any("[DeepProxy]" in d.get("choices", [{}])[0].get("delta", {}).get("content", "")
+               for d in out)
+    assert any(d.get("choices", [{}])[0].get("finish_reason") == "stop" for d in out)
+    # 心跳在等待间隙发出（保持连接温热）
+    assert any(f == {"_dp_heartbeat": True} for f in out)
+
+
+async def test_stream_with_idle_timeout_no_double_finish_after_upstream_finish():
+    """上游已发 finish_reason 后却不收尾（hang，不抛 StopAsyncIteration）：本轮逻辑上
+    已正常结束,idle 触发时**不得**再注入超时通知/第二个 finish_reason（否则一条流出现
+    两个 finish，违反协议）。"""
+    started = asyncio.Event()
+
+    async def finish_then_hang():
+        yield _delta_chunk(content="done")
+        yield _finish_chunk("stop")
+        started.set()
+        await asyncio.Event().wait()  # 发完 finish 后永久挂起（不抛 StopAsyncIteration）
+        yield _delta_chunk(content="never")
+
+    res = TurnResult()
+    out = [f async for f in stream_with_idle_timeout(
+        finish_then_hang(), result=res,
+        idle_timeout=0.2, first_chunk_timeout=5.0, heartbeat_seconds=0.1,
+    )]
+    finishes = [d for d in out
+                if d.get("choices", [{}])[0].get("finish_reason") is not None]
+    assert len(finishes) == 1
+    assert finishes[0]["choices"][0]["finish_reason"] == "stop"
+    # 不应注入超时通知（上游已正常 finish）
+    assert not any("[DeepProxy]" in d.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                   for d in out)
+    assert res.timed_out is False
+
+
+async def test_stream_with_idle_timeout_closes_upstream_on_early_close():
+    """消费者提前 aclose（客户端断连）：上游异步生成器被 aclose，其 finally 确定性运行
+    （释放连接），不依赖 GC。对齐 stream_one_turn 的同名契约。"""
+    closed = {"hit": False}
+    never = asyncio.Event()
+
+    async def slow_gen():
+        try:
+            yield _delta_chunk(content="first")
+            await never.wait()
+            yield _delta_chunk(content="never")
+        finally:
+            closed["hit"] = True
+
+    res = TurnResult()
+    agen = stream_with_idle_timeout(
+        slow_gen(), result=res,
+        idle_timeout=30.0, first_chunk_timeout=30.0, heartbeat_seconds=30.0,
+    )
+    first = await agen.__anext__()
+    assert first["choices"][0]["delta"] == {"content": "first"}
+    await agen.aclose()
+    assert closed["hit"] is True
+
+
 from unittest.mock import patch
 
 from deep_proxy.cross_consult.client_stream import stream_cross_consult_continuation
@@ -191,6 +344,55 @@ async def test_continuation_streams_consult_heartbeat_and_resend():
     # tool_result 已注入消息历史
     assert any(m.get("role") == "tool" and "外部视角" in str(m.get("content"))
                for m in body["messages"])
+
+
+async def test_continuation_resend_timeout_emits_notice_then_errored():
+    """重发轮超时：先 yield 优雅超时通知（content + finish_reason=stop），再 yield
+    STREAM_ERRORED 哨兵（供调用方标记不提交升格记账）。绝不静默返回空轮。"""
+    from deep_proxy.cross_consult.client_stream import STREAM_ERRORED
+
+    cfg = ProxyConfig.model_validate(normalize_legacy_config({
+        "deepseek": {"api_key": "sk", "api_base": "https://api.deepseek.com"},
+    }))
+    cfg.cross_consult = CrossConsultConfig(
+        enabled=True, pairs={"deepseek": "mimo", "mimo": "deepseek"},
+    )
+    # CrossConsultConfig 无 validate_assignment：直接赋小数加速测试
+    cfg.cross_consult.first_chunk_timeout_seconds = 0.2
+    cfg.cross_consult.stream_heartbeat_seconds = 0.1
+    cfg.providers["mimo"] = Provider(
+        name="mimo", api_base="https://x", api_key="t", litellm_prefix="openai/",
+        flash_model="mimo-v2.5", pro_model="mimo-v2.5-pro",
+    )
+    source = cfg.providers["deepseek"]
+    acc = StreamingReasoningAccumulator(request_messages=[])
+
+    async def hanging_resend(config, body, *, _accumulator=None, provider=None):
+        await asyncio.sleep(1.0)
+        yield {"choices": [{"index": 0, "delta": {"content": "never"},
+                            "finish_reason": None}]}
+
+    body = {"model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "use cc"}]}
+
+    async def consult_ok(**kw):
+        return "外部视角"
+
+    with patch("deep_proxy.cross_consult.interceptor.execute_consult", new=consult_ok), \
+         patch("deep_proxy.cross_consult.client_stream.iter_litellm_chunks",
+               new=hanging_resend):
+        frames = [f async for f in stream_cross_consult_continuation(
+            initial_tool_calls=[_cc_tool_call()],
+            body=body, source_provider=source, config=cfg,
+            cc_config=cfg.cross_consult, accumulator=acc,
+        )]
+
+    # 优雅通知透传给客户端
+    assert any("[DeepProxy]" in fr.get("choices", [{}])[0].get("delta", {}).get("content", "")
+               for fr in frames)
+    assert any(fr.get("choices", [{}])[0].get("finish_reason") == "stop" for fr in frames)
+    # 末尾 STREAM_ERRORED 哨兵（按 identity 识别）
+    assert any(fr is STREAM_ERRORED for fr in frames)
 
 
 async def test_stream_one_turn_closes_upstream_on_early_close():

@@ -40,7 +40,10 @@ from .compatibility.reasoning_handler import (
 )
 from .config import ProxyConfig, CreativeSamplingConfig
 from .providers import Provider
-from .utils import SSE_DONE, append_to_system_message, merge_tool_call_deltas, prepend_to_system_message
+from .utils import (
+    SSE_DONE, append_to_system_message, is_error_frame, is_heartbeat,
+    merge_tool_call_deltas, prepend_to_system_message,
+)
 from .litellm_client import call_litellm, iter_litellm_chunks, _to_litellm_api_base
 from .models_list import build_models_list, fetch_upstream_models
 from .optimization import apply_cheap_optimizations, extract_cot_output, sample_in_range
@@ -61,8 +64,10 @@ from .cross_consult.client_stream import (
     STREAM_ERRORED,
     TurnResult,
     make_terminal_frame,
+    make_timeout_notice_frames,
     stream_cross_consult_continuation,
     stream_one_turn,
+    stream_with_idle_timeout,
 )
 from .optimization.dynamic_threshold import DynamicThresholdController
 from .optimization.flash_upgrade import (
@@ -533,6 +538,10 @@ class DeepProxyRouter:
         - 结束后写 ReasoningCache；升格记账在完全成功时提交
 
         SSE 序列化（`data:` 前缀、`[DONE]` 前哨）由调用方在协议层完成。
+
+        控制流：按 cc_active 选 cc / 普通子生成器，顶层只做统一的脏退出处理
+        （`STREAM_ERRORED` 哨兵吞掉并标脏、error frame 透传并标脏）+ finally 写
+        ReasoningCache 并在干净完成时提交升格记账。两条分支的细节封装进各自子生成器。
         """
         cc_active = (
             self.config.cross_consult.enabled
@@ -545,59 +554,99 @@ class DeepProxyRouter:
         completed_cleanly = False
         saw_error_frame = False
 
+        sub = (
+            self._iter_cc_chunks(body, provider, accumulator) if cc_active
+            else self._iter_plain_chunks(body, provider, accumulator)
+        )
         try:
-            if cc_active:
-                turn = TurnResult()
-                initial_iter = iter_litellm_chunks(
-                    self.config, body, _accumulator=accumulator, provider=provider,
-                )
-                idle = float(self.config.cross_consult.call_timeout_seconds)
-                first = float(self.config.cross_consult.first_chunk_timeout_seconds)
-                hb = float(self.config.cross_consult.stream_heartbeat_seconds)
-                async for frame in stream_one_turn(
-                    initial_iter, turn, tool_name=self.config.cross_consult.tool_name,
-                    idle_timeout=idle, first_chunk_timeout=first, heartbeat_seconds=hb,
-                ):
-                    if isinstance(frame.get("error"), dict) and not frame.get("choices"):
-                        saw_error_frame = True
-                    yield frame
-                if turn.errored:
-                    # 初始轮超时/error（error frame 已透传或仅超时无帧）——非干净完成，
-                    # 不提交升格记账。
+            async for frame in sub:
+                # STREAM_ERRORED 哨兵（单例，按 identity 识别）：子生成器脏退出
+                # （超时 / 重发 error）标记，吞掉不透传客户端；error frame：透传 + 标脏。
+                if frame is STREAM_ERRORED:
                     saw_error_frame = True
-                    return
-                if not turn.had_cc_call:
-                    # 无 cc 调用：终轮，补发 finish_reason / 非 cc tool_calls
-                    yield make_terminal_frame(turn.finish_reason, turn.accumulated_tool_calls)
-                else:
-                    async for frame in stream_cross_consult_continuation(
-                        initial_tool_calls=turn.accumulated_tool_calls,
-                        body=body, source_provider=provider, config=self.config,
-                        cc_config=self.config.cross_consult, accumulator=accumulator,
-                        initial_content=turn.content,
-                    ):
-                        # 重发轮 errored 哨兵（单例，按 identity 识别）：标记不干净，
-                        # 吞掉不透传客户端
-                        if frame is STREAM_ERRORED:
-                            saw_error_frame = True
-                            continue
-                        if isinstance(frame.get("error"), dict) and not frame.get("choices"):
-                            saw_error_frame = True
-                        yield frame
-                completed_cleanly = True
-            else:
-                async for chunk_dict in iter_litellm_chunks(
-                    self.config, body, _accumulator=accumulator, provider=provider,
-                ):
-                    if isinstance(chunk_dict.get("error"), dict) and not chunk_dict.get("choices"):
-                        saw_error_frame = True
-                    yield chunk_dict
-                completed_cleanly = True
+                    continue
+                if is_error_frame(frame):
+                    saw_error_frame = True
+                yield frame
+            completed_cleanly = True
         finally:
             accumulator.flush_to_cache(self._reasoning_cache)
             # 流自然结束（无 error frame、无异常、未被取消）才提交升格记账
             if completed_cleanly and not saw_error_frame:
                 self._commit_pending_upgrade(body)
+
+    async def _iter_cc_chunks(
+        self,
+        body: dict[str, Any],
+        provider: Provider | None,
+        accumulator: StreamingReasoningAccumulator,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """cross_consult 真流式子生成器：初始轮逐 token 透传 + 抑制 cc 工具帧 + 心跳，
+        据初始轮结果进入 continuation / 终轮 / 超时通知。
+
+        脏退出（初始轮超时 / 重发轮 error）以 `STREAM_ERRORED` 哨兵 yield，供
+        iter_chat_chunks 统一标脏（不提交升格记账）。真实 error frame 由上游逐帧透传，
+        iter_chat_chunks 经 is_error_frame 标脏。
+        """
+        cc = self.config.cross_consult
+        turn = TurnResult()
+        initial_iter = iter_litellm_chunks(
+            self.config, body, _accumulator=accumulator, provider=provider,
+        )
+        async for frame in stream_one_turn(
+            initial_iter, turn, tool_name=cc.tool_name,
+            idle_timeout=float(cc.call_timeout_seconds),
+            first_chunk_timeout=float(cc.first_chunk_timeout_seconds),
+            heartbeat_seconds=float(cc.stream_heartbeat_seconds),
+        ):
+            yield frame
+        if turn.errored:
+            # 初始轮超时：注入优雅通知（content + finish_reason=stop），让 agent 知道上游
+            # 超时、可重试，而非静默收到空轮后停止推理（根因修复）。真实 error frame
+            # （timed_out=False）已在上面逐帧透传，不重复发——此处仅 timed_out 才发通知。
+            if turn.timed_out:
+                for frame in make_timeout_notice_frames(turn):
+                    yield frame
+            yield STREAM_ERRORED
+            return
+        if not turn.had_cc_call:
+            # 无 cc 调用：终轮，补发 finish_reason / 非 cc tool_calls
+            yield make_terminal_frame(turn.finish_reason, turn.accumulated_tool_calls)
+            return
+        # 进入 continuation（其自身在重发轮 errored 时会 yield STREAM_ERRORED）
+        async for frame in stream_cross_consult_continuation(
+            initial_tool_calls=turn.accumulated_tool_calls,
+            body=body, source_provider=provider, config=self.config,
+            cc_config=cc, accumulator=accumulator, initial_content=turn.content,
+        ):
+            yield frame
+
+    async def _iter_plain_chunks(
+        self,
+        body: dict[str, Any],
+        provider: Provider | None,
+        accumulator: StreamingReasoningAccumulator,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """普通（非 cross_consult）流式子生成器：经 stream_with_idle_timeout 原样透传上游
+        chunk（含 tool_calls / finish_reason）+ idle 超时优雅通知（非错误）。
+
+        超时（已注入通知）以 `STREAM_ERRORED` 哨兵 yield 标脏，避免上游静默挂起 →
+        客户端收到空轮静默停止（根因修复，覆盖 cc 未激活路径）。
+        """
+        plain_iter = iter_litellm_chunks(
+            self.config, body, _accumulator=accumulator, provider=provider,
+        )
+        turn = TurnResult()
+        sc = self.config.streaming
+        async for chunk_dict in stream_with_idle_timeout(
+            plain_iter, result=turn,
+            idle_timeout=float(sc.idle_timeout_seconds),
+            first_chunk_timeout=float(sc.first_chunk_timeout_seconds),
+            heartbeat_seconds=float(sc.heartbeat_seconds),
+        ):
+            yield chunk_dict
+        if turn.errored:
+            yield STREAM_ERRORED
 
     async def chat_completions_stream(
         self, body: dict[str, Any], *, provider: Provider | None = None,
@@ -607,12 +656,12 @@ class DeepProxyRouter:
         负责协议细节：dict → `data: {...}\\n\\n`、错误帧序列化、`data: [DONE]\\n\\n` 前哨。
         """
         async for item in self.iter_chat_chunks(body, provider=provider):
-            if item.get("_dp_heartbeat"):
+            if is_heartbeat(item):
                 # SSE 注释帧：规范明确忽略 `:` 开头行，零风险污染 delta 解析
                 yield ": keep-alive\n\n"
                 continue
             yield f"data: {json.dumps(item)}\n\n"
-            if isinstance(item.get("error"), dict) and not item.get("choices"):
+            if is_error_frame(item):
                 yield SSE_DONE
                 return
         yield SSE_DONE

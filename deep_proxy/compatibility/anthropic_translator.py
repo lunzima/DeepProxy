@@ -23,7 +23,9 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from ..utils import format_sse_event as _sse_event, get_text_from_content
+from ..utils import (
+    format_sse_event as _sse_event, get_text_from_content, is_error_frame, is_heartbeat,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +43,30 @@ _OPENAI_TO_ANTHROPIC_STOP = {
 
 def _map_stop_reason(openai_finish: Optional[str]) -> str:
     return _OPENAI_TO_ANTHROPIC_STOP.get(openai_finish, "end_turn")
+
+
+def openai_error_to_claude(detail: Any) -> Dict[str, Any]:
+    """OpenAI 形状错误体 → Anthropic 形状（非流式端点错误趋同）。
+
+    OpenAI:    {"error": {"message", "type", "param", "code"}}
+    Anthropic: {"type": "error", "error": {"type", "message"}}
+
+    非流式上游错误经 map_litellm_error 产出 OpenAI 形状 HTTPException.detail；
+    /v1/messages 端点须改写成 Anthropic 形状再返回，避免向 Anthropic 客户端泄漏
+    OpenAI 错误体（与本端点 auth/500 路径的 Anthropic 形状一致）。
+
+    detail 已是 Anthropic 形状时**幂等**；非 dict（如纯字符串）包成 api_error。
+    """
+    err = detail.get("error") if isinstance(detail, dict) else None
+    if isinstance(err, dict):
+        return {"type": "error", "error": {
+            "type": err.get("type") or "api_error",
+            "message": err.get("message") or "",
+        }}
+    return {"type": "error", "error": {
+        "type": "api_error",
+        "message": detail if isinstance(detail, str) else str(detail),
+    }}
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +429,7 @@ class _AnthropicStreamBuilder:
         events: List[str] = []
 
         # 错误终止包（error 必须是 dict 且 choices 为空）
-        if isinstance(chunk.get("error"), dict) and not chunk.get("choices"):
+        if is_error_frame(chunk):
             events.extend(self._emit_error(chunk["error"]))
             return events
 
@@ -572,9 +598,25 @@ class _AnthropicStreamBuilder:
         })]
 
     def _emit_error(self, error: Dict[str, Any]) -> List[str]:
-        """error 终止包：补 message_start（若需要）+ 发 error 事件。"""
+        """error 终止包：补 message_start（若需要）+ 关闭仍开的 content block + 发
+        error 事件。
+
+        规范化（与 OpenAI 端点 data:{error}+[DONE] 的干净终止趋同）：error 发生时
+        前面可能有未关闭的 thinking / text 块——先发 content_block_stop 配对每个已开的
+        块（保证 SSE 块结构平衡），再发 error 事件作终止信号（error 本身即终止，不再
+        发 message_delta/message_stop）。
+        """
         events = self._emit_message_start_if_needed()
-        events.append(_sse_event("error", {"type": "error", "error": error}))
+        ev = self._close_block(self._thinking)
+        if ev:
+            events.append(ev)
+        ev = self._close_block(self._text)
+        if ev:
+            events.append(ev)
+        # 规范化内层错误形状：iter_litellm_chunks 的错误帧是 OpenAI 形状
+        # （{message,type,param,code}），经 openai_error_to_claude 收敛为 Anthropic 的
+        # {type,message}，不向 Anthropic 客户端泄漏 param/code（与非流式路径一致）。
+        events.append(_sse_event("error", openai_error_to_claude({"error": error})))
         return events
 
     def _absorb_usage(self, usage: Dict[str, Any]) -> None:
@@ -678,7 +720,7 @@ async def openai_stream_to_claude(
     async for chunk in openai_chunks:
         if not isinstance(chunk, dict):
             continue
-        if chunk.get("_dp_heartbeat"):
+        if is_heartbeat(chunk):
             # cross_consult 静默间隙的 keep-alive：翻成 Anthropic 原生 ping 事件，
             # 保持连接温热、防客户端 idle-read 超时（对应 OpenAI 路径的 SSE 注释帧）。
             yield "event: ping\ndata: {\"type\": \"ping\"}\n\n"
@@ -687,7 +729,7 @@ async def openai_stream_to_claude(
         for ev in events:
             yield ev
         # error 包后立即终止（error 必须是 dict 且 choices 为空）
-        if isinstance(chunk.get("error"), dict) and not chunk.get("choices"):
+        if is_error_frame(chunk):
             return
     for ev in builder.on_finish():
         yield ev
