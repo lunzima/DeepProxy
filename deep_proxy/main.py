@@ -263,13 +263,13 @@ def _binding_for_request(request: Request):
     if binding is not None and binding.model_pool:
         from .pool import select_pool_target
         provider, selected_model = select_pool_target(binding, config)
-        logger.info(
+        logger.debug(
             "[pool] port=%s 加权命中 provider=%s model=%s（池大小=%d）",
             port, provider.name if provider else None, selected_model,
             len(binding.model_pool),
         )
     else:
-        logger.info(
+        logger.debug(
             "[pool] port=%s 无 model_pool → 单一 provider=%s（binding=%s）",
             port, provider.name if provider else None,
             "存在" if binding is not None else "缺失",
