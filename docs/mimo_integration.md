@@ -2,7 +2,7 @@
 
 ## 1. 背景与动机
 
-`docs/agent_writing_qa_dilemma.md` 提出：DeepSeek V4 系列在中文创意写作场景下产生特征性口癖（物理测量式描写、声音物理化、归因句式），且同分布的判官（同样是 DeepSeek 系列）无法稳定识别本分布的失败模式——这是结构性同构困境。
+DeepSeek V4 系列在中文创意写作场景下产生特征性口癖（物理测量式描写、声音物理化、归因句式），且同分布的判官（同样是 DeepSeek 系列）无法稳定识别本分布的失败模式——这是结构性同构困境。
 
 引入异家族模型 Xiaomi MiMo v2.5 / v2.5-pro 作为创意写作 port 的独立上游，打破同分布闭环。MiMo 不充当 DeepSeek 的"校对者"，而是直接接管 `writing_port` (8001) 的全部流量；DeepSeek 继续服务 `coding_port` (8000) 的精确性任务。
 
@@ -583,4 +583,3 @@ per_provider:
 - `CLAUDE.md`：更新架构概览图、双端口说明、配置示例、cross_consult 章节
 - `config.example.yaml`：补完 providers + ports + cross_consult 段
 - `README.md`：如果有提到上游模型或工具，更新
-- `docs/agent_writing_qa_dilemma.md`：在尾部追加"DeepProxy 的应对：写作 port 已切 MiMo + cross_consult 提供异分布二次视角"，链接本 spec

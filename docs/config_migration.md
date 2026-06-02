@@ -135,7 +135,7 @@ cross_consult:
   max_output_tokens: 4096               # consult 调用 max_tokens
 ```
 
-详细语义见 `docs/mimo_integration.md` §12 与 `docs/superpowers/plans/2026-05-28-cross-consult.md`。
+详细语义见 `docs/mimo_integration.md` §12。
 
 ## 常见错误
 

@@ -2,7 +2,7 @@
 
 **日期**：2026-05-30
 **状态**：设计待评审
-**关联**：`docs/superpowers/plans/2026-05-28-cross-consult.md`、`docs/mimo_integration.md` §12
+**关联**：`docs/mimo_integration.md` §12
 
 ## 1. 背景与问题
 
