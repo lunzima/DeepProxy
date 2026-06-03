@@ -17,7 +17,7 @@ def test_cross_consult_config_defaults():
     assert c.max_calls_per_request == 3
     assert c.call_timeout_seconds == 60
     assert c.max_input_chars == 32000
-    assert c.max_output_tokens == 4096
+    assert c.max_output_tokens == 16384
     # §12.11 新字段默认值
     assert c.redirect_enabled is True
     assert c.redirect_persist_turns == 2

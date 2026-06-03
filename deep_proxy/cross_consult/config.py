@@ -63,8 +63,11 @@ class CrossConsultConfig(BaseModel):
         description="question + context 合并后的字符上限；超出返回错误 tool_result。",
     )
     max_output_tokens: int = Field(
-        default=4096, ge=1,
-        description="consult 调用的 max_tokens。",
+        default=16384, ge=1,
+        description="consult 调用的 max_tokens。consult 现在启用 reasoning，而 OpenAI 风格"
+                    "的 reasoning 模型（MiMo / reasoning_effort）把思考 token 计入 max_tokens——"
+                    "预算太小（旧默认 4096）会被推理吃光、答案被 length 截断。给足头部空间"
+                    "让推理 + 答案都能容纳；远低于 provider 384K 输出上限。",
     )
     consult_system_prompt: str = Field(
         default=_DEFAULT_CONSULT_SYSTEM_PROMPT,
