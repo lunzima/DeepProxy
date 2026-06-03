@@ -131,8 +131,7 @@ cross_consult:
     mimo: deepseek
   max_calls_per_request: 3              # 单次 client 请求内的 consult 次数上限
   call_timeout_seconds: 30
-  max_input_chars: 32000                # question + context 字符上限
-  max_output_tokens: 4096               # consult 调用 max_tokens
+  # consult 输入/输出不设武断上限：约束是 target provider 的 context_window / max_output_tokens
 ```
 
 详细语义见 `docs/mimo_integration.md` §12。

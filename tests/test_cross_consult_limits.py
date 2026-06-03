@@ -1,4 +1,4 @@
-"""Cross-Consult 限额测试：quota、max_input_chars。"""
+"""Cross-Consult 限额测试：quota（consult 不再设武断的输入字符上限）。"""
 from __future__ import annotations
 
 import json
@@ -25,7 +25,6 @@ def cfg_with_low_quota():
             "enabled": True,
             "pairs": {"deepseek": "mimo", "mimo": "deepseek"},
             "max_calls_per_request": 1,
-            "max_input_chars": 100,
         },
     })
 
@@ -45,11 +44,6 @@ def _tc_response(tcid: str, args: dict):
     }
 
 
-def _text_response(t: str):
-    return {"choices": [{"message": {"role": "assistant", "content": t},
-                          "finish_reason": "stop"}]}
-
-
 def _text_chunks(text: str):
     return [
         {"choices": [{"index": 0, "delta": {"role": "assistant"},
@@ -57,22 +51,6 @@ def _text_chunks(text: str):
         {"choices": [{"index": 0, "delta": {"content": text},
                       "finish_reason": "stop"}]},
     ]
-
-
-def _resend_iter_seq(*texts: str):
-    """每次调用按 texts 顺序返回一段流式纯文本响应。供 resend 路径 mock 用。"""
-    idx = {"i": 0}
-
-    def factory(config, body, *, provider=None):
-        i = idx["i"]
-        idx["i"] += 1
-        t = texts[i] if i < len(texts) else texts[-1]
-
-        async def gen():
-            for c in _text_chunks(t):
-                yield c
-        return gen()
-    return factory
 
 
 async def test_quota_exhausted_returns_error_tool_result(cfg_with_low_quota):
@@ -137,35 +115,3 @@ async def test_quota_exhausted_returns_error_tool_result(cfg_with_low_quota):
     # tool_result 链中应能找到 quota error 字符串
     tool_msgs = [m for m in body["messages"] if m.get("role") == "tool"]
     assert any("quota" in m["content"].lower() for m in tool_msgs)
-
-
-async def test_input_too_long_returns_error_without_calling_executor(cfg_with_low_quota):
-    """question + context > max_input_chars 时不调 executor，返回 error tool_result。"""
-    from deep_proxy.router import DeepProxyRouter
-    router = DeepProxyRouter(cfg_with_low_quota)
-    provider = cfg_with_low_quota.providers["deepseek"]
-
-    long_q = "X" * 200  # exceeds max_input_chars=100
-
-    initial = _tc_response("tc1", {"question": long_q})
-
-    executor_mock = AsyncMock(return_value="should not be called")
-
-    with patch("deep_proxy.router.aggregate_stream_to_response",
-               new=AsyncMock(return_value=initial)), \
-         patch("deep_proxy.cross_consult.interceptor.execute_consult",
-               new=executor_mock), \
-         patch("deep_proxy.cross_consult.streaming.iter_litellm_chunks",
-               new=_resend_iter_seq("got error")):
-        body = {"model": "deepseek-v4-flash",
-                "messages": [{"role": "user", "content": "go"}]}
-        body = await router.prepare_request(
-            body, sampling_profile=cfg_with_low_quota.precise_sampling, provider=provider,
-        )
-        result = await router.chat_completions(body, provider=provider)
-
-    assert result["choices"][0]["message"]["content"] == "got error"
-    assert executor_mock.call_count == 0  # 从未调用 executor
-
-    tool_msgs = [m for m in body["messages"] if m.get("role") == "tool"]
-    assert any("too long" in m["content"].lower() for m in tool_msgs)

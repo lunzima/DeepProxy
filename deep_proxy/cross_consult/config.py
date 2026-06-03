@@ -58,17 +58,9 @@ class CrossConsultConfig(BaseModel):
         description="客户端真流式下，静默间隙（consult 执行 / 重发 prefill）期间发送 "
                     "SSE keep-alive 注释帧的间隔秒数。须显著小于客户端 idle-read 超时。",
     )
-    max_input_chars: int = Field(
-        default=32000, ge=100,
-        description="question + context 合并后的字符上限；超出返回错误 tool_result。",
-    )
-    max_output_tokens: int = Field(
-        default=16384, ge=1,
-        description="consult 调用的 max_tokens。consult 现在启用 reasoning，而 OpenAI 风格"
-                    "的 reasoning 模型（MiMo / reasoning_effort）把思考 token 计入 max_tokens——"
-                    "预算太小（旧默认 4096）会被推理吃光、答案被 length 截断。给足头部空间"
-                    "让推理 + 答案都能容纳；远低于 provider 384K 输出上限。",
-    )
+    # 注：consult 的输入/输出不设武断上限。真正的约束是 target provider 自身的
+    # context_window（输入）与 max_output_tokens（输出）——executor 用 provider 的
+    # 输出上限做 max_tokens，输入超长由 provider 自然报错并以 tool_result 返还 agent。
     consult_system_prompt: str = Field(
         default=_DEFAULT_CONSULT_SYSTEM_PROMPT,
         description="consult 调用时用作 system 消息的提示词。",

@@ -172,6 +172,32 @@ async def test_execute_consult_accumulates_reasoning_when_content_empty(
     assert out == "deep think"
 
 
+async def test_execute_consult_max_tokens_is_provider_ceiling(cfg_for_executor):
+    """consult 的 max_tokens 用 target_provider 的真实输出上限，而非一个武断的小常量。
+
+    旧实现写死 cc_config.max_output_tokens（4096/16384 之类的魔法数），既无依据又会
+    在 reasoning 吃预算时截断答案。真正的约束是 provider 自己的输出上限。
+    """
+    captured: list[dict] = []
+    provider = Provider(
+        name="mimo", api_base="https://x", api_key="tp", litellm_prefix="openai/",
+        flash_model="mimo-v2.5", pro_model="mimo-v2.5-pro",
+        max_output_tokens=128000,
+        reasoning_effort_field="reasoning_effort", reasoning_effort_value="high",
+        allowed_extra_params=["reasoning_effort", "thinking"],
+    )
+    with patch(
+        "deep_proxy.cross_consult.streaming.iter_litellm_chunks",
+        new=_capture_body_iter(captured, text="ok"),
+    ):
+        await execute_consult(
+            question="hi", context=None,
+            target_provider=provider, config=cfg_for_executor,
+            cc_config=CrossConsultConfig(enabled=True),
+        )
+    assert captured[0]["max_tokens"] == 128000
+
+
 async def test_execute_consult_enables_reasoning_top_level(cfg_for_executor):
     """根因回归：consult 调用必须为 reasoning provider 注入 reasoning_effort。
 

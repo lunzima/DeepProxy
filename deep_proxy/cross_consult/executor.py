@@ -79,7 +79,9 @@ async def execute_consult(
             {"role": "system", "content": cc_config.consult_system_prompt},
             {"role": "user", "content": user_content},
         ],
-        "max_tokens": cc_config.max_output_tokens,
+        # max_tokens 用 target provider 的真实输出上限，不是武断的小常量——consult 现在
+        # 开 reasoning，写死小预算会被推理吃光致答案截断；provider 自己的上限才是真约束。
+        "max_tokens": target_provider.max_output_tokens,
         # 注：stream 字段会被 _assemble_litellm_body 覆盖；iter_litellm_chunks 路径
         # 强制 stream=True，这里写不写都不影响。
         "stream": True,

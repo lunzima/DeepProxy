@@ -177,8 +177,8 @@ cross_consult:
     mimo: deepseek
   max_calls_per_request: 3            # 单次 client 请求内的 consult 次数上限
   call_timeout_seconds: 30
-  max_input_chars: 32000              # question + context 字符上限
-  max_output_tokens: 4096             # consult 调用的输出 token 上限
+  # consult 输入/输出不设武断上限：约束是 target provider 的 context_window（输入）
+  # 与 max_output_tokens（输出，executor 用它做 max_tokens）。
   consult_system_prompt: |
     你被作为外部顾问从另一对话中召唤。直接回答问题，不寒暄，不复述问题。
     你没有该对话的上下文，只能依据本次提问中给出的信息作答。
@@ -421,7 +421,7 @@ upstream response received
             - user = question + (context if any)
             - 不带 tools 数组（防递归）
             - 不走完整 pipeline（不注入 skills / baskets / cross_consult 自身）
-            - 非流式 + max_tokens=cross_consult.max_output_tokens + timeout=call_timeout_seconds
+            - 流式聚合 + max_tokens=target_provider.max_output_tokens + idle/first_chunk 超时守护
             - 超时/错误：合成错误 tool_result
        4. 把 consult 结果封装成 tool_result block
        5. 把 (原 assistant 消息含 tool_use, 新 tool_result) 追加到 messages
@@ -435,7 +435,7 @@ upstream response received
 - consult 调用不注入任何 DeepProxy 优化（skills / baskets / priming / think_steering），保持"外部顾问"语义干净
 - 单次 client 请求内 cross_consult 调用次数上限：`max_calls_per_request`（默认 3）
 - 超限时 cross_consult 返回 tool_result 错误文本："cross_consult quota (N) exhausted for this request"，agent 自行处理
-- consult 的输入字符数超 `max_input_chars` 时同样返回错误 tool_result，要求缩短
+- consult 的输入不设武断字符上限——超 target provider 的 context_window 时由 provider 报错，错误以 tool_result 返还 agent
 
 ### 12.7 系统提示词增量
 
@@ -542,7 +542,7 @@ per_provider:
 - `test_legacy_config_compat.py` — 老 config.yaml 仍能启动并双端口走 DeepSeek
 - `test_cross_consult_injection.py` — 工具注入到 tools 数组 + system prompt 增量 + pairs 缺失时不注入
 - `test_cross_consult_execution.py` — tool_use 拦截、consult 调用、tool_result 合成、重发原 provider；用 mock provider
-- `test_cross_consult_limits.py` — max_calls_per_request、max_input_chars、timeout 三种限额
+- `test_cross_consult_limits.py` — max_calls_per_request quota 限额（consult 不再设武断输入字符上限）
 - `test_cross_consult_recursion_guard.py` — consult 内部请求不携带 cross_consult 工具
 - `test_cross_consult_symmetry.py` — deepseek→mimo 和 mimo→deepseek 行为对称
 - `test_cross_consult_redirect.py` — §12.11 标签命中 / 历史标签剥离 / persist 窗口衰减 / fail-open / 哨兵防递归

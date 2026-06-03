@@ -83,8 +83,8 @@ cross_consult:
   call_timeout_seconds: 30              # 流式 chunk 间最大空闲秒数（inter-chunk idle hang tripwire）
   first_chunk_timeout_seconds: 120      # 首 chunk（prefill/TTFT+推理预热）上限；大上下文重发的 TTFT 远超 idle，单独给宽预算
   stream_heartbeat_seconds: 10          # 客户端真流式静默间隙（consult/重发prefill）期发 SSE keep-alive 注释帧的间隔秒
-  max_input_chars: 32000                # question + context 字符上限
-  max_output_tokens: 16384              # consult max_tokens（含 reasoning 预算；旧 4096 会被推理吃光致答案截断）
+  # consult 输入/输出不设武断上限：约束是 target provider 的 context_window（输入）
+  # 与 max_output_tokens（输出，executor 用它做 max_tokens）。
   # —— §12.11 双家族机制 ——
   awareness_enabled: true               # 在 system prompt 注入双家族状态披露
   redirect_enabled: true                # user 消息标签触发的整轮 provider 重定向

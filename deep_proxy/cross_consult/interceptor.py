@@ -156,7 +156,6 @@ async def resolve_consult_tool_call(
     args = _parse_args(tc)
     question = (args.get("question") or "").strip()
     context = args.get("context") or None
-    combined_len = len(question) + (len(context) if context else 0)
 
     # 验证 1：quota 耗尽（最高优先级——已 over budget 时不再 spend）
     if call_count >= cc_config.max_calls_per_request:
@@ -171,13 +170,8 @@ async def resolve_consult_tool_call(
             "[DeepProxy cross_consult error] missing required 'question' field",
             False,
         )
-    # 验证 3：question+context 超长
-    if combined_len > cc_config.max_input_chars:
-        return (
-            f"[DeepProxy cross_consult error] input too long "
-            f"({combined_len} chars > {cc_config.max_input_chars})",
-            False,
-        )
+    # 注：不再对 question+context 设武断字符上限——输入约束是 target provider 的
+    # context_window，超长由 provider 自然报错并以 tool_result 返还 agent。
 
     # 通过验证 → 实际执行
     tool_text = await execute_consult(
