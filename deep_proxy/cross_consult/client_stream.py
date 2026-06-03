@@ -190,6 +190,13 @@ class _Timeout:
     seconds: float
 
 
+def _resolve_idle(idle_ref):
+    """解析 idle_timeout：float 直接返回，list 取 [0]（mutable ref 供调用方动态调整）。"""
+    if isinstance(idle_ref, list) and idle_ref:
+        return float(idle_ref[0])
+    return float(idle_ref)
+
+
 async def consume_with_heartbeat(
     chunk_iter: AsyncIterator[dict],
     *,
@@ -207,6 +214,10 @@ async def consume_with_heartbeat(
 
     StopAsyncIteration（上游自然结束）→ 静默 return。finally 负责 cancel 仍 in-flight 的
     `__anext__` task + drain + aclose 上游，确保连接确定性释放（不依赖 GC）。
+
+    idle_timeout 可以是 float（固定值）或 list[float]（mutable ref）：调用方可把 list
+    放入一个可变容器如 `idle_ref = [idle_timeout]` 传入，后续每循环通过 _resolve_idle
+    取最新值——检测到 reasoning_content 后动态放大的调用方按需写 idle_ref[0] = new_value。
 
     本函数只承载 "持久化 __anext__ task + 心跳 tick + first/inter-chunk 预算切换 + 超时
     检测 + 清理" 这套并发骨架；**per-chunk 处理与超时收尾留给调用方**（stream_one_turn
@@ -229,7 +240,9 @@ async def consume_with_heartbeat(
     waited = 0.0
     try:
         while True:
-            budget = idle_timeout if got_first else first_chunk_timeout
+            # 每轮动态解析 idle_timeout（调用方可能通过 mutable ref 更新）
+            _idle = _resolve_idle(idle_timeout)
+            budget = _idle if got_first else first_chunk_timeout
             step = heartbeat_seconds
             if budget and budget > 0:  # budget<=0 表示禁用该阶段超时（永不 trip）
                 step = min(heartbeat_seconds, max(0.0, budget - waited))
@@ -271,6 +284,32 @@ async def consume_with_heartbeat(
                 pass
 
 
+def _has_reasoning_content(chunk: dict) -> bool:
+    """chunk 的 choices[].delta 中是否含非空 reasoning_content（深度思考 token）。"""
+    for ch in chunk.get("choices") or []:
+        delta = ch.get("delta") or {}
+        if isinstance(delta.get("reasoning_content"), str) and delta["reasoning_content"]:
+            return True
+    return False
+
+
+def _make_reasoning_aware_idle(
+    base_idle: float,
+    first_chunk_timeout: float,
+) -> tuple[list[float], float]:
+    """构造推理自适应 idle 超时容器。
+
+    返回 (idle_ref, reasoning_idle)：
+      - idle_ref: 可变列表，传入 consume_with_heartbeat（其每轮动态解析）
+      - reasoning_idle: 检测到 reasoning_content 时写入 idle_ref[0] 的升级值
+
+    reasoning_idle 取 base_idle 与 first_chunk_timeout 的较大值：
+    深度思考的 burst 间隙与初始 prefill 属同一量级，用 first_chunk_timeout 兜底。
+    """
+    reasoning_idle = max(base_idle, first_chunk_timeout)
+    return [base_idle], reasoning_idle
+
+
 async def stream_one_turn(
     chunk_iter: AsyncIterator[dict],
     result: TurnResult,
@@ -283,12 +322,16 @@ async def stream_one_turn(
     """消费单轮上游 chunk 流：content/reasoning 即时透传；tool_calls 累加（不透传）
     留到轮末判定；等待间隙发心跳；error frame / 超预算 -> result.errored=True 并终止。
 
+    reasoning_content 自适应：首次检测到 reasoning_content token 时，将 idle 预算
+    升级到与 first_chunk_timeout 同级（深度思考 burst 间隙属于正常行为，不是 hang）。
+
     超时仅写 result 元数据（errored/timed_out/phase/seconds）后 return——通知帧由调用方
     （router.iter_chat_chunks 初始轮 / continuation 重发轮）据 result.timed_out 构造。
     并发骨架与清理委托给 consume_with_heartbeat。
     """
+    idle_ref, reasoning_idle = _make_reasoning_aware_idle(idle_timeout, first_chunk_timeout)
     gen = consume_with_heartbeat(
-        chunk_iter, idle_timeout=idle_timeout, first_chunk_timeout=first_chunk_timeout,
+        chunk_iter, idle_timeout=idle_ref, first_chunk_timeout=first_chunk_timeout,
         heartbeat_seconds=heartbeat_seconds, log_label="stream_one_turn",
     )
     try:
@@ -307,6 +350,13 @@ async def stream_one_turn(
                 result.errored = True
                 yield chunk
                 return
+            # reasoning_content 自适应：首次看到深度思考 token 时升级 idle 预算
+            if _has_reasoning_content(chunk) and idle_ref[0] < reasoning_idle:
+                idle_ref[0] = reasoning_idle
+                logger.debug(
+                    "stream_one_turn reasoning seen, idle %.0f→%.0f",
+                    idle_timeout, reasoning_idle,
+                )
             _accumulate_turn(chunk, result, tool_name)
             fwd = _client_facing_chunk(chunk)
             if fwd is not None:
@@ -329,12 +379,16 @@ async def stream_with_idle_timeout(
     （不抑制 tool_calls / finish_reason），等待间隙发心跳；超预算时设 result.errored/
     timed_out 并内联 yield 优雅超时通知（content + finish_reason=stop）并终止。
 
+    reasoning_content 自适应：首次检测到 reasoning_content token 时，将 idle 预算
+    升级到与 first_chunk_timeout 同级（深度思考 burst 间隙属于正常行为，不是 hang）。
+
     与 stream_one_turn 的区别：本函数原样透传（无 cross_consult 工具帧累加/抑制），且
     超时通知由本函数内联发出（普通路径无 router 侧的 continuation 编排）。两者共享同一
     consume_with_heartbeat 骨架，差异收敛到 per-chunk 处理与超时收尾两处。
     """
+    idle_ref, reasoning_idle = _make_reasoning_aware_idle(idle_timeout, first_chunk_timeout)
     gen = consume_with_heartbeat(
-        chunk_iter, idle_timeout=idle_timeout, first_chunk_timeout=first_chunk_timeout,
+        chunk_iter, idle_timeout=idle_ref, first_chunk_timeout=first_chunk_timeout,
         heartbeat_seconds=heartbeat_seconds, log_label="stream_with_idle_timeout",
     )
     saw_finish = False  # 上游是否已发过 finish_reason（本轮逻辑上已收尾）
@@ -357,6 +411,13 @@ async def stream_with_idle_timeout(
                 yield item
                 continue
             chunk = item
+            # reasoning_content 自适应：首次看到深度思考 token 时升级 idle 预算
+            if _has_reasoning_content(chunk) and idle_ref[0] < reasoning_idle:
+                idle_ref[0] = reasoning_idle
+                logger.debug(
+                    "stream_with_idle_timeout reasoning seen, idle %.0f→%.0f",
+                    idle_timeout, reasoning_idle,
+                )
             if any(c.get("finish_reason") for c in (chunk.get("choices") or [])):
                 saw_finish = True
             yield chunk  # 原样透传（含 error frame / tool_calls / finish_reason）

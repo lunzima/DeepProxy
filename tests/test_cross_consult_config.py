@@ -15,7 +15,7 @@ def test_cross_consult_config_defaults():
     assert c.pairs == {}
     assert c.pair_for("anything") is None  # 无 pair → 不触发
     assert c.max_calls_per_request == 3
-    assert c.call_timeout_seconds == 30
+    assert c.call_timeout_seconds == 60
     assert c.max_input_chars == 32000
     assert c.max_output_tokens == 4096
     # §12.11 新字段默认值

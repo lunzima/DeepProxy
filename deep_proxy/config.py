@@ -538,7 +538,7 @@ class StreamingConfig(BaseModel):
                     "上游繁忙/网络慢 → 注入优雅超时通知并收尾（非错误）。",
     )
     idle_timeout_seconds: int = Field(
-        default=30, ge=1, le=600,
+        default=60, ge=1, le=600,
         description="首 chunk 之后相邻 chunk 间允许的最长无活动秒数（mid-stream hang "
                     "tripwire）。超出 → 注入优雅超时通知并收尾（非错误）。",
     )

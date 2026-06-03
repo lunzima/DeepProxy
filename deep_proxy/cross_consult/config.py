@@ -41,7 +41,7 @@ class CrossConsultConfig(BaseModel):
         description="单次 client 请求内 cross_consult 调用次数上限。",
     )
     call_timeout_seconds: int = Field(
-        default=30, ge=1, le=600,
+        default=60, ge=1, le=600,
         description="流式 chunk 间最大空闲秒数（inter-chunk idle）。首 chunk 之后，"
                     "相邻 chunk 间隔超过该值才视为 mid-stream hang。注：首 chunk 的 "
                     "prefill/TTFT 由 first_chunk_timeout_seconds 单独管辖。",
