@@ -76,13 +76,19 @@ async def aggregate_stream_to_response(
     iterator = fn(config, body, provider=provider).__aiter__()
     chunk_count = 0
     start = time.monotonic()
+    # reasoning_content 自适应：首次检测到深度思考 token 后，idle 预算升级到
+    # max(idle_timeout, first_chunk_timeout)，与 client_stream 行为一致。
+    reasoning_seen = False
+    _effective_idle = idle_timeout
+    reasoning_idle = max(idle_timeout, first_chunk_timeout or idle_timeout)
     while True:
         first = chunk_count == 0
-        # 首 chunk 用 first_chunk_timeout（未给则退回 idle_timeout）；之后用 idle_timeout
+        # 首 chunk 用 first_chunk_timeout（未给则退回 idle_timeout）；之后用 _effective_idle
+        # （reasoning_content 后升级到 reasoning_idle）
         wait_timeout = (
             first_chunk_timeout
             if first and first_chunk_timeout and first_chunk_timeout > 0
-            else idle_timeout
+            else _effective_idle
         )
         try:
             if wait_timeout and wait_timeout > 0:
@@ -122,6 +128,9 @@ async def aggregate_stream_to_response(
             r = delta.get("reasoning_content")
             if isinstance(r, str):
                 reasoning_parts.append(r)
+                if not reasoning_seen and r:
+                    reasoning_seen = True
+                    _effective_idle = reasoning_idle
             tcs = delta.get("tool_calls")
             if isinstance(tcs, list) and tcs:
                 tool_calls = merge_tool_call_deltas(tool_calls, tcs)
