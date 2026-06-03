@@ -23,6 +23,7 @@ from ..config import ProxyConfig
 from ..litellm_client import iter_litellm_chunks
 from ..providers import Provider
 from ..utils import is_error_frame, merge_tool_call_deltas
+from .reasoning_idle import compute_reasoning_idle
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,9 @@ async def aggregate_stream_to_response(
         大上下文重发的 time-to-first-chunk 远长于 chunk 间隙，故单独给宽预算。
         None / 0 / 负数 = 退回 idle_timeout 守护首 chunk（向后兼容）。
       - idle_timeout：首 chunk 之后，相邻 chunk 间允许的最长无活动时间（真正的
-        mid-stream hang tripwire）。0 / 负数 = 不限。
+        mid-stream hang tripwire）。0 / 负数 = 不限。**自适应**：首次出现非空
+        reasoning_content 后,该预算升级到 compute_reasoning_idle(idle, first_chunk)
+        （深度思考 burst 间隙属正常行为，不是 hang），与 client_stream 一致。
 
     与 client_stream.stream_one_turn 的相似是**刻意分叉**，勿合并：本函数内部聚合成
     dict（不发心跳、wait_for 即可），后者面向客户端真流式（yield + 心跳）。
@@ -77,10 +80,10 @@ async def aggregate_stream_to_response(
     chunk_count = 0
     start = time.monotonic()
     # reasoning_content 自适应：首次检测到深度思考 token 后，idle 预算升级到
-    # max(idle_timeout, first_chunk_timeout)，与 client_stream 行为一致。
+    # reasoning_idle（公式与 client_stream 共享，见 reasoning_idle 模块）。
     reasoning_seen = False
     _effective_idle = idle_timeout
-    reasoning_idle = max(idle_timeout, first_chunk_timeout or idle_timeout)
+    reasoning_idle = compute_reasoning_idle(idle_timeout, first_chunk_timeout)
     while True:
         first = chunk_count == 0
         # 首 chunk 用 first_chunk_timeout（未给则退回 idle_timeout）；之后用 _effective_idle

@@ -25,6 +25,8 @@ from ..compatibility.reasoning_handler import StreamingReasoningAccumulator
 from ..litellm_client import iter_litellm_chunks
 from ..providers import Provider
 from .config import CrossConsultConfig
+from .reasoning_idle import chunk_has_reasoning as _has_reasoning_content
+from .reasoning_idle import compute_reasoning_idle
 from .interceptor import (
     extract_cross_consult_tool_calls,
     resolve_consult_tool_call,
@@ -284,15 +286,6 @@ async def consume_with_heartbeat(
                 pass
 
 
-def _has_reasoning_content(chunk: dict) -> bool:
-    """chunk 的 choices[].delta 中是否含非空 reasoning_content（深度思考 token）。"""
-    for ch in chunk.get("choices") or []:
-        delta = ch.get("delta") or {}
-        if isinstance(delta.get("reasoning_content"), str) and delta["reasoning_content"]:
-            return True
-    return False
-
-
 def _make_reasoning_aware_idle(
     base_idle: float,
     first_chunk_timeout: float,
@@ -302,12 +295,9 @@ def _make_reasoning_aware_idle(
     返回 (idle_ref, reasoning_idle)：
       - idle_ref: 可变列表，传入 consume_with_heartbeat（其每轮动态解析）
       - reasoning_idle: 检测到 reasoning_content 时写入 idle_ref[0] 的升级值
-
-    reasoning_idle 取 base_idle 与 first_chunk_timeout 的较大值：
-    深度思考的 burst 间隙与初始 prefill 属同一量级，用 first_chunk_timeout 兜底。
+        （公式见 reasoning_idle.compute_reasoning_idle，与 streaming.py 共享）
     """
-    reasoning_idle = max(base_idle, first_chunk_timeout)
-    return [base_idle], reasoning_idle
+    return [base_idle], compute_reasoning_idle(base_idle, first_chunk_timeout)
 
 
 async def stream_one_turn(

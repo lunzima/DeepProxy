@@ -172,6 +172,28 @@ async def test_stream_one_turn_records_mid_stream_timeout_metadata():
     assert res.timeout_seconds == 0.2
 
 
+async def test_stream_one_turn_reasoning_upgrades_idle_budget():
+    """检测到 reasoning_content 后，mid-stream idle 预算升级到 max(idle, first_chunk)。
+    深度思考 burst 间隙 > idle_timeout 但 ≤ reasoning_idle 时不应误判为 hang。
+    （回归：此用例在 162f3d9 之前会 mid_stream 超时。）"""
+    async def reasoning_then_gap():
+        yield _delta_chunk(reasoning_content="思考中…")  # 触发升格 max(0.2, 2.0)=2.0
+        await asyncio.sleep(0.5)  # > idle_timeout(0.2)，< reasoning_idle(2.0)
+        yield _delta_chunk(content="答案")
+        yield _finish_chunk("stop")
+
+    res = TurnResult()
+    out = [f async for f in stream_one_turn(
+        reasoning_then_gap(), res, tool_name="cross_consult",
+        idle_timeout=0.2, first_chunk_timeout=2.0, heartbeat_seconds=0.1,
+    )]
+    assert res.errored is False
+    assert res.timed_out is False
+    texts = [d["choices"][0]["delta"] for d in out if "choices" in d]
+    assert {"reasoning_content": "思考中…"} in texts
+    assert {"content": "答案"} in texts
+
+
 def test_make_timeout_notice_frames_first_chunk():
     res = TurnResult(timed_out=True, timeout_phase="first_chunk", timeout_seconds=120.0)
     frames = make_timeout_notice_frames(res)
