@@ -172,6 +172,66 @@ async def test_execute_consult_accumulates_reasoning_when_content_empty(
     assert out == "deep think"
 
 
+async def test_execute_consult_enables_reasoning_top_level(cfg_for_executor):
+    """根因回归：consult 调用必须为 reasoning provider 注入 reasoning_effort。
+
+    target 走顶层 reasoning_effort 协议（MiMo 风格）时，consult body 必须带顶层
+    reasoning_effort。否则 reasoning 模型静默思考、不流式吐 token，首 chunk 迟迟不
+    到 → 误触 first_chunk 超时（cross_consult 超时根因）。
+    """
+    captured: list[dict] = []
+    mimo_top_level = Provider(
+        name="mimo",
+        api_base="https://x",
+        api_key="tp",
+        litellm_prefix="openai/",
+        flash_model="mimo-v2.5",
+        pro_model="mimo-v2.5-pro",
+        reasoning_effort_field="reasoning_effort",
+        reasoning_effort_value="high",
+        allowed_extra_params=["reasoning_effort", "thinking"],
+    )
+    with patch(
+        "deep_proxy.cross_consult.streaming.iter_litellm_chunks",
+        new=_capture_body_iter(captured, text="ok"),
+    ):
+        await execute_consult(
+            question="hi", context=None,
+            target_provider=mimo_top_level, config=cfg_for_executor,
+            cc_config=CrossConsultConfig(enabled=True),
+        )
+    assert captured[0].get("reasoning_effort") == "high"
+
+
+async def test_execute_consult_enables_reasoning_nested(cfg_for_executor):
+    """根因回归：target 走嵌套 thinking.reasoning_effort 协议（DeepSeek 风格）时，
+    consult body 必须带 thinking.reasoning_effort + type=enabled。"""
+    captured: list[dict] = []
+    deepseek_nested = Provider(
+        name="deepseek",
+        api_base="https://api.deepseek.com",
+        api_key="sk",
+        litellm_prefix="deepseek/",
+        flash_model="deepseek-v4-flash",
+        pro_model="deepseek-v4-pro",
+        reasoning_effort_field="thinking.reasoning_effort",
+        reasoning_effort_value="max",
+    )
+    with patch(
+        "deep_proxy.cross_consult.streaming.iter_litellm_chunks",
+        new=_capture_body_iter(captured, text="ok"),
+    ):
+        await execute_consult(
+            question="hi", context=None,
+            target_provider=deepseek_nested, config=cfg_for_executor,
+            cc_config=CrossConsultConfig(enabled=True),
+        )
+    thinking = captured[0].get("thinking")
+    assert isinstance(thinking, dict)
+    assert thinking.get("reasoning_effort") == "max"
+    assert thinking.get("type") == "enabled"
+
+
 async def test_execute_consult_returns_error_string_on_idle_timeout(
     cfg_for_executor, target_provider,
 ):

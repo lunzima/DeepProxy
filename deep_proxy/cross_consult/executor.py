@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..compatibility.deepseek_fixes import ensure_thinking_dict, is_thinking_disabled
+from ..compatibility.mimo_fixes import inject_top_level_reasoning_effort
 from ..config import ProxyConfig
 from ..providers import Provider
 from .config import CrossConsultConfig
@@ -26,6 +28,32 @@ logger = logging.getLogger(__name__)
 
 
 _ERROR_PREFIX = "[DeepProxy cross_consult error]"
+
+
+def _inject_reasoning_effort(body: dict[str, Any], provider: Provider) -> None:
+    """按 target provider 协议为 consult body 注入默认 reasoning_effort。
+
+    consult 调用刻意绕过 prepare_request（防递归 / 不要 skills / sampling），因此
+    reasoning_effort 注入这一步也被跳过了。但 target 是 reasoning 模型：reasoning
+    关闭时它会静默思考、不流式吐 token，首 chunk 迟迟不到 → 误触 first_chunk 超时
+    （这是 cross_consult 超时的根因）。这里补回与 router.prepare_request 一致的注入：
+    DeepSeek 走嵌套 thinking.reasoning_effort；MiMo 走顶层 reasoning_effort。
+    取值/字段位置都从 provider 配置读，两条路径共享同一真理源。
+    """
+    if not provider.has_thinking_param:
+        return
+    if is_thinking_disabled(body.get("thinking")):
+        return
+    field_path = provider.reasoning_effort_field
+    value = provider.reasoning_effort_value
+    if field_path == "thinking.reasoning_effort":
+        td = ensure_thinking_dict(body)
+        td.setdefault("type", "enabled")
+        td.setdefault("reasoning_effort", value)
+    elif field_path == "reasoning_effort":
+        inject_top_level_reasoning_effort(body, value=value)
+    else:
+        logger.warning("未知 reasoning_effort_field: %s", field_path)
 
 
 async def execute_consult(
@@ -58,6 +86,8 @@ async def execute_consult(
         # 递归防护 sentinel：prepare_request 检测到此标记跳过 cross_consult 注入
         "_deepproxy_cross_consult_internal": True,
     }
+    # reasoning 模型必须开 reasoning 才会流式吐 token；否则静默思考触发 first_chunk 超时
+    _inject_reasoning_effort(body, target_provider)
 
     try:
         result = await aggregate_stream_to_response(
