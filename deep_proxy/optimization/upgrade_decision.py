@@ -240,7 +240,7 @@ class UpgradeDecisionEngine:
         if heuristic_result.score >= params.heur_thr:
             did_upgrade = True
             logger.info(
-                "启发式升格: score=%s >= threshold=%s",
+                "启发式升格: score=%.2f >= threshold=%.2f",
                 heuristic_result.score, params.heur_thr,
             )
 

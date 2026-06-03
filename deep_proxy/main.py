@@ -89,7 +89,7 @@ async def lifespan(app: FastAPI):
         )
     _dt = config.flash_upgrade.dynamic_threshold
     logger.info(
-        "[startup] dynamic_threshold enabled=%s flash_floor=%s band=%s",
+        "[startup] dynamic_threshold enabled=%s flash_floor=%.2f band=%.2f",
         _dt.enabled, _dt.flash_floor, _dt.band,
     )
 
@@ -396,6 +396,15 @@ async def _prepare_inbound(
         )
     prepared = await router.prepare_request(
         body, sampling_profile=sampling, provider=provider, port=port,
+    )
+    _temp = prepared.get("temperature")
+    logger.info(
+        "请求 model=%s temp=%.2f stream=%s provider=%s port=%s",
+        prepared.get("model"),
+        _temp if _temp is not None else 0.0,
+        prepared.get("stream", False),
+        provider.name if provider else "?",
+        port,
     )
     return provider, prepared, prepared.get("stream", False)
 

@@ -116,7 +116,9 @@ async def test_quota_exhausted_returns_error_tool_result(cfg_with_low_quota):
     # executor 应仅被调一次（第二次被 quota 拦截）
     executor_mock = AsyncMock(return_value="external 1")
 
-    with patch("deep_proxy.router.call_litellm",
+    # 初始调用经 aggregate_stream_to_response（cc 活跃时 router.chat_completions
+    # 走流式聚合以获取 chunk 级超时保护）；重发仍走 iter_litellm_chunks 流式路径。
+    with patch("deep_proxy.router.aggregate_stream_to_response",
                new=AsyncMock(return_value=initial)), \
          patch("deep_proxy.cross_consult.interceptor.execute_consult",
                new=executor_mock), \
@@ -149,7 +151,7 @@ async def test_input_too_long_returns_error_without_calling_executor(cfg_with_lo
 
     executor_mock = AsyncMock(return_value="should not be called")
 
-    with patch("deep_proxy.router.call_litellm",
+    with patch("deep_proxy.router.aggregate_stream_to_response",
                new=AsyncMock(return_value=initial)), \
          patch("deep_proxy.cross_consult.interceptor.execute_consult",
                new=executor_mock), \

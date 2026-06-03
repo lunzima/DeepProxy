@@ -81,7 +81,7 @@ async def test_deepseek_source_consults_mimo_pro(cfg_sym):
     # 主 provider 初始（非流式）返回 tool_call
     initial = _tc("t", {"question": "q"})
 
-    with patch("deep_proxy.router.call_litellm",
+    with patch("deep_proxy.router.aggregate_stream_to_response",
                new=AsyncMock(return_value=initial)), \
          patch("deep_proxy.cross_consult.streaming.iter_litellm_chunks",
                new=_stream_router_by_provider(captured_consult_body, "mimo")):
@@ -106,7 +106,7 @@ async def test_mimo_source_consults_deepseek_pro(cfg_sym):
 
     initial = _tc("t", {"question": "q"})
 
-    with patch("deep_proxy.router.call_litellm",
+    with patch("deep_proxy.router.aggregate_stream_to_response",
                new=AsyncMock(return_value=initial)), \
          patch("deep_proxy.cross_consult.streaming.iter_litellm_chunks",
                new=_stream_router_by_provider(captured_consult_body, "deepseek")):

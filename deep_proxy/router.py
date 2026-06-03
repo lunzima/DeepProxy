@@ -18,6 +18,7 @@ import logging
 from typing import Any, AsyncGenerator
 
 import httpx
+from fastapi import HTTPException
 
 from .compatibility.deepseek_fixes import (
     default_thinking_type,
@@ -59,7 +60,7 @@ from .cross_consult.interceptor import (
     execute_cross_consult_loop,
     inject_into_request,
 )
-from .cross_consult.streaming import stream_aggregated_call
+from .cross_consult.streaming import aggregate_stream_to_response, stream_aggregated_call
 from .cross_consult.client_stream import (
     STREAM_ERRORED,
     TurnResult,
@@ -487,15 +488,41 @@ class DeepProxyRouter:
         request_messages = list(body.get("messages") or [])
         # 是否需要剥离 CoT Reflection 标签（由 apply_cheap_optimizations 在 prepare_request 时打的标）
         strip_cot = bool(body.get("_deepproxy_strip_cot", False))
-        raw = await call_litellm(self.config, body, provider=provider)
+
+        # Cross-Consult 活跃时：初始调用也走流式聚合（aggregate_stream_to_response），
+        # 避免深度思考在非流式 litellm.acompletion() 中无超时保护导致客户端墙钟超时。
+        # 注入 tools + awareness prompt 后，模型 reasoning 可能远超普通请求；
+        # 流式路径的 idle_timeout / first_chunk_timeout 提供 chunk 级守护。
+        cc_active = (
+            self.config.cross_consult.enabled
+            and provider is not None
+            and self.config.cross_consult.pair_for(provider.name) is not None
+        )
+
+        if cc_active:
+            cc_idle = float(self.config.cross_consult.call_timeout_seconds)
+            cc_first = float(self.config.cross_consult.first_chunk_timeout_seconds)
+            raw = await aggregate_stream_to_response(
+                self.config, body, provider=provider,
+                idle_timeout=cc_idle, first_chunk_timeout=cc_first,
+            )
+            if "_dp_error" in raw:
+                raise HTTPException(status_code=504, detail={
+                    "error": {
+                        "message": f"上游超时: {raw['_dp_error']}",
+                        "type": "timeout_error",
+                        "param": None, "code": 504,
+                    }
+                })
+        else:
+            raw = await call_litellm(self.config, body, provider=provider)
+
         result = self.process_response(raw, provider=provider)
+
         # Cross-Consult 拦截：若响应含 cross_consult tool_call，执行 consult + 重发循环。
         # 重发走流式聚合（stream_aggregated_call）以避免深度思考触发墙钟超时；返回形状
         # 保持非流式 dict，process_response 无需感知差异。
-        if self.config.cross_consult.enabled and provider is not None:
-            cc_idle = float(self.config.cross_consult.call_timeout_seconds)
-            cc_first = float(self.config.cross_consult.first_chunk_timeout_seconds)
-
+        if cc_active:
             async def _resend_via_stream(cfg, b, *, provider=None):
                 return await stream_aggregated_call(
                     cfg, b, provider=provider,

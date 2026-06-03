@@ -117,7 +117,8 @@ async def test_chat_completions_executes_cross_consult_and_resends(cfg_cross):
         _text_chunks("final answer using external answer"),
     )
 
-    with patch("deep_proxy.router.call_litellm",
+    # cc 活跃时初始调用走 aggregate_stream_to_response（流式聚合）；重发走 iter_litellm_chunks
+    with patch("deep_proxy.router.aggregate_stream_to_response",
                new=AsyncMock(return_value=initial_response)), \
          patch("deep_proxy.cross_consult.streaming.iter_litellm_chunks",
                new=stream_iter):
@@ -139,7 +140,7 @@ async def test_chat_completions_passes_through_when_no_cross_consult_call(cfg_cr
     router = DeepProxyRouter(cfg_cross)
     provider = cfg_cross.providers["deepseek"]
 
-    with patch("deep_proxy.router.call_litellm",
+    with patch("deep_proxy.router.aggregate_stream_to_response",
                new=AsyncMock(return_value=_make_text_response("hi"))):
         body = {"model": "deepseek-v4-flash",
                 "messages": [{"role": "user", "content": "say hi"}]}
@@ -165,7 +166,7 @@ async def test_chat_completions_handles_consult_error_as_tool_result(cfg_cross):
     async def fake_executor(*args, **kwargs):
         return "[DeepProxy cross_consult error] upstream failed: simulated"
 
-    with patch("deep_proxy.router.call_litellm",
+    with patch("deep_proxy.router.aggregate_stream_to_response",
                new=AsyncMock(return_value=initial_response)), \
          patch("deep_proxy.cross_consult.interceptor.execute_consult",
                new=AsyncMock(side_effect=fake_executor)), \
@@ -351,7 +352,9 @@ async def test_resend_loop_uses_streaming_iter(cfg_cross):
     async def fake_executor(*args, **kwargs):
         return "external"
 
-    with patch("deep_proxy.router.call_litellm",
+    # 初始调用走 aggregate_stream_to_response（mock 返回带 tool_call 的初始响应）；
+    # 重发走 streaming.iter_litellm_chunks
+    with patch("deep_proxy.router.aggregate_stream_to_response",
                new=AsyncMock(return_value=initial_response)), \
          patch("deep_proxy.cross_consult.interceptor.execute_consult",
                new=AsyncMock(side_effect=fake_executor)), \
