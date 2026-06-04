@@ -267,6 +267,25 @@ class TestEnsurePersistence:
         # disabled 模式下不注入 dummy（DeepSeek 不会校验）
         assert "reasoning_content" not in msgs[0]
 
+    def test_thinking_disabled_skips_cache_backfill(self):
+        """disabled 时跳过**整个**流程，包括 cache.backfill——否则会把缓存 reasoning_content
+        回填进历史，污染 disabled 模式（DeepSeek 不校验也不期望）。"""
+        called = {"backfill": False}
+
+        class _SpyCache:
+            def backfill(self, messages):
+                called["backfill"] = True
+
+        msgs = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "ans"},
+            {"role": "user", "content": "next"},
+        ]
+        body = {"thinking": {"type": "disabled"}}
+        ensure_reasoning_content_persistence(msgs, body, cache=_SpyCache())
+        assert called["backfill"] is False
+        assert "reasoning_content" not in msgs[1]
+
 
 class TestRecoverReasoningContent:
     """LiteLLM model_dump 剥离 reasoning_content 时从原始对象兜底。"""

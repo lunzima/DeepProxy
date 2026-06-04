@@ -394,13 +394,13 @@ def ensure_reasoning_content_persistence(
 
     调用方负责按 provider.has_reasoning_content 门控；本函数无条件处理。
     """
+    # 用户显式 disabled → 跳过**整个**流程（含 cache backfill）：disabled 模式不校验也不
+    # 期望 reasoning_content，回填会污染历史。
+    if is_thinking_disabled(body.get("thinking")):
+        return body
+
     if cache is not None:
         cache.backfill(messages)
-
-    thinking = body.get("thinking")
-    explicitly_disabled = is_thinking_disabled(thinking)
-    if explicitly_disabled:
-        return body
 
     # 没显式禁用 → 显式启用 thinking 模式，确保 DeepSeek 接受 reasoning_content
     ensure_thinking_dict(body).setdefault("type", "enabled")
