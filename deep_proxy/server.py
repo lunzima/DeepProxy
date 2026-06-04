@@ -1,12 +1,15 @@
-"""DeepProxy 服务器启动入口（双端口绑定）。
+"""DeepProxy 服务器启动入口（绑定 config.ports 声明的全部端口）。
 
+默认双端口（legacy / config.example.yaml）：
 - coding_port (默认 8000) → precise_sampling profile
 - writing_port (默认 8001) → creative_sampling profile
   写作篮在 dynamic_baskets 层按 optimization.writing_basket_kind
   （creative / general）切换；采样参数与端口数量无关。
 
-两个端口共享同一个 FastAPI app 实例（lifespan 只跑一次），但
-请求处理函数会按入站端口选择对应的 profile 强制覆盖采样参数。
+所有端口共享同一个 FastAPI app 实例（lifespan 只跑一次），但请求处理函数会按
+入站 socket 端口选择对应的 PortBinding（provider / sampling / model_pool）。
+绑定的端口集合来自 config.bound_ports()（即 ports[] 声明的端口），不再硬编码
+coding_port/writing_port——新格式 remap 端口时服务器随之监听正确端口。
 """
 
 from __future__ import annotations
@@ -28,30 +31,30 @@ def _load_config():
     return ProxyConfig.discover_and_load()
 
 
-async def _serve_both(host: str, coding_port: int, writing_port: int, log_level: str):
+async def _serve_ports(host: str, ports: list[int], log_level: str):
+    """绑定 ports[] 声明的全部端口（共享同一个 FastAPI app 实例）。
+
+    路由按入站 socket 端口解析（main._binding_for_request），故服务器必须监听
+    ports[] 声明的端口本身。仅首个实例允许 reload（uvicorn 只允许一个 reload watcher）。
+    """
     import uvicorn
 
-    cfg_coding = uvicorn.Config(
-        "deep_proxy.main:app",
-        host=host,
-        port=coding_port,
-        log_level=log_level,
-        reload=os.getenv("DEEPPROXY_RELOAD", "false").lower() == "true",
-    )
-    cfg_writing = uvicorn.Config(
-        "deep_proxy.main:app",
-        host=host,
-        port=writing_port,
-        log_level=log_level,
-        reload=False,  # 第二个实例无法 reload（只允许一个 reload watcher）
-    )
-    server_coding = uvicorn.Server(cfg_coding)
-    server_writing = uvicorn.Server(cfg_writing)
-    await asyncio.gather(server_coding.serve(), server_writing.serve())
+    reload_enabled = os.getenv("DEEPPROXY_RELOAD", "false").lower() == "true"
+    servers = []
+    for i, port in enumerate(ports):
+        cfg = uvicorn.Config(
+            "deep_proxy.main:app",
+            host=host,
+            port=port,
+            log_level=log_level,
+            reload=reload_enabled if i == 0 else False,
+        )
+        servers.append(uvicorn.Server(cfg))
+    await asyncio.gather(*(s.serve() for s in servers))
 
 
 def main():
-    """启动 DeepProxy 服务器（同时绑定 coding_port 与 writing_port）。"""
+    """启动 DeepProxy 服务器（绑定 config.ports 声明的全部端口）。"""
     config = _load_config()
     log_level = config.log_level.lower()
 
@@ -145,10 +148,9 @@ def main():
             "output_cost_per_token": _p["completion"] / 1_000_000,
         })
 
-    asyncio.run(_serve_both(
+    asyncio.run(_serve_ports(
         host=config.host,
-        coding_port=config.coding_port,
-        writing_port=config.writing_port,
+        ports=config.bound_ports(),
         log_level=log_level,
     ))
 

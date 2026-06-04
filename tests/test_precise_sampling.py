@@ -16,10 +16,15 @@ from deep_proxy.config import (
 )
 
 
-class TestRouterInstantiatesCompressorWithProfile:
-    """router 启动时应把 precise_sampling 注入给压缩器。"""
+class TestRouterInstantiatesCompressor:
+    """router 启动时（optimization + compress_skills 开启）应构造压缩器。
 
-    async def test_compressor_receives_precise_sampling_sampling(self):
+    压缩器不再接收 sampling profile——压缩调用用固定确定性参数（temperature=0.1），
+    见 compressor._build_compress_kwargs；故此处只断言压缩器被正确构造并用配置的
+    compressor_model。
+    """
+
+    async def test_compressor_constructed_with_configured_model(self):
         from deep_proxy.router import DeepProxyRouter
 
         cfg = ProxyConfig(
@@ -28,8 +33,7 @@ class TestRouterInstantiatesCompressorWithProfile:
         )
         r = DeepProxyRouter(cfg)
         assert r._compressor is not None
-        # 注入的就是 ProxyConfig.precise_sampling
-        assert r._compressor._sampling is cfg.precise_sampling
+        assert r._compressor._model == cfg.optimization.compressor_model
 
 
 class TestSampleInRange:

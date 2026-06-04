@@ -36,6 +36,48 @@ class TestProxyConfigPorts:
         assert cfg.coding_port == 9000
         assert cfg.writing_port == 9001
 
+    def test_bound_ports_follows_ports_declaration(self):
+        """服务器绑定的端口 = ports[] 声明的端口，而非硬编码的 coding_port/writing_port。
+        新格式把端口 remap 到 9000/9001 时，server 必须绑定 9000/9001（否则绑 8000/8001
+        → provider_for_port 返回 None → 所有请求静默退回直通路径）。"""
+        from deep_proxy.config import normalize_legacy_config
+
+        base = {
+            "providers": {"deepseek": {
+                "name": "deepseek", "api_base": "x", "api_key": "y",
+                "litellm_prefix": "deepseek/", "flash_model": "a", "pro_model": "b"}},
+            "deepseek": {"api_key": "y"},
+        }
+        # ports remap 到 9000/9001，coding/writing_port 仍是默认 8000/8001
+        cfg = ProxyConfig.model_validate(normalize_legacy_config({
+            **base,
+            "ports": [
+                {"port": 9000, "provider": "deepseek", "sampling": "precise"},
+                {"port": 9001, "provider": "deepseek", "sampling": "creative"},
+            ],
+        }))
+        assert cfg.bound_ports() == [9000, 9001]
+
+    def test_bound_ports_legacy_defaults(self):
+        """老格式（无 providers/ports）经 normalize 后绑定 [8000, 8001]，与历史一致。"""
+        from deep_proxy.config import normalize_legacy_config
+
+        cfg = ProxyConfig.model_validate(normalize_legacy_config({"deepseek": {"api_key": "y"}}))
+        assert cfg.bound_ports() == [8000, 8001]
+
+    def test_bound_ports_single_port(self):
+        """单端口部署：仅声明 8000 → server 只绑定 [8000]（不再凭空绑定幽灵 8001）。"""
+        from deep_proxy.config import normalize_legacy_config
+
+        cfg = ProxyConfig.model_validate(normalize_legacy_config({
+            "providers": {"deepseek": {
+                "name": "deepseek", "api_base": "x", "api_key": "y",
+                "litellm_prefix": "deepseek/", "flash_model": "a", "pro_model": "b"}},
+            "deepseek": {"api_key": "y"},
+            "ports": [{"port": 8000, "provider": "deepseek", "sampling": "precise"}],
+        }))
+        assert cfg.bound_ports() == [8000]
+
 
 class TestForcedOverride:
     """sampling_profile 提供时，4 个采样参数强制覆盖客户端值。"""

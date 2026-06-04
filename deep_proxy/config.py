@@ -635,6 +635,24 @@ class ProxyConfig(BaseModel):
                     )
         return self
 
+    def bound_ports(self) -> list[int]:
+        """服务器实际监听的端口列表 = ports[] 声明的全部端口（去重保序）。
+
+        路由按入站 socket 端口（main._binding_for_request）解析，故服务器必须绑定
+        ports[] 声明的端口本身，而非硬编码的 coding_port/writing_port——否则 server
+        绑了一个 provider_for_port 返回 None 的端口，请求全部静默退回直通路径。
+        ports[] 为空（仅直接 ProxyConfig() 构造、未经 normalize 的极端兜底；正常
+        from_yaml/from_env 加载路径经 normalize_legacy_config 后 ports 必非空）时退回
+        [coding_port, writing_port]。
+        """
+        if not self.ports:
+            return [self.coding_port, self.writing_port]
+        ordered: list[int] = []
+        for binding in self.ports:
+            if binding.port not in ordered:
+                ordered.append(binding.port)
+        return ordered
+
     def binding_for_port(self, port: int) -> PortBinding | None:
         """按入站端口查找 PortBinding；端口未配置返回 None。"""
         for binding in self.ports:
