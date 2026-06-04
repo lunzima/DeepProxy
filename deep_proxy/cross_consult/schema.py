@@ -35,17 +35,8 @@ def build_tool_schema(*, tool_name: str = "cross_consult") -> dict[str, Any]:
                         "description": "可选背景。如果 question 引用了当前会话中的"
                                        "代码/文本，把片段放在这里。",
                     },
-                    "purpose": {
-                        "type": "string",
-                        "enum": [
-                            "second_opinion",
-                            "cross_domain_help",
-                            "style_check",
-                            "logic_check",
-                            "other",
-                        ],
-                        "description": "调用意图，用于 telemetry，不影响行为。",
-                    },
+                    # 注：曾有 purpose 字段用于 telemetry，但 executor/interceptor 从不解析、
+                    # 也无对应日志（§12.9 telemetry 未实现）——属死契约，已移除以省 schema token。
                 },
             },
         },

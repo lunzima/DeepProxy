@@ -33,8 +33,10 @@ class CrossConsultConfig(BaseModel):
     )
     pairs: dict[str, str] = Field(
         default_factory=dict,
-        description="provider 对偶 map（symmetric，由用户在两个方向各声明一次）。"
-                    "例：{'deepseek': 'mimo', 'mimo': 'deepseek'}。",
+        description="provider 对偶 map：source→consult-target。通常对称声明双向"
+                    "（{'deepseek': 'mimo', 'mimo': 'deepseek'}），但**允许单向**——"
+                    "只声明 {'deepseek': 'mimo'} 表示仅 deepseek 起的请求会注入 cross_consult"
+                    "工具、咨询 mimo；mimo 起的请求无对偶则不激活 cc（非 bug，是有意降级）。",
     )
     max_calls_per_request: int = Field(
         default=3, ge=1, le=10,

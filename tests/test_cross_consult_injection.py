@@ -14,18 +14,9 @@ def test_tool_schema_basic_shape():
     assert params["type"] == "object"
     assert "question" in params["properties"]
     assert "context" in params["properties"]
-    assert "purpose" in params["properties"]
     assert params["required"] == ["question"]
-
-
-def test_tool_schema_purpose_enum():
-    from deep_proxy.cross_consult.schema import build_tool_schema
-    s = build_tool_schema(tool_name="cross_consult")
-    purpose = s["function"]["parameters"]["properties"]["purpose"]
-    assert "enum" in purpose
-    assert set(purpose["enum"]) == {
-        "second_opinion", "cross_domain_help", "style_check", "logic_check", "other",
-    }
+    # purpose 字段曾用于未实现的 telemetry，属死契约，已移除
+    assert "purpose" not in params["properties"]
 
 
 def test_system_prompt_addendum_mentions_quota():
