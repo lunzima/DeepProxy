@@ -6,14 +6,15 @@
 - openai_stream_to_claude: OpenAI SSE chunks → Anthropic SSE 事件序列
 
 支持范围：
-- text / image (data URL) / tool_use / tool_result content blocks
+- text / tool_use / tool_result content blocks（tool_result.is_error → 内容前缀错误标记）
 - system 字段（string 或 text-block 数组）→ system message
 - tools / tool_choice 双向映射
 - stream（文本块；tool_use 流式作为单 block 在最后整体发出）
-- stop_reason 双向映射
+- stop_reason 双向映射（含 tool_use 块在场时强制 stop_reason=tool_use）
 - usage 字段映射（input_tokens ↔ prompt_tokens、output_tokens ↔ completion_tokens）
 
-DeepSeek 不支持的字段（top_k、metadata 等）静默丢弃。
+**不支持/静默丢弃**：image / document / search_result content block（DeepSeek/MiMo 的
+Anthropic 兼容端点不支持，丢弃避免上游 400）；DeepSeek 不支持的顶层字段（top_k、metadata 等）。
 """
 
 from __future__ import annotations
@@ -99,6 +100,10 @@ def _convert_user_content_blocks(
                 content = get_text_from_content(content)
             elif not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False)
+            # Anthropic tool_result.is_error 在 OpenAI tool 消息无对应字段——前缀错误标记，
+            # 否则模型丢失"工具失败"信号、把失败当成功（影响重试/恢复行为）。
+            if b.get("is_error"):
+                content = f"[tool error] {content}"
             tool_messages.append({
                 "role": "tool",
                 "tool_call_id": b.get("tool_use_id", ""),

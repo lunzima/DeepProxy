@@ -193,6 +193,19 @@ class TestClaudeRequestToOpenAI:
             "content": "result data",
         }
 
+    def test_user_tool_result_is_error_is_marked(self):
+        """Anthropic tool_result.is_error=true → OpenAI tool 消息内容前缀错误标记
+        （OpenAI 无 is_error 字段；否则模型把失败当成功）。"""
+        body = {"model": "x", "messages": [
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1",
+                 "content": "boom", "is_error": True}]},
+        ]}
+        out = claude_request_to_openai(body)
+        tool_msg = next(m for m in out["messages"] if m["role"] == "tool")
+        assert "boom" in tool_msg["content"]
+        assert "error" in tool_msg["content"].lower()  # 错误信号未丢失
+
     def test_user_tool_result_with_text_ordering(self):
         """tool 消息必须在 user text 之前，紧跟在 assistant tool_calls 之后。"""
         body = {
