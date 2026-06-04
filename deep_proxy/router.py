@@ -68,7 +68,7 @@ from .cross_consult.client_stream import (
     make_timeout_notice_frames,
     stream_cross_consult_continuation,
     stream_one_turn,
-    stream_with_idle_timeout,
+    stream_with_retry,
 )
 from .optimization.dynamic_threshold import DynamicThresholdController
 from .optimization.flash_upgrade import (
@@ -654,26 +654,34 @@ class DeepProxyRouter:
         provider: Provider | None,
         accumulator: StreamingReasoningAccumulator,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """普通（非 cross_consult）流式子生成器：经 stream_with_idle_timeout 原样透传上游
-        chunk（含 tool_calls / finish_reason）+ idle 超时优雅通知（非错误）。
+        """普通（非 cross_consult）流式子生成器：经 stream_with_retry 原样透传上游 chunk
+        （含 tool_calls / finish_reason），并施加 mid-stream 超时**重试 + 硬错误**策略——
 
-        超时（已注入通知）以 `STREAM_ERRORED` 哨兵 yield 标脏，避免上游静默挂起 →
-        客户端收到空轮静默停止（根因修复，覆盖 cc 未激活路径）。
+          - pre-content stall（首 chunk 前 / 推理中）→ 重发原请求（对客户端无缝，仅见心跳），
+            受 max_stream_total_seconds 总预算约束。
+          - post-content stall / 总预算耗尽 → 发**硬错误帧**（`{"error": {...}}`，经
+            is_error_frame 透传给客户端使 SDK 抛错；iter_chat_chunks 据此标脏不提交升格记账）。
+
+        旧"注入'请重试' content + clean stop"对 agent 结构上不可能触发重试（clean stop =
+        成功轮），已废弃。见 docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md。
         """
-        plain_iter = iter_litellm_chunks(
-            self.config, body, _accumulator=accumulator, provider=provider,
-        )
-        turn = TurnResult()
         sc = self.config.streaming
-        async for chunk_dict in stream_with_idle_timeout(
-            plain_iter, result=turn,
+
+        def make_upstream() -> AsyncGenerator[dict[str, Any], None]:
+            # 每次尝试重建全新上游流（pre-content 重发的前提）
+            return iter_litellm_chunks(
+                self.config, body, _accumulator=accumulator, provider=provider,
+            )
+
+        async for chunk_dict in stream_with_retry(
+            make_upstream,
             idle_timeout=float(sc.idle_timeout_seconds),
+            reasoning_idle=float(sc.reasoning_idle_timeout_seconds),
             first_chunk_timeout=float(sc.first_chunk_timeout_seconds),
             heartbeat_seconds=float(sc.heartbeat_seconds),
+            max_total_seconds=float(sc.max_stream_total_seconds),
         ):
             yield chunk_dict
-        if turn.errored:
-            yield STREAM_ERRORED
 
     async def chat_completions_stream(
         self, body: dict[str, Any], *, provider: Provider | None = None,

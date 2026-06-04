@@ -240,9 +240,12 @@ async def test_stream_with_idle_timeout_forwards_chunks_verbatim():
     assert res.errored is False
 
 
-async def test_stream_with_idle_timeout_emits_notice_on_timeout():
+async def test_stream_with_idle_timeout_detection_only_no_notice():
+    """detection-only：超时只写 result 元数据 + 发心跳，不再注入 [DeepProxy] 通知 /
+    clean finish（旧"请重试"通知对 agent 结构上不可触发重试，已废弃）。重试/硬错误策略
+    交给 stream_with_retry。"""
     async def hang_gen():
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(10.0)
         yield _delta_chunk(content="never")
 
     res = TurnResult()
@@ -251,9 +254,11 @@ async def test_stream_with_idle_timeout_emits_notice_on_timeout():
         idle_timeout=5.0, first_chunk_timeout=0.2, heartbeat_seconds=0.1,
     )]
     assert res.timed_out is True
-    assert any("[DeepProxy]" in d.get("choices", [{}])[0].get("delta", {}).get("content", "")
-               for d in out)
-    assert any(d.get("choices", [{}])[0].get("finish_reason") == "stop" for d in out)
+    assert res.timeout_phase == "first_chunk"
+    assert not any("[DeepProxy]" in (d.get("choices", [{}])[0].get("delta", {}) or {}).get("content", "")
+                   for d in out if "choices" in d)
+    assert not any(d.get("choices", [{}])[0].get("finish_reason") == "stop"
+                   for d in out if "choices" in d)
     # 心跳在等待间隙发出（保持连接温热）
     assert any(f == {"_dp_heartbeat": True} for f in out)
 

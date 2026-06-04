@@ -92,15 +92,19 @@ cross_consult:
   redirect_tag_pattern: "\\[本轮对话使用不同家族的大语言模型\\]"
 
 # ============================================================
-# 普通（非 cross_consult）流式路径的 idle 超时守护
-# 上游卡住时不再静默挂起 / 返回空轮——注入一条"上游超时、可重试"的 assistant
-# content + clean finish（finish_reason=stop），让主 agent 知道而非停止推理。
-# 不报错（无 HTTP 错误码 / error frame）。cross_consult 路径用上面 cross_consult
-# 的同名字段，两套超时独立。
+# 普通（非 cross_consult）流式路径的 idle 超时**重试 + 硬错误**守护
+# 上游卡住时：pre-content（首 chunk 前 / 推理中、无可见输出）→ 代理重发原请求
+# （对客户端无缝，仅见心跳），受 max_stream_total_seconds 总预算约束；预算耗尽
+# 或 post-content（已输出 content/tool_calls 后停顿、不可续传）→ 发硬错误帧
+# （{"error":...} 透传使 SDK 抛错）。旧"请重试 content + clean stop"对 agent 结构上
+# 不可能触发重试，已废弃。cross_consult 路径用上面 cross_consult 同名字段，两套独立。
+# 设计：docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md
 # ============================================================
 streaming:
-  first_chunk_timeout_seconds: 120        # 首 chunk（prefill/TTFT+推理预热）上限秒；超出 → 优雅通知收尾
-  idle_timeout_seconds: 30                # 首 chunk 后相邻 chunk 间最长无活动秒（mid-stream hang tripwire）
+  first_chunk_timeout_seconds: 120        # 首 chunk（prefill/TTFT+推理预热）上限秒；pre-content，超时 → 重发
+  idle_timeout_seconds: 15                # content 阶段相邻 chunk 间最长无活动秒；超时 → 立即硬错误（不可续传）
+  reasoning_idle_timeout_seconds: 45      # 推理阶段 idle 预算（深度思考 burst 间隙更宽容）；pre-content，超时 → 重发
+  max_stream_total_seconds: 600           # 单请求总墙钟预算（含所有重试）；耗尽 → 硬错误帧。须 ≥ 客户端读超时
   heartbeat_seconds: 10                   # 等待间隙发 SSE keep-alive / Anthropic ping 的间隔秒，须 << 客户端读超时
 
 # ============================================================

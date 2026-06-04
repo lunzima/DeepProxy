@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Generic, TypeVar
+from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Generic, TypeVar
 
 from ..utils import is_error_frame, merge_tool_call_deltas
 from ..config import ProxyConfig
@@ -364,19 +365,28 @@ async def stream_with_idle_timeout(
     idle_timeout: float,
     first_chunk_timeout: float,
     heartbeat_seconds: float,
+    reasoning_idle: float | None = None,
 ) -> AsyncGenerator[Any, None]:
-    """普通（非 cross_consult）流式路径的 idle 超时守护：逐 chunk **原样透传**
-    （不抑制 tool_calls / finish_reason），等待间隙发心跳；超预算时设 result.errored/
-    timed_out 并内联 yield 优雅超时通知（content + finish_reason=stop）并终止。
+    """普通（非 cross_consult）流式路径的 idle 超时**检测器**：逐 chunk **原样透传**
+    （不抑制 tool_calls / finish_reason），等待间隙发心跳；超预算时仅设 result.errored/
+    timed_out/timeout_phase/timeout_seconds 并 return——**不注入任何通知帧**。
 
-    reasoning_content 自适应：首次检测到 reasoning_content token 时，将 idle 预算
-    升级到与 first_chunk_timeout 同级（深度思考 burst 间隙属于正常行为，不是 hang）。
+    重试 vs 硬错误的**策略**由调用方（stream_with_retry）据 result 元数据决定：旧"注入
+    '请重试' content + clean stop"对 agent 结构上不可能触发重试（clean stop = 成功轮），
+    已废弃（见 docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md）。
 
-    与 stream_one_turn 的区别：本函数原样透传（无 cross_consult 工具帧累加/抑制），且
-    超时通知由本函数内联发出（普通路径无 router 侧的 continuation 编排）。两者共享同一
-    consume_with_heartbeat 骨架，差异收敛到 per-chunk 处理与超时收尾两处。
+    reasoning_content 自适应：首次检测到 reasoning_content token 时，将 idle 预算升级到
+    reasoning_idle（深度思考 burst 间隙属正常，需比 content idle 更宽容）。reasoning_idle
+    为 None 时退回与 first_chunk_timeout 同级（向后兼容旧调用）。
+
+    与 stream_one_turn 的区别：本函数原样透传（无 cross_consult 工具帧累加/抑制）。两者
+    共享同一 consume_with_heartbeat 骨架，差异收敛到 per-chunk 处理与超时收尾两处。
     """
-    idle_ref, reasoning_idle = _make_reasoning_aware_idle(idle_timeout, first_chunk_timeout)
+    reasoning_idle_val = (
+        max(idle_timeout, reasoning_idle) if reasoning_idle is not None
+        else compute_reasoning_idle(idle_timeout, first_chunk_timeout)
+    )
+    idle_ref = [idle_timeout]
     gen = consume_with_heartbeat(
         chunk_iter, idle_timeout=idle_ref, first_chunk_timeout=first_chunk_timeout,
         heartbeat_seconds=heartbeat_seconds, log_label="stream_with_idle_timeout",
@@ -386,33 +396,107 @@ async def stream_with_idle_timeout(
         async for item in gen:
             if isinstance(item, _Timeout):
                 # 上游已发 finish_reason 却不收尾（finish-then-hang）：本轮逻辑上已正常
-                # 结束，直接退出，**不**再注入通知/第二个 finish_reason（否则一条流出现
-                # 两个 finish，违反协议）。
+                # 结束，直接退出，不标超时（否则会触发误重试）。
                 if saw_finish:
                     return
                 result.errored = True
                 result.timed_out = True
                 result.timeout_phase = item.phase
                 result.timeout_seconds = item.seconds
-                for frame in make_timeout_notice_frames(result):
-                    yield frame
                 return
             if item is _HEARTBEAT:
                 yield item
                 continue
             chunk = item
             # reasoning_content 自适应：首次看到深度思考 token 时升级 idle 预算
-            if _has_reasoning_content(chunk) and idle_ref[0] < reasoning_idle:
-                idle_ref[0] = reasoning_idle
+            if _has_reasoning_content(chunk) and idle_ref[0] < reasoning_idle_val:
+                idle_ref[0] = reasoning_idle_val
                 logger.debug(
                     "stream_with_idle_timeout reasoning seen, idle %.0f→%.0f",
-                    idle_timeout, reasoning_idle,
+                    idle_timeout, reasoning_idle_val,
                 )
             if any(c.get("finish_reason") for c in (chunk.get("choices") or [])):
                 saw_finish = True
             yield chunk  # 原样透传（含 error frame / tool_calls / finish_reason）
     finally:
         await gen.aclose()
+
+
+def make_hard_error_frame(reason: str) -> dict:
+    """构造**客户端可见**的硬错误帧：`{"error": {...}}`（无 choices → is_error_frame True）。
+
+    与被吞掉的 STREAM_ERRORED 哨兵不同——本帧经协议层透传给客户端（data: {...} + [DONE]），
+    使 SDK 抛错，而非误判成一次成功轮。替代旧的"content 通知 + clean stop"（后者对 agent
+    结构上不可能触发重试）。
+    """
+    return {"error": {"message": reason, "type": "timeout_error", "param": None, "code": 504}}
+
+
+def _frame_has_visible_output(frame: dict) -> bool:
+    """frame 是否含**客户端可见输出**（content 文本 / tool_calls）。reasoning_content /
+    reasoning（深度思考）**不算**——它不是答案，pre-content 重发可让其无害重来。
+    心跳帧 / error 帧（无 choices）返回 False。"""
+    for ch in frame.get("choices") or []:
+        delta = ch.get("delta") or {}
+        if isinstance(delta.get("content"), str) and delta["content"]:
+            return True
+        if delta.get("tool_calls"):
+            return True
+    return False
+
+
+async def stream_with_retry(
+    make_upstream: Callable[[], AsyncIterator[dict]],
+    *,
+    idle_timeout: float,
+    reasoning_idle: float,
+    first_chunk_timeout: float,
+    heartbeat_seconds: float,
+    max_total_seconds: float,
+    now: Callable[[], float] = time.monotonic,
+) -> AsyncGenerator[dict, None]:
+    """普通（非 cross_consult）流式路径的**重试循环 + 硬错误**策略层。
+
+    每次尝试经 stream_with_idle_timeout（detection-only）消费一个**全新**上游 chunk 流
+    （make_upstream() 每次重建），逐帧透传。据尝试收尾方式决策：
+
+      - 上游正常 finish / 真实 error frame：return（成功 / error 已透传，皆终态）。
+      - 超时且**已提交可见输出**（committed）：post-content 不可续传 → 发硬错误帧、return。
+      - 超时且总预算（max_total_seconds 墙钟）耗尽：发硬错误帧、return。
+      - 超时且 pre-content 且预算未尽：发一个心跳（保持连接温热）后**重发**。
+
+    committed 一经置位不复位——重发只可能发生在任何可见 token 之前；一旦 content 开始，
+    下一次停顿即硬错误。now 可注入以便测试确定性控制预算。
+
+    见 docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md。
+    """
+    deadline = now() + max_total_seconds
+    committed = False
+    while True:
+        turn = TurnResult()
+        async for frame in stream_with_idle_timeout(
+            make_upstream(), result=turn,
+            idle_timeout=idle_timeout, reasoning_idle=reasoning_idle,
+            first_chunk_timeout=first_chunk_timeout, heartbeat_seconds=heartbeat_seconds,
+        ):
+            if _frame_has_visible_output(frame):
+                committed = True
+            yield frame
+        if not turn.timed_out:
+            # 上游正常 finish（含 StopAsyncIteration）或真实 error frame 已透传 → 终态
+            return
+        if committed:
+            yield make_hard_error_frame(
+                "已输出部分内容后上游中断，不可续传，本轮中断。"
+            )
+            return
+        if now() >= deadline:
+            yield make_hard_error_frame(
+                f"上游持续无响应，超过 {max_total_seconds:g}s 总预算，本轮中断。"
+            )
+            return
+        # pre-content stall：保持连接温热后重发原请求
+        yield _HEARTBEAT
 
 
 async def stream_cross_consult_continuation(

@@ -1,8 +1,11 @@
-"""iter_chat_chunks 超时优雅通知（根因修复）路由层集成测试。
+"""iter_chat_chunks 超时**重试 + 硬错误**路由层集成测试（plain 路径）+ cc 路径通知。
 
-根因：stream_one_turn / 普通流式路径超时时静默返回空轮，客户端（Claude Code）收到
-一次"空且正常结束"的 turn，于是静默停止推理且无错误码。修复后超时改为 yield 优雅
-通知（content + finish_reason=stop），让主 agent 知道上游超时、可重试，而非报错或静默。
+plain 路径根因修复（见 docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md）：
+旧"注入'请重试' content + clean stop"对 agent 结构上不可能触发重试（clean stop = 成功轮），
+已废弃。现：pre-content stall → 代理重发（受 max_stream_total_seconds 总预算约束）；
+post-content stall / 预算耗尽 → 硬错误帧（{"error": {...}} 透传给客户端使 SDK 抛错）。
+
+cc 路径（cross_consult 激活）仍走旧的优雅通知（本设计 scope 外，单独跟进）。
 """
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ from deep_proxy.config import ProxyConfig, normalize_legacy_config
 from deep_proxy.cross_consult.config import CrossConsultConfig
 from deep_proxy.providers import Provider
 from deep_proxy.router import DeepProxyRouter
+from deep_proxy.utils import is_error_frame
 
 
 def _notice_present(frames: list[dict]) -> bool:
@@ -29,19 +33,21 @@ def _clean_finish_present(frames: list[dict]) -> bool:
 
 
 def _no_error_frame(frames: list[dict]) -> bool:
-    return not any(
-        isinstance(f.get("error"), dict) and not f.get("choices") for f in frames
-    )
+    return not any(is_error_frame(f) for f in frames)
 
 
-async def test_plain_path_first_chunk_timeout_emits_graceful_notice(router):
-    """cc 未激活的普通流式路径：上游迟迟不给首 chunk → 优雅通知而非静默空轮，
-    且不报错（无 error frame）、不提交升格记账。"""
+async def test_plain_path_first_chunk_timeout_retries_then_hard_errors(router):
+    """plain 路径：上游迟迟不给首 chunk（pre-content）→ 代理在总预算内反复重发；预算
+    耗尽 → 硬错误帧透传给客户端（使 SDK 抛错）。不注入旧'请重试'通知/clean stop，
+    不提交升格记账。"""
     router.config.streaming.first_chunk_timeout_seconds = 0.2
     router.config.streaming.heartbeat_seconds = 0.1
+    router.config.streaming.max_stream_total_seconds = 1   # 1s 总预算 → 快速耗尽
+    calls = {"n": 0}
 
     async def hang_iter(config, body, *, _accumulator=None, provider=None):
-        await asyncio.sleep(1.0)
+        calls["n"] += 1
+        await asyncio.sleep(5.0)
         yield {"choices": [{"index": 0, "delta": {"content": "never"},
                             "finish_reason": None}]}
 
@@ -53,24 +59,27 @@ async def test_plain_path_first_chunk_timeout_emits_graceful_notice(router):
                       side_effect=lambda *a, **k: committed.__setitem__("hit", True)):
         out = [f async for f in router.iter_chat_chunks(body, provider=None)]
 
-    assert _notice_present(out)
-    assert _clean_finish_present(out)
-    assert _no_error_frame(out)
-    assert committed["hit"] is False
+    assert calls["n"] >= 2                       # 预算内重发了至少一次
+    assert not _notice_present(out)              # 无旧'请重试'通知
+    assert not _clean_finish_present(out)        # 无误导性 clean stop
+    assert any(is_error_frame(f) for f in out)   # 硬错误帧透传给客户端
+    assert committed["hit"] is False             # 不提交升格记账
 
 
-async def test_plain_path_mid_stream_timeout_emits_notice(router):
-    """普通路径：已流出部分内容后相邻 chunk 间断流超 idle_timeout（区别于首 chunk
-    超时）→ 先透传已有内容,再注入 mid_stream 通知 + clean finish,不提交升格记账。
-    这是唯一端到端触发 idle_timeout_seconds（而非 first_chunk_timeout）接线的路径。"""
+async def test_plain_path_post_content_stall_hard_errors(router):
+    """plain 路径：已流出可见 content 后断流超 idle_timeout（post-content，不可续传）→
+    立即硬错误帧，**不重发**；已流出内容仍透传；不注入旧通知/clean stop；不提交升格记账。"""
     router.config.streaming.first_chunk_timeout_seconds = 5
     router.config.streaming.idle_timeout_seconds = 0.2
+    router.config.streaming.reasoning_idle_timeout_seconds = 0.2
     router.config.streaming.heartbeat_seconds = 0.1
+    calls = {"n": 0}
 
     async def slow_iter(config, body, *, _accumulator=None, provider=None):
+        calls["n"] += 1
         yield {"choices": [{"index": 0, "delta": {"content": "部分"},
                             "finish_reason": None}]}
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(5.0)
         yield {"choices": [{"index": 0, "delta": {"content": "never"},
                             "finish_reason": None}]}
 
@@ -82,14 +91,13 @@ async def test_plain_path_mid_stream_timeout_emits_notice(router):
                       side_effect=lambda *a, **k: committed.__setitem__("hit", True)):
         out = [f async for f in router.iter_chat_chunks(body, provider=None)]
 
+    assert calls["n"] == 1                        # committed 后不重发
     # 已流出的部分内容被透传
     assert any(d.get("choices", [{}])[0].get("delta", {}).get("content") == "部分"
                for d in out)
-    # mid_stream 文案（区别于 first_chunk）：含"输出过程中"
-    assert any("输出过程中" in d.get("choices", [{}])[0].get("delta", {}).get("content", "")
-               for d in out)
-    assert _clean_finish_present(out)
-    assert _no_error_frame(out)
+    assert any(is_error_frame(f) for f in out)    # 硬错误帧
+    assert not _notice_present(out)
+    assert not _clean_finish_present(out)
     assert committed["hit"] is False
 
 
