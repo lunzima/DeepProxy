@@ -194,6 +194,30 @@ suite):
 - **first-chunk pre-content retry:** no chunk within `first_chunk_timeout` → retry
   fresh (not hard error) while within budget.
 
+## Post-review refinements (code review, 2026-06-04)
+
+Two correctness fixes applied after the high-effort review of the implementation:
+
+- **Accumulator reset per attempt.** `stream_with_retry` reuses one
+  `StreamingReasoningAccumulator` across retries (it backs the post-stream
+  `flush_to_cache`). Without a reset, a discarded pre-content attempt's
+  `reasoning_content` is `+=`-concatenated with the successful retry's and cached,
+  corrupting multi-turn self-heal. Fix: `StreamingReasoningAccumulator.reset()`
+  (clears `_slots`, keeps the prefix), called in `make_upstream()` before each
+  attempt's `iter_litellm_chunks`.
+- **Total-budget clamp.** The 600s deadline was checked only *between* attempts, so
+  a final pre-content stall could wait a full `first_chunk_timeout` (120s) past the
+  budget. Fix: at each loop top, `remaining = deadline - now()`; hard-error if
+  `remaining <= 0`; otherwise clamp the **pre-content** budgets
+  (`first_chunk_timeout`, `reasoning_idle`) to `remaining` when calling
+  `stream_with_idle_timeout`. Content idle is intentionally *not* clamped — a
+  committed healthy stream must not be truncated near the deadline (its stall is an
+  immediate hard error anyway).
+
+Known gaps left as follow-ups (acknowledged, out of scope here): cross_consult path
+still uses the deprecated notice; pre-content retries may re-stream reasoning to the
+client (cosmetic); an empty-but-not-timed-out upstream still commits as success.
+
 ## Files touched (anticipated)
 
 - `deep_proxy/config.py` — `StreamingConfig`: new fields, docstring.

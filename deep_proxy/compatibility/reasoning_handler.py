@@ -280,6 +280,14 @@ class StreamingReasoningAccumulator:
         self._prefix = list(request_messages or [])
         self._slots: Dict[int, Dict[str, Any]] = {}
 
+    def reset(self) -> None:
+        """清空已累加的 per-choice 槽（保留 request_messages 前缀）。
+
+        供流式重试复用同一 accumulator：每次重发尝试前调用，避免上一(废弃)尝试的
+        content / reasoning_content / tool_calls 与重试尝试拼接后写入 ReasoningCache。
+        """
+        self._slots = {}
+
     def consume(self, chunk_dict: Dict[str, Any]) -> None:
         for choice in chunk_dict.get("choices", []) or []:
             idx = choice.get("index", 0)

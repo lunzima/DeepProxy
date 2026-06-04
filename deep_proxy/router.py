@@ -628,9 +628,11 @@ class DeepProxyRouter:
         ):
             yield frame
         if turn.errored:
-            # 初始轮超时：注入优雅通知（content + finish_reason=stop），让 agent 知道上游
-            # 超时、可重试，而非静默收到空轮后停止推理（根因修复）。真实 error frame
-            # （timed_out=False）已在上面逐帧透传，不重复发——此处仅 timed_out 才发通知。
+            # 初始轮超时：注入**已废弃**的优雅通知（content + finish_reason=stop）。该通知对
+            # agent 结构上不可能触发重试（clean stop = 成功轮）——plain 路径已改走
+            # stream_with_retry + 硬错误帧；cc 路径同等改造为单独 follow-up，暂沿用旧通知。
+            # 真实 error frame（timed_out=False）已在上面逐帧透传，不重复发——此处仅
+            # timed_out 才发通知。
             if turn.timed_out:
                 for frame in make_timeout_notice_frames(turn):
                     yield frame
@@ -668,7 +670,9 @@ class DeepProxyRouter:
         sc = self.config.streaming
 
         def make_upstream() -> AsyncGenerator[dict[str, Any], None]:
-            # 每次尝试重建全新上游流（pre-content 重发的前提）
+            # 每次尝试重建全新上游流（pre-content 重发的前提）。先 reset 共享 accumulator，
+            # 否则废弃尝试的 reasoning_content / content 会与重试尝试拼接后污染 ReasoningCache。
+            accumulator.reset()
             return iter_litellm_chunks(
                 self.config, body, _accumulator=accumulator, provider=provider,
             )

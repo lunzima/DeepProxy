@@ -187,11 +187,13 @@ async def test_hard_error_on_post_content_stall():
 
 
 async def test_hard_error_on_budget_exhaustion():
-    """每次尝试都在 pre-content 阶段挂死，且总预算耗尽 → 硬错误（注入 fake clock 控制预算）。"""
-    times = [0.0, 100.0, 100.0]
+    """每次尝试都在 pre-content 阶段挂死，且总预算耗尽 → 硬错误（注入前进 fake clock 控制预算）。"""
+    ticks = {"i": 0}
 
     def fake_now():
-        return times.pop(0) if len(times) > 1 else times[0]
+        v = ticks["i"] * 30.0   # 每次调用前进 30s
+        ticks["i"] += 1
+        return v
 
     calls = {"n": 0}
 
@@ -208,7 +210,42 @@ async def test_hard_error_on_budget_exhaustion():
         first_chunk_timeout=0.2, heartbeat_seconds=0.1,
         max_total_seconds=50.0, now=fake_now,
     )]
-    assert calls["n"] == 1                        # deadline 已过 → 首次尝试后即硬错误
+    assert calls["n"] >= 1                        # 至少跑一次尝试再因预算耗尽硬错误
+    assert any(is_error_frame(f) for f in out)
+
+
+async def test_retry_clamps_pre_content_budget_to_remaining(monkeypatch):
+    """总预算守护：每次尝试前把 pre-content 预算（first_chunk / reasoning_idle）钳到剩余预算，
+    使**单次尝试不会把总耗时冲过 deadline 一整个 first_chunk_timeout**（review #2）。"""
+    recorded = []
+    clock = {"t": 0.0}
+
+    def fake_now():
+        return clock["t"]
+
+    async def spy_sit(upstream, *, result, idle_timeout, reasoning_idle,
+                      first_chunk_timeout, heartbeat_seconds):
+        recorded.append(first_chunk_timeout)
+        clock["t"] += first_chunk_timeout            # 模拟该次尝试耗尽其(钳后)首 chunk 预算
+        result.timed_out = True
+        result.timeout_phase = "first_chunk"
+        await upstream.aclose()
+        return
+        yield  # noqa — 使本函数成为 async generator
+
+    monkeypatch.setattr(
+        "deep_proxy.cross_consult.client_stream.stream_with_idle_timeout", spy_sit)
+
+    out = [f async for f in stream_with_retry(
+        lambda: _iter([]),
+        idle_timeout=15.0, reasoning_idle=45.0,
+        first_chunk_timeout=120.0, heartbeat_seconds=10.0,
+        max_total_seconds=300.0, now=fake_now,
+    )]
+    # deadline=300：尝试1 rem=300→first_chunk=120，clock→120；尝试2 rem=180→120，clock→240；
+    #               尝试3 rem=60 →钳 120→60，clock→300；尝试4 rem=0 →硬错误（不再启动尝试）
+    assert recorded == [120.0, 120.0, 60.0]
+    assert clock["t"] == 300.0                       # 总耗时精确停在 deadline，无超调
     assert any(is_error_frame(f) for f in out)
 
 
@@ -306,3 +343,47 @@ async def test_iter_chat_chunks_post_content_stall_forwards_error_frame(router, 
     out = [f async for f in router.iter_chat_chunks(_fake_body())]
     assert _content_of(out, "partial")
     assert any(is_error_frame(f) for f in out)
+
+
+async def test_retry_resets_reasoning_accumulator_per_attempt(router, monkeypatch):
+    """pre-content 重试不得把上一(废弃)尝试的 reasoning_content 与重试尝试拼接进
+    ReasoningCache（review #1：共享 accumulator 跨尝试累加 → 缓存污染）。"""
+    from deep_proxy.compatibility.reasoning_handler import StreamingReasoningAccumulator
+    calls = {"n": 0}
+
+    def fake_iter(config, body, *, _accumulator=None, provider=None):
+        n = calls["n"]
+        calls["n"] += 1
+        if n == 0:
+            async def stall():
+                _accumulator.consume(_delta_chunk(reasoning_content="AAA"))
+                yield _delta_chunk(reasoning_content="AAA")
+                await asyncio.sleep(10.0)
+                yield _delta_chunk(content="never")
+            return stall()
+        async def ok():
+            _accumulator.consume(_delta_chunk(reasoning_content="BBB"))
+            _accumulator.consume(_delta_chunk(content="answer"))
+            yield _delta_chunk(reasoning_content="BBB")
+            yield _delta_chunk(content="answer")
+            yield _finish_chunk("stop")
+        return ok()
+
+    captured = {}
+    orig_flush = StreamingReasoningAccumulator.flush_to_cache
+
+    def spy_flush(self, cache):
+        captured["reasoning"] = self._slots.get(0, {}).get("reasoning_content")
+        return orig_flush(self, cache)
+
+    monkeypatch.setattr("deep_proxy.router.iter_litellm_chunks", fake_iter)
+    monkeypatch.setattr(StreamingReasoningAccumulator, "flush_to_cache", spy_flush)
+    router.config.streaming.first_chunk_timeout_seconds = 1
+    router.config.streaming.idle_timeout_seconds = 1
+    router.config.streaming.reasoning_idle_timeout_seconds = 1
+    router.config.streaming.heartbeat_seconds = 1
+
+    out = [f async for f in router.iter_chat_chunks(_fake_body())]
+    assert calls["n"] == 2
+    assert _content_of(out, "answer")
+    assert captured["reasoning"] == "BBB"        # 不是 "AAABBB"（废弃尝试不污染缓存）

@@ -83,9 +83,10 @@ class TurnResult:
     had_cc_call: bool = False
     finish_reason: str | None = None
     errored: bool = False
-    # 超时专属元数据（区别于上游 error frame）：errored=True 且 timed_out=True 时，
-    # 调用方据 phase/seconds 构造优雅超时通知（make_timeout_notice_frames），
-    # 而非静默返回空轮。timed_out=False 的 errored 表示真实上游 error frame。
+    # 超时专属元数据（区别于上游 error frame）：errored=True 且 timed_out=True 时，调用方据
+    # phase/seconds 决定收尾——plain 路径（stream_with_retry）据此重试或发硬错误帧；
+    # cc 路径（stream_one_turn）构造已废弃的优雅通知（make_timeout_notice_frames）。
+    # timed_out=False 的 errored 表示真实上游 error frame。
     timed_out: bool = False
     timeout_phase: str | None = None    # "first_chunk" | "mid_stream"
     timeout_seconds: float | None = None
@@ -155,8 +156,12 @@ def make_terminal_frame(finish_reason: str | None, tool_calls: list[dict]) -> di
 
 
 def _timeout_notice_text(phase: str | None, seconds: float | None) -> str:
-    """超时优雅通知正文。明确告知主 agent 这是**超时而非错误**、可重试，区分
-    首 chunk 未达（疑似上游繁忙 / prefill 慢）与 mid-stream 停顿（输出中途断流）。"""
+    """超时通知正文。区分首 chunk 未达（疑似上游繁忙 / prefill 慢）与 mid-stream 停顿
+    （输出中途断流）。
+
+    ⚠️ 已废弃用于 plain 路径：文末"请直接重试"对 agent 结构上不可能触发重试（clean stop =
+    成功轮），plain 路径已改走 stream_with_retry + 硬错误帧。本函数**仅 cross_consult 路径
+    仍在用**（其重试改造为单独 follow-up）。见 make_timeout_notice_frames。"""
     secs = f"{seconds:g}s" if seconds and seconds > 0 else "超时窗口"
     if phase == "mid_stream":
         return (
@@ -171,12 +176,15 @@ def _timeout_notice_text(phase: str | None, seconds: float | None) -> str:
 
 
 def make_timeout_notice_frames(result: TurnResult) -> list[dict]:
-    """据 TurnResult 的超时元数据构造**优雅通知帧**：一条 assistant content delta
-    （告知主 agent 上游超时、可重试）+ 一个 finish_reason=stop 终轮帧。
+    """据 TurnResult 的超时元数据构造通知帧：一条 assistant content delta + 一个
+    finish_reason=stop 终轮帧。
 
-    刻意走 content + clean finish（而非 error frame / HTTP 错误码）：让客户端把它当
-    一次普通完成的 turn 收尾——agent 读到通知文本后自行决定重试，而不是收到空轮后
-    静默停止推理（见本模块修复的根因），也不会因错误码中断会话。
+    ⚠️ **已废弃，仅 cross_consult 路径仍在用**（router._iter_cc_chunks /
+    stream_cross_consult_continuation）。原设想"content + clean finish 让 agent 读到通知后
+    自行重试"被证伪：clean stop 在协议上即一次**成功**轮，agent 无从据自然语言"请重试"触发
+    重试，只会渲染文本并停止。plain 路径已据此改走 stream_with_retry（pre-content 重发 +
+    post-content/预算耗尽硬错误帧 make_hard_error_frame）。cc 路径同等改造为单独 follow-up。
+    见 docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md。
     """
     notice = _timeout_notice_text(result.timeout_phase, result.timeout_seconds)
     return [
@@ -224,8 +232,9 @@ async def consume_with_heartbeat(
 
     本函数只承载 "持久化 __anext__ task + 心跳 tick + first/inter-chunk 预算切换 + 超时
     检测 + 清理" 这套并发骨架；**per-chunk 处理与超时收尾留给调用方**（stream_one_turn
-    累加/抑制 cc 工具帧并由 router 发通知；stream_with_idle_timeout 原样透传 + finish 短路
-    并内联发通知）。它不写 TurnResult——超时元数据由各调用方据 `_Timeout` 自行写入，
+    累加/抑制 cc 工具帧并由 router 发通知；stream_with_idle_timeout 原样透传 + finish 短路、
+    超时仅写 result 标志即 detection-only，重试/硬错误策略由 stream_with_retry 据 result
+    决定）。它不写 TurnResult——超时元数据由各调用方据 `_Timeout` 自行写入，
     使 finish-then-hang 等"超时但不算错"的收尾无副作用。
 
     **调用方契约**：须在自身 finally 里 `await gen.aclose()` 本生成器，以便任何退出路径
@@ -468,16 +477,28 @@ async def stream_with_retry(
     committed 一经置位不复位——重发只可能发生在任何可见 token 之前；一旦 content 开始，
     下一次停顿即硬错误。now 可注入以便测试确定性控制预算。
 
+    **总预算守护**：每次尝试前把 pre-content 预算（first_chunk / reasoning_idle）钳到剩余
+    预算，使单次 pre-content 挂死不会把总耗时冲过 deadline 一整个 first_chunk_timeout。
+    content idle 不钳——已 committed 的健康流不应因临近预算被截断（其停顿本就立即硬错误）。
+
     见 docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md。
     """
     deadline = now() + max_total_seconds
     committed = False
     while True:
+        remaining = deadline - now()
+        if remaining <= 0:
+            yield make_hard_error_frame(
+                f"上游持续无响应，超过 {max_total_seconds:g}s 总预算，本轮中断。"
+            )
+            return
         turn = TurnResult()
         async for frame in stream_with_idle_timeout(
             make_upstream(), result=turn,
-            idle_timeout=idle_timeout, reasoning_idle=reasoning_idle,
-            first_chunk_timeout=first_chunk_timeout, heartbeat_seconds=heartbeat_seconds,
+            idle_timeout=idle_timeout,
+            reasoning_idle=min(reasoning_idle, remaining),
+            first_chunk_timeout=min(first_chunk_timeout, remaining),
+            heartbeat_seconds=heartbeat_seconds,
         ):
             if _frame_has_visible_output(frame):
                 committed = True
@@ -490,12 +511,7 @@ async def stream_with_retry(
                 "已输出部分内容后上游中断，不可续传，本轮中断。"
             )
             return
-        if now() >= deadline:
-            yield make_hard_error_frame(
-                f"上游持续无响应，超过 {max_total_seconds:g}s 总预算，本轮中断。"
-            )
-            return
-        # pre-content stall：保持连接温热后重发原请求
+        # pre-content stall：保持连接温热后重发原请求（预算耗尽由下轮 remaining<=0 兜底）
         yield _HEARTBEAT
 
 
