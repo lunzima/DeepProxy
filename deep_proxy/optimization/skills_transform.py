@@ -37,6 +37,10 @@ def _apply_re2(messages: List[Dict[str, Any]]) -> None:
         # 已经复制过则跳过（idempotent）
         if _RE2_MARKER in content:
             return
+        # readurls 已内联抓取正文时跳过：整条复制会把 8KB×N 的抓取内容翻倍（且 snippet 含
+        # ']' 难可靠剥离）。re-read 收益对这类已很长的内容型消息不值这份翻倍。
+        if _READURLS_MARKER in content:
+            return
         msg["content"] = f"{content}{_RE2_MARKER}{content}"
         return
 

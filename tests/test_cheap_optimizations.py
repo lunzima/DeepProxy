@@ -75,6 +75,16 @@ class TestRe2:
         await _apply(b, re2=True)
         assert b["messages"][0]["content"] == [{"type": "text", "text": "hi"}]
 
+    def test_skips_message_with_readurls_inlined_content(self):
+        """readurls 已把抓取正文内联进消息时，RE2 不再整条复制——否则 8KB×N 的抓取
+        内容被翻倍（re2+readurls 叠加 bug）。"""
+        from deep_proxy.optimization.skills_transform import _apply_re2, _RE2_MARKER
+        inlined = "问题 https://a.com [Content from a.com: 很长的正文……]"
+        messages = [{"role": "user", "content": inlined}]
+        _apply_re2(messages)
+        assert messages[0]["content"] == inlined          # 未复制
+        assert _RE2_MARKER not in messages[0]["content"]
+
 
 class TestCotReflectionEligibility:
     async def test_applied_when_thinking_disabled_and_non_stream(self):
