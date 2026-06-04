@@ -1,12 +1,22 @@
-"""客户端真流式：cross_consult 激活时逐 token 透传 + 抑制虚拟工具帧 + 心跳桥接。
+"""流式超时引擎 + 重试骨架 + cross_consult 真流式（逐 token 透传 + 抑制虚拟工具帧 + 心跳）。
 
-三个流式单元：
-  - with_heartbeat：包裹 consult await，期间周期 yield 心跳帧
-  - stream_one_turn：消费单轮上游 chunk 流，content/reasoning 即时透传、
-    tool_calls 累加到轮末判定（结果写入传入的 TurnResult）、间隙发心跳
-  - stream_cross_consult_continuation：execute_cross_consult_loop 的流式变体
+**单一超时引擎**：
+  - consume_with_heartbeat：唯一的"心跳化 idle-timeout 上游消费器"，自持 first-chunk /
+    content idle / reasoning-aware idle 升级；产出 chunk / _HEARTBEAT / _Timeout。plain、
+    cross_consult、aggregate_stream_to_response 三方共用（streaming.py 驱动它聚合成 dict）。
 
-辅助：TurnResult（单轮累加结果容器）、make_terminal_frame（终轮帧构造）。
+**重试骨架（count-based）**：
+  - stream_turn_with_retry：通用 pre-content 重试（最多 max_retries 次）+ post-content/
+    耗尽硬错误帧；健康流（持续产出）永不被打断。
+  - stream_with_retry：plain 路径适配器（passthrough turn-streamer）。
+
+**消费者（差异仅在 per-chunk 处理）**：
+  - stream_with_idle_timeout：plain 原样透传（detection-only：超时只写 TurnResult）。
+  - stream_one_turn：cross_consult 单轮——content/reasoning 即时透传、cc 工具帧累加/抑制。
+  - stream_cross_consult_continuation：consult 执行（with_heartbeat 桥接心跳）+ 重发循环。
+
+辅助：TurnResult（单轮累加容器）、make_terminal_frame（终轮帧）、make_hard_error_frame
+（客户端可见硬错误帧）、_frame_has_visible_output（committed 判定）。
 
 哨兵（模块级单例 dict，不透传客户端）：
   - _HEARTBEAT {"_dp_heartbeat": True}：协议层序列化成 SSE 注释帧 / Anthropic ping
