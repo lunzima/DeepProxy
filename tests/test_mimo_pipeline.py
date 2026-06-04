@@ -27,6 +27,20 @@ def test_inject_respects_existing_reasoning_effort():
     assert body["reasoning_effort"] == "low"
 
 
+def test_inject_clamps_max_to_high():
+    """MiMo 只接受 low/medium/high；'max'（Provider 默认值，DeepSeek 取向）钳到 high，
+    避免 MiMo 400。"""
+    body = {"model": "mimo-v2.5", "messages": []}
+    inject_top_level_reasoning_effort(body, value="max")
+    assert body["reasoning_effort"] == "high"
+
+
+def test_inject_clamps_unknown_to_high():
+    body = {"model": "mimo-v2.5", "messages": []}
+    inject_top_level_reasoning_effort(body, value="ultra")
+    assert body["reasoning_effort"] == "high"
+
+
 import pytest
 
 
