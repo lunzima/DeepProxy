@@ -542,3 +542,54 @@ async def test_cc_resend_turn_retries_then_succeeds(router_dual, monkeypatch):
     assert calls["n"] == 3               # 初始 + 2 次重发
     assert _content_of(out, "终答")
     assert not any(is_error_frame(f) for f in out)
+
+
+async def test_cc_resend_retry_preserves_prior_turn_content_in_cache(router_dual, monkeypatch):
+    """重发轮重试时，初始轮已累加的内容不得被 restore 丢弃——缓存须含初始前导 + 终答。"""
+    from deep_proxy.compatibility.reasoning_handler import StreamingReasoningAccumulator
+    router = router_dual
+    cc = router.config.cross_consult
+    cc.enabled = True
+    cc.pairs = {"deepseek": "mimo", "mimo": "deepseek"}
+    cc.first_chunk_timeout_seconds = 1
+    cc.call_timeout_seconds = 1
+    cc.stream_heartbeat_seconds = 1
+    calls = {"n": 0}
+
+    def fake_iter(config, body, *, _accumulator=None, provider=None):
+        n = calls["n"]; calls["n"] += 1
+        if n == 0:
+            async def init():
+                _accumulator.consume(_delta_chunk(content="前导"))
+                yield _delta_chunk(content="前导")
+                yield _cc_tool_chunk()
+                yield _finish_chunk("tool_calls")
+            return init()
+        if n == 1:
+            async def stall():
+                await asyncio.sleep(10.0)
+                yield _delta_chunk(content="x")
+            return stall()
+        async def ok():
+            _accumulator.consume(_delta_chunk(content="终答"))
+            yield _delta_chunk(content="终答")
+            yield _finish_chunk("stop")
+        return ok()
+
+    async def fake_consult(tc, *, call_count, target_provider, config, cc_config):
+        return ("结果", True)
+
+    captured = {}
+    orig_flush = StreamingReasoningAccumulator.flush_to_cache
+
+    def spy_flush(self, cache):
+        captured["content"] = self._slots.get(0, {}).get("content")
+        return orig_flush(self, cache)
+
+    monkeypatch.setattr("deep_proxy.router.iter_litellm_chunks", fake_iter)
+    monkeypatch.setattr("deep_proxy.cross_consult.client_stream.iter_litellm_chunks", fake_iter)
+    monkeypatch.setattr("deep_proxy.cross_consult.client_stream.resolve_consult_tool_call", fake_consult)
+    monkeypatch.setattr(StreamingReasoningAccumulator, "flush_to_cache", spy_flush)
+    prov = router.config.providers["deepseek"]
+    out = [f async for f in router.iter_chat_chunks(_cc_body(), provider=prov)]
+    assert captured["content"] == "前导终答"   # 初始前导保留 + 终答；失败重发的 'x' 不在
