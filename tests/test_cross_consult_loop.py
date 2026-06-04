@@ -460,6 +460,41 @@ async def test_loop_drops_non_cc_tool_calls_from_resend_history(cfg_cross):
     assert "cc1" in tc_ids
 
 
+def test_drop_cc_tool_calls_helper():
+    from deep_proxy.cross_consult.interceptor import drop_cc_tool_calls
+    tcs = [
+        {"id": "r", "function": {"name": "read_file"}},
+        {"id": "c", "function": {"name": "cross_consult"}},
+    ]
+    assert [tc["id"] for tc in drop_cc_tool_calls(tcs, "cross_consult")] == ["r"]
+    assert drop_cc_tool_calls(None, "cross_consult") == []
+
+
+async def test_loop_hard_limit_strips_unresolved_cc_tool_call(cfg_cross):
+    """硬轮次上限退出：返回的响应不得残留未执行的 cross_consult tool_call
+    （客户端无法执行虚拟工具）（审核：hard-limit cc-call leak）。"""
+    from deep_proxy.cross_consult.interceptor import execute_cross_consult_loop
+
+    async def fake_call(config, body, *, provider=None):
+        return _make_tool_call_response("ccN", {"question": "q"})  # 每轮都发 cc 调用
+
+    async def fake_consult(*a, **k):
+        return "external"
+
+    body = {"model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "go"}], "stream": False}
+    with patch("deep_proxy.cross_consult.interceptor.execute_consult",
+               side_effect=fake_consult):
+        result = await execute_cross_consult_loop(
+            body=body, initial_response=_make_tool_call_response("cc0", {"question": "q"}),
+            source_provider=cfg_cross.providers["deepseek"], config=cfg_cross,
+            cc_config=cfg_cross.cross_consult, call_litellm_fn=fake_call)
+
+    msg = result["choices"][0]["message"]
+    names = [(tc.get("function") or {}).get("name") for tc in (msg.get("tool_calls") or [])]
+    assert "cross_consult" not in names
+
+
 async def test_streaming_final_chunk_includes_reasoning_content_when_present(cfg_cross):
     """I4 regression: 真流式 cross_consult 路径应将 reasoning_content 帧逐帧透传到客户端。"""
     from deep_proxy.router import DeepProxyRouter

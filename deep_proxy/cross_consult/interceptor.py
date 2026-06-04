@@ -101,6 +101,18 @@ def extract_cross_consult_tool_calls(response: dict[str, Any], tool_name: str) -
     ]
 
 
+def drop_cc_tool_calls(tool_calls: list[dict], tool_name: str) -> list[dict]:
+    """从 tool_calls 列表剔除 cc 调用（name == tool_name）。
+
+    用于终轮/硬轮次上限退出时把未执行的 cross_consult 调用从面向客户端的终结帧/响应里
+    剔除——cc 是代理虚拟工具，客户端无法执行，残留会让客户端拿到悬空/无效 tool_call。
+    """
+    return [
+        tc for tc in (tool_calls or [])
+        if (tc.get("function") or {}).get("name") != tool_name
+    ]
+
+
 def build_initial_response_from_stream_tool_calls(
     accumulated_tool_calls: list[dict],
 ) -> dict[str, Any]:
@@ -256,8 +268,16 @@ async def execute_cross_consult_loop(
         if process_response_fn is not None:
             response = process_response_fn(response, provider=source_provider)
 
-    # 达到硬上限（防无限循环）——返回最后一次响应
+    # 达到硬上限（防无限循环）——返回最后一次响应，但剔除残留的未执行 cc tool_call
+    # （否则客户端拿到无法执行的虚拟工具调用）。
     logger.warning(
         "cross_consult loop reached hard turn limit (%d); returning last response", max_turns
     )
+    msg = (response.get("choices") or [{}])[0].get("message") or {}
+    if msg.get("tool_calls"):
+        filtered = drop_cc_tool_calls(msg["tool_calls"], cc_config.tool_name)
+        if filtered:
+            msg["tool_calls"] = filtered
+        else:
+            msg.pop("tool_calls", None)
     return response

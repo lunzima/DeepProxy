@@ -37,6 +37,7 @@ from .config import CrossConsultConfig
 from .reasoning_idle import chunk_has_reasoning as _has_reasoning_content
 from .interceptor import (
     extract_cross_consult_tool_calls,
+    drop_cc_tool_calls,
     resolve_consult_tool_call,
     build_initial_response_from_stream_tool_calls,
 )
@@ -567,4 +568,7 @@ async def stream_cross_consult_continuation(
     # 硬轮次上限：内容已逐 chunk 透传完毕，补一个 finish_reason=stop 终轮帧让客户端
     # 正常收尾（对齐 no-cc-call 退出路径；否则客户端只收到 [DONE] 而无终轮 choice）。
     logger.warning("cross_consult stream continuation hit hard turn limit (%d)", max_turns)
-    yield make_terminal_frame("stop", turn_tool_calls)
+    # 剔除残留的未执行 cc tool_call（客户端无法执行虚拟工具）
+    yield make_terminal_frame(
+        "stop", drop_cc_tool_calls(turn_tool_calls, cc_config.tool_name)
+    )
