@@ -265,9 +265,11 @@ class UpgradeDecisionEngine:
 
         # Step 5: throttle 提交 + 升格落地
         # Coding Agent 场景下同一 user 消息连续触发升格 → 强制回退 + 冷却
+        throttled = False
         if did_upgrade:
             if self._throttle.should_throttle(messages, True):
                 did_upgrade = False
+                throttled = True
                 # 同步清持久升格 entry，否则下一轮 Step 2b 会越过 throttle 走 Pro
                 self._tracker.clear(messages, provider=params.provider_name)
                 logger.info(
@@ -281,7 +283,8 @@ class UpgradeDecisionEngine:
             body["model"] = params.pro_model
             self._stash_pending(body, messages, params)
 
-        # 动态阈值控制器：仅此处（阈值驱动决策）记录最终 served 结果。
-        # sentinel/cooldown/persist 命中在 apply 短路前返回，不到这里。
-        if controller is not None:
+        # 动态阈值控制器：仅记录**阈值驱动**的决策。throttle 否决（阈值判升却被强制 flash）
+        # 不是阈值能左右的结果——record 它会把闭环往降阈值方向带偏（追一个 throttle 永远
+        # 压住的升格率），故跳过。sentinel/cooldown/persist 命中在 apply 短路前已返回。
+        if controller is not None and not throttled:
             controller.record(did_upgrade)

@@ -97,6 +97,30 @@ def test_threshold_driven_decision_is_recorded():
     assert body["model"] == "deepseek-v4-flash"
 
 
+def test_throttle_veto_does_not_record():
+    """阈值判升但 throttle 否决（强制 flash）→ 非阈值驱动，controller 不 record
+    （否则把仅 throttle 可达的请求当成"阈值未升"，会错误地把闭环往降阈值方向带偏）。"""
+    eng = UpgradeDecisionEngine(
+        cfg=FlashUpgradeConfig(
+            enabled=True, router_threshold=0.0, heuristic_threshold=10.0,
+            downgrade_threshold=5.0,
+        ),
+        upgrade_tracker=UpgradeTracker(),
+        throttle=RepeatUpgradeThrottle(max_repeats=2),  # 第 2 次连续升格即否决
+        bert_router=create_router("rule"),
+    )
+    spy = _SpyController(1.0)
+    msg = [{"role": "user", "content": "写一个复杂的并发调度器"}]
+    b1 = {"model": "deepseek-v4-flash", "messages": list(msg)}
+    eng.apply(b1, provider=_ds(), controller=spy)        # 第 1 次：阈值升格
+    b2 = {"model": "deepseek-v4-flash", "messages": list(msg)}
+    eng.apply(b2, provider=_ds(), controller=spy)        # 第 2 次：throttle 否决
+
+    assert b1["model"] == "deepseek-v4-pro"
+    assert b2["model"] == "deepseek-v4-flash"            # 被 throttle 强制 flash
+    assert spy.records == [True]                         # 否决那次不 record
+
+
 def test_sentinel_path_does_not_record():
     """sentinel 强制升格不经过阈值决策 → 不 record。"""
     eng = _engine()
