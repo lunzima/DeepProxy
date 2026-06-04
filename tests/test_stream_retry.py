@@ -125,6 +125,37 @@ def _has_finish(out, reason):
     )
 
 
+async def test_stream_turn_with_retry_on_result_captures_winning_turn():
+    """泛化骨架：committed 前的超时触发重试；成功收尾时把 winning TurnResult 交给 on_result。"""
+    from deep_proxy.cross_consult.client_stream import stream_turn_with_retry, TurnResult
+    calls = {"n": 0}
+    captured = {}
+
+    def make_attempt(turn, remaining):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            async def stall():
+                turn.timed_out = True
+                return
+                yield  # noqa — async generator that yields nothing
+            return stall()
+        async def ok():
+            turn.content = "hi"
+            turn.finish_reason = "stop"
+            yield _delta_chunk(content="hi")
+            yield _finish_chunk("stop")
+        return ok()
+
+    out = [f async for f in stream_turn_with_retry(
+        make_attempt, max_total_seconds=600.0,
+        on_result=lambda t: captured.__setitem__("turn", t),
+    )]
+    assert calls["n"] == 2
+    assert captured.get("turn") is not None
+    assert captured["turn"].content == "hi"
+    assert not any(is_error_frame(f) for f in out)
+
+
 def test_make_hard_error_frame_is_error_frame():
     f = make_hard_error_frame("boom reason")
     assert is_error_frame(f)

@@ -460,34 +460,28 @@ def _frame_has_visible_output(frame: dict) -> bool:
     return False
 
 
-async def stream_with_retry(
-    make_upstream: Callable[[], AsyncIterator[dict]],
+async def stream_turn_with_retry(
+    make_attempt: Callable[[TurnResult, float], AsyncIterator[dict]],
     *,
-    idle_timeout: float,
-    reasoning_idle: float,
-    first_chunk_timeout: float,
-    heartbeat_seconds: float,
     max_total_seconds: float,
+    on_result: Callable[[TurnResult], None] | None = None,
     now: Callable[[], float] = time.monotonic,
 ) -> AsyncGenerator[dict, None]:
-    """普通（非 cross_consult）流式路径的**重试循环 + 硬错误**策略层。
+    """通用 pre-content 重试 + 硬错误骨架（plain 与 cross_consult 共享）。
 
-    每次尝试经 stream_with_idle_timeout（detection-only）消费一个**全新**上游 chunk 流
-    （make_upstream() 每次重建），逐帧透传。据尝试收尾方式决策：
+    make_attempt(turn, remaining) 产出**一次全新尝试**的帧流——调用方在其中接好
+    turn-streamer（plain: stream_with_idle_timeout；cc: stream_one_turn）、全新上游、
+    accumulator 重置/回滚、以及把 pre-content 预算钳到 remaining。逐帧透传，据收尾决策：
 
-      - 上游正常 finish / 真实 error frame：return（成功 / error 已透传，皆终态）。
+      - 非超时收尾（干净成功 / 真实 error frame 已透传）：调用 on_result(turn) 把**胜出轮**
+        TurnResult 交还调用方，再 return。
       - 超时且**已提交可见输出**（committed）：post-content 不可续传 → 发硬错误帧、return。
       - 超时且总预算（max_total_seconds 墙钟）耗尽：发硬错误帧、return。
-      - 超时且 pre-content 且预算未尽：发一个心跳（保持连接温热）后**重发**。
+      - 超时且 pre-content 且预算未尽：发一个心跳（保持连接温热）后**重试**。
 
-    committed 一经置位不复位——重发只可能发生在任何可见 token 之前；一旦 content 开始，
+    committed 一经置位不复位——重试只可能发生在任何可见 token 之前；一旦 content 开始，
     下一次停顿即硬错误。now 可注入以便测试确定性控制预算。
-
-    **总预算守护**：每次尝试前把 pre-content 预算（first_chunk / reasoning_idle）钳到剩余
-    预算，使单次 pre-content 挂死不会把总耗时冲过 deadline 一整个 first_chunk_timeout。
-    content idle 不钳——已 committed 的健康流不应因临近预算被截断（其停顿本就立即硬错误）。
-
-    见 docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md。
+    见 docs/superpowers/specs/2026-06-04-cross-consult-retry-design.md。
     """
     deadline = now() + max_total_seconds
     committed = False
@@ -499,26 +493,54 @@ async def stream_with_retry(
             )
             return
         turn = TurnResult()
-        async for frame in stream_with_idle_timeout(
-            make_upstream(), result=turn,
-            idle_timeout=idle_timeout,
-            reasoning_idle=min(reasoning_idle, remaining),
-            first_chunk_timeout=min(first_chunk_timeout, remaining),
-            heartbeat_seconds=heartbeat_seconds,
-        ):
+        async for frame in make_attempt(turn, remaining):
             if _frame_has_visible_output(frame):
                 committed = True
             yield frame
         if not turn.timed_out:
-            # 上游正常 finish（含 StopAsyncIteration）或真实 error frame 已透传 → 终态
+            # 干净成功（含 StopAsyncIteration）或真实 error frame 已透传 → 交还胜出轮
+            if on_result is not None:
+                on_result(turn)
             return
         if committed:
             yield make_hard_error_frame(
                 "已输出部分内容后上游中断，不可续传，本轮中断。"
             )
             return
-        # pre-content stall：保持连接温热后重发原请求（预算耗尽由下轮 remaining<=0 兜底）
+        # pre-content stall：保持连接温热后重试（预算耗尽由下轮 remaining<=0 兜底）
         yield _HEARTBEAT
+
+
+async def stream_with_retry(
+    make_upstream: Callable[[], AsyncIterator[dict]],
+    *,
+    idle_timeout: float,
+    reasoning_idle: float,
+    first_chunk_timeout: float,
+    heartbeat_seconds: float,
+    max_total_seconds: float,
+    now: Callable[[], float] = time.monotonic,
+) -> AsyncGenerator[dict, None]:
+    """plain（非 cross_consult）路径适配器：passthrough turn-streamer
+    （stream_with_idle_timeout）+ pre-content 预算钳制，委托给 stream_turn_with_retry。
+
+    总预算守护：把 pre-content 预算（first_chunk / reasoning_idle）钳到 remaining，使单次
+    pre-content 挂死不冲过 deadline 一整个 first_chunk_timeout。content idle 不钳——已
+    committed 的健康流不应因临近预算被截断（其停顿本就立即硬错误）。
+    见 docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md。
+    """
+    def make_attempt(turn: TurnResult, remaining: float) -> AsyncIterator[dict]:
+        return stream_with_idle_timeout(
+            make_upstream(), result=turn,
+            idle_timeout=idle_timeout,
+            reasoning_idle=min(reasoning_idle, remaining),
+            first_chunk_timeout=min(first_chunk_timeout, remaining),
+            heartbeat_seconds=heartbeat_seconds,
+        )
+    async for frame in stream_turn_with_retry(
+        make_attempt, max_total_seconds=max_total_seconds, now=now,
+    ):
+        yield frame
 
 
 async def stream_cross_consult_continuation(
