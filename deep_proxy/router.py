@@ -617,21 +617,21 @@ class DeepProxyRouter:
         snap = accumulator.snapshot()
         captured: dict[str, TurnResult] = {}
 
-        def make_attempt(turn: TurnResult, remaining: float):
+        def make_attempt(turn: TurnResult):
             accumulator.restore(snap)   # 丢弃失败尝试的累加，保留更早内容（初始轮 snap 为空）
             return stream_one_turn(
                 iter_litellm_chunks(
                     self.config, body, _accumulator=accumulator, provider=provider,
                 ),
                 turn, tool_name=cc.tool_name,
-                idle_timeout=float(cc.call_timeout_seconds),
-                reasoning_idle=min(float(sc.reasoning_idle_timeout_seconds), remaining),
-                first_chunk_timeout=min(float(cc.first_chunk_timeout_seconds), remaining),
-                heartbeat_seconds=float(cc.stream_heartbeat_seconds),
+                idle_timeout=float(sc.idle_timeout_seconds),
+                reasoning_idle=float(sc.reasoning_idle_timeout_seconds),
+                first_chunk_timeout=float(sc.first_chunk_timeout_seconds),
+                heartbeat_seconds=float(sc.heartbeat_seconds),
             )
 
         async for frame in stream_turn_with_retry(
-            make_attempt, max_total_seconds=float(sc.max_stream_total_seconds),
+            make_attempt, max_retries=int(sc.max_retries),
             on_result=lambda t: captured.__setitem__("turn", t),
         ):
             yield frame
@@ -684,7 +684,7 @@ class DeepProxyRouter:
             reasoning_idle=float(sc.reasoning_idle_timeout_seconds),
             first_chunk_timeout=float(sc.first_chunk_timeout_seconds),
             heartbeat_seconds=float(sc.heartbeat_seconds),
-            max_total_seconds=float(sc.max_stream_total_seconds),
+            max_retries=int(sc.max_retries),
         ):
             yield chunk_dict
 

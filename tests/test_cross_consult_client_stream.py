@@ -78,6 +78,28 @@ async def test_stream_one_turn_forwards_content_and_reasoning_live():
     assert res.finish_reason == "stop"
 
 
+from deep_proxy.cross_consult.client_stream import (  # noqa: E402
+    consume_with_heartbeat, _Timeout, _HEARTBEAT,
+)
+
+
+async def test_consume_with_heartbeat_raises_idle_on_reasoning():
+    """引擎内部自适应：见 reasoning_content 后 idle 升到 reasoning_idle；
+    推理停顿 > content idle 但 ≤ reasoning_idle 不超时。"""
+    async def gen():
+        yield _delta_chunk(reasoning_content="想")
+        await asyncio.sleep(0.3)          # > idle 0.1，< reasoning_idle 2.0
+        yield _delta_chunk(content="答")
+
+    items = [it async for it in consume_with_heartbeat(
+        gen(), idle_timeout=0.1, reasoning_idle=2.0,
+        first_chunk_timeout=5.0, heartbeat_seconds=0.05, log_label="t",
+    )]
+    assert not any(isinstance(it, _Timeout) for it in items)
+    chunks = [it for it in items if isinstance(it, dict) and "choices" in it]
+    assert any(c["choices"][0]["delta"].get("content") == "答" for c in chunks)
+
+
 async def test_stream_one_turn_reasoning_idle_tolerates_gap():
     """显式 reasoning_idle：检测到 reasoning 后，超过 content idle 但 ≤ reasoning_idle
     的停顿不触发超时。"""
@@ -189,30 +211,6 @@ async def test_stream_one_turn_records_mid_stream_timeout_metadata():
     assert res.timed_out is True
     assert res.timeout_phase == "mid_stream"
     assert res.timeout_seconds == 0.2
-
-
-async def test_stream_one_turn_reasoning_upgrades_idle_budget():
-    """检测到 reasoning_content 后，mid-stream idle 预算升级到 max(idle, first_chunk)。
-    深度思考 burst 间隙 > idle_timeout 但 ≤ reasoning_idle 时不应误判为 hang。
-    （回归：此用例在 162f3d9 之前会 mid_stream 超时。）"""
-    async def reasoning_then_gap():
-        yield _delta_chunk(reasoning_content="思考中…")  # 触发升格 max(0.2, 2.0)=2.0
-        await asyncio.sleep(0.5)  # > idle_timeout(0.2)，< reasoning_idle(2.0)
-        yield _delta_chunk(content="答案")
-        yield _finish_chunk("stop")
-
-    res = TurnResult()
-    out = [f async for f in stream_one_turn(
-        reasoning_then_gap(), res, tool_name="cross_consult",
-        idle_timeout=0.2, first_chunk_timeout=2.0, heartbeat_seconds=0.1,
-    )]
-    assert res.errored is False
-    assert res.timed_out is False
-    texts = [d["choices"][0]["delta"] for d in out if "choices" in d]
-    assert {"reasoning_content": "思考中…"} in texts
-    assert {"content": "答案"} in texts
-
-
 
 
 async def test_stream_with_idle_timeout_forwards_chunks_verbatim():
@@ -378,10 +376,10 @@ async def test_continuation_resend_timeout_hard_errors():
     cfg.cross_consult = CrossConsultConfig(
         enabled=True, pairs={"deepseek": "mimo", "mimo": "deepseek"},
     )
-    # CrossConsultConfig 无 validate_assignment：直接赋小数加速测试
-    cfg.cross_consult.first_chunk_timeout_seconds = 0.2
-    cfg.cross_consult.stream_heartbeat_seconds = 0.1
-    cfg.streaming.max_stream_total_seconds = 1   # 1s 总预算 → 快速耗尽
+    # 超时取自 StreamingConfig（合并后单一配置）；直接赋小数加速测试
+    cfg.streaming.first_chunk_timeout_seconds = 0.2
+    cfg.streaming.heartbeat_seconds = 0.1
+    cfg.streaming.max_retries = 1   # 1 次重发后硬错误
     cfg.providers["mimo"] = Provider(
         name="mimo", api_base="https://x", api_key="t", litellm_prefix="openai/",
         flash_model="mimo-v2.5", pro_model="mimo-v2.5-pro",

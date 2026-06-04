@@ -2,7 +2,7 @@
 
 plain 路径根因修复（见 docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md）：
 旧"注入'请重试' content + clean stop"对 agent 结构上不可能触发重试（clean stop = 成功轮），
-已废弃。现：pre-content stall → 代理重发（受 max_stream_total_seconds 总预算约束）；
+已废弃。现：pre-content stall → 代理重发（最多 max_retries 次）；
 post-content stall / 预算耗尽 → 硬错误帧（{"error": {...}} 透传给客户端使 SDK 抛错）。
 
 cc 路径（cross_consult 激活）已同等迁移：初始轮 + 重发轮经 stream_turn_with_retry
@@ -43,7 +43,7 @@ async def test_plain_path_first_chunk_timeout_retries_then_hard_errors(router):
     不提交升格记账。"""
     router.config.streaming.first_chunk_timeout_seconds = 0.2
     router.config.streaming.heartbeat_seconds = 0.1
-    router.config.streaming.max_stream_total_seconds = 1   # 1s 总预算 → 快速耗尽
+    router.config.streaming.max_retries = 1   # 1 次重发后硬错误
     calls = {"n": 0}
 
     async def hang_iter(config, body, *, _accumulator=None, provider=None):
@@ -139,7 +139,9 @@ async def test_cc_initial_turn_timeout_hard_errors():
     """cross_consult 激活：初始轮首 chunk 持续超时、总预算耗尽 → 硬错误帧（透传给
     客户端），不再注入已废弃的优雅通知 / clean stop，不提交升格记账。"""
     router, provider = _cc_router()
-    router.config.streaming.max_stream_total_seconds = 1   # 1s 总预算 → 快速耗尽
+    router.config.streaming.first_chunk_timeout_seconds = 0.2
+    router.config.streaming.heartbeat_seconds = 0.1
+    router.config.streaming.max_retries = 1   # 1 次重发后硬错误
 
     async def hang_iter(config, body, *, _accumulator=None, provider=None):
         await asyncio.sleep(5.0)

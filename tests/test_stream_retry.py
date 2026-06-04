@@ -132,7 +132,7 @@ async def test_stream_turn_with_retry_on_result_captures_winning_turn():
     calls = {"n": 0}
     captured = {}
 
-    def make_attempt(turn, remaining):
+    def make_attempt(turn):
         calls["n"] += 1
         if calls["n"] == 1:
             async def stall():
@@ -148,12 +148,50 @@ async def test_stream_turn_with_retry_on_result_captures_winning_turn():
         return ok()
 
     out = [f async for f in stream_turn_with_retry(
-        make_attempt, max_total_seconds=600.0,
+        make_attempt, max_retries=2,
         on_result=lambda t: captured.__setitem__("turn", t),
     )]
     assert calls["n"] == 2
     assert captured.get("turn") is not None
     assert captured["turn"].content == "hi"
+    assert not any(is_error_frame(f) for f in out)
+
+
+async def test_stream_turn_with_retry_count_based_exhaustion():
+    """pre-content 连续 stall，重发达 max_retries 后发硬错误帧（无 deadline/now）。"""
+    from deep_proxy.cross_consult.client_stream import stream_turn_with_retry, TurnResult
+    calls = {"n": 0}
+
+    def make_attempt(turn):
+        calls["n"] += 1
+        async def stall():
+            turn.timed_out = True
+            return
+            yield  # noqa
+        return stall()
+
+    out = [f async for f in stream_turn_with_retry(make_attempt, max_retries=2)]
+    assert calls["n"] == 3                    # 1 初次 + 2 重发
+    assert any(is_error_frame(f) for f in out)
+
+
+async def test_stream_turn_with_retry_healthy_stream_never_walled():
+    """健康流（产出 content 后干净 finish）一次成功，不重试、无硬错误。"""
+    from deep_proxy.cross_consult.client_stream import stream_turn_with_retry, TurnResult
+    calls = {"n": 0}
+
+    def make_attempt(turn):
+        calls["n"] += 1
+        async def ok():
+            yield _delta_chunk(content="hi")
+            yield _finish_chunk("stop")
+        return ok()
+
+    captured = {}
+    out = [f async for f in stream_turn_with_retry(
+        make_attempt, max_retries=2, on_result=lambda t: captured.__setitem__("t", t))]
+    assert calls["n"] == 1
+    assert captured.get("t") is not None
     assert not any(is_error_frame(f) for f in out)
 
 
@@ -186,7 +224,7 @@ async def test_retry_succeeds_after_pre_content_stall():
         make_upstream,
         idle_timeout=5.0, reasoning_idle=5.0,
         first_chunk_timeout=0.2, heartbeat_seconds=0.1,
-        max_total_seconds=600.0,
+        max_retries=2,
     )]
     assert calls["n"] == 2                       # 重发了一次
     assert any(f == {"_dp_heartbeat": True} for f in out)
@@ -211,73 +249,10 @@ async def test_hard_error_on_post_content_stall():
         make_upstream,
         idle_timeout=0.2, reasoning_idle=0.2,
         first_chunk_timeout=5.0, heartbeat_seconds=0.1,
-        max_total_seconds=600.0,
+        max_retries=2,
     )]
     assert calls["n"] == 1                        # committed 后不重发
     assert _content_of(out, "partial")
-    assert any(is_error_frame(f) for f in out)
-
-
-async def test_hard_error_on_budget_exhaustion():
-    """每次尝试都在 pre-content 阶段挂死，且总预算耗尽 → 硬错误（注入前进 fake clock 控制预算）。"""
-    ticks = {"i": 0}
-
-    def fake_now():
-        v = ticks["i"] * 30.0   # 每次调用前进 30s
-        ticks["i"] += 1
-        return v
-
-    calls = {"n": 0}
-
-    def make_upstream():
-        calls["n"] += 1
-        async def stall():
-            await asyncio.sleep(10.0)
-            yield _delta_chunk(content="x")
-        return stall()
-
-    out = [f async for f in stream_with_retry(
-        make_upstream,
-        idle_timeout=5.0, reasoning_idle=5.0,
-        first_chunk_timeout=0.2, heartbeat_seconds=0.1,
-        max_total_seconds=50.0, now=fake_now,
-    )]
-    assert calls["n"] >= 1                        # 至少跑一次尝试再因预算耗尽硬错误
-    assert any(is_error_frame(f) for f in out)
-
-
-async def test_retry_clamps_pre_content_budget_to_remaining(monkeypatch):
-    """总预算守护：每次尝试前把 pre-content 预算（first_chunk / reasoning_idle）钳到剩余预算，
-    使**单次尝试不会把总耗时冲过 deadline 一整个 first_chunk_timeout**（review #2）。"""
-    recorded = []
-    clock = {"t": 0.0}
-
-    def fake_now():
-        return clock["t"]
-
-    async def spy_sit(upstream, *, result, idle_timeout, reasoning_idle,
-                      first_chunk_timeout, heartbeat_seconds):
-        recorded.append(first_chunk_timeout)
-        clock["t"] += first_chunk_timeout            # 模拟该次尝试耗尽其(钳后)首 chunk 预算
-        result.timed_out = True
-        result.timeout_phase = "first_chunk"
-        await upstream.aclose()
-        return
-        yield  # noqa — 使本函数成为 async generator
-
-    monkeypatch.setattr(
-        "deep_proxy.cross_consult.client_stream.stream_with_idle_timeout", spy_sit)
-
-    out = [f async for f in stream_with_retry(
-        lambda: _iter([]),
-        idle_timeout=15.0, reasoning_idle=45.0,
-        first_chunk_timeout=120.0, heartbeat_seconds=10.0,
-        max_total_seconds=300.0, now=fake_now,
-    )]
-    # deadline=300：尝试1 rem=300→first_chunk=120，clock→120；尝试2 rem=180→120，clock→240；
-    #               尝试3 rem=60 →钳 120→60，clock→300；尝试4 rem=0 →硬错误（不再启动尝试）
-    assert recorded == [120.0, 120.0, 60.0]
-    assert clock["t"] == 300.0                       # 总耗时精确停在 deadline，无超调
     assert any(is_error_frame(f) for f in out)
 
 
@@ -295,7 +270,7 @@ async def test_real_upstream_error_forwarded_no_retry():
         make_upstream,
         idle_timeout=5.0, reasoning_idle=5.0,
         first_chunk_timeout=5.0, heartbeat_seconds=0.1,
-        max_total_seconds=600.0,
+        max_retries=2,
     )]
     assert calls["n"] == 1
     assert any(is_error_frame(f) for f in out)
@@ -315,7 +290,7 @@ async def test_clean_finish_succeeds_first_try():
         make_upstream,
         idle_timeout=5.0, reasoning_idle=5.0,
         first_chunk_timeout=5.0, heartbeat_seconds=5.0,
-        max_total_seconds=600.0,
+        max_retries=2,
     )]
     assert calls["n"] == 1
     assert not any(is_error_frame(f) for f in out)
@@ -440,9 +415,9 @@ async def test_cc_initial_turn_retries_then_succeeds(router_dual, monkeypatch):
     router = router_dual
     router.config.cross_consult.enabled = True
     router.config.cross_consult.pairs = {"deepseek": "mimo", "mimo": "deepseek"}
-    router.config.cross_consult.first_chunk_timeout_seconds = 1
-    router.config.cross_consult.call_timeout_seconds = 1
-    router.config.cross_consult.stream_heartbeat_seconds = 1
+    router.config.streaming.first_chunk_timeout_seconds = 1
+    router.config.streaming.idle_timeout_seconds = 1
+    router.config.streaming.heartbeat_seconds = 1
     calls = {"n": 0}
 
     def fake_iter(config, body, *, _accumulator=None, provider=None):
@@ -471,9 +446,9 @@ async def test_cc_initial_turn_post_content_stall_hard_errors(router_dual, monke
     router = router_dual
     router.config.cross_consult.enabled = True
     router.config.cross_consult.pairs = {"deepseek": "mimo", "mimo": "deepseek"}
-    router.config.cross_consult.first_chunk_timeout_seconds = 5
-    router.config.cross_consult.call_timeout_seconds = 1
-    router.config.cross_consult.stream_heartbeat_seconds = 1
+    router.config.streaming.first_chunk_timeout_seconds = 5
+    router.config.streaming.idle_timeout_seconds = 1
+    router.config.streaming.heartbeat_seconds = 1
     router.config.streaming.reasoning_idle_timeout_seconds = 1
     calls = {"n": 0}
 
@@ -490,6 +465,30 @@ async def test_cc_initial_turn_post_content_stall_hard_errors(router_dual, monke
     out = [f async for f in router.iter_chat_chunks(_cc_body(), provider=prov)]
     assert calls["n"] == 1
     assert _content_of(out, "部分")
+    assert any(is_error_frame(f) for f in out)
+
+
+async def test_cc_initial_turn_count_based_hard_error(router_dual, monkeypatch):
+    """cc 初始轮连续 pre-content stall，达 max_retries 后硬错误。"""
+    router = router_dual
+    router.config.cross_consult.enabled = True
+    router.config.cross_consult.pairs = {"deepseek": "mimo", "mimo": "deepseek"}
+    router.config.streaming.first_chunk_timeout_seconds = 1
+    router.config.streaming.max_retries = 1
+    router.config.streaming.heartbeat_seconds = 1
+    calls = {"n": 0}
+
+    def fake_iter(config, body, *, _accumulator=None, provider=None):
+        calls["n"] += 1
+        async def stall():
+            await asyncio.sleep(10.0)
+            yield _delta_chunk(content="x")
+        return stall()
+
+    monkeypatch.setattr("deep_proxy.router.iter_litellm_chunks", fake_iter)
+    prov = router.config.providers["deepseek"]
+    out = [f async for f in router.iter_chat_chunks(_cc_body(), provider=prov)]
+    assert calls["n"] == 2                     # 1 初次 + 1 重发
     assert any(is_error_frame(f) for f in out)
 
 
@@ -510,9 +509,9 @@ async def test_cc_resend_turn_retries_then_succeeds(router_dual, monkeypatch):
     cc = router.config.cross_consult
     cc.enabled = True
     cc.pairs = {"deepseek": "mimo", "mimo": "deepseek"}
-    cc.first_chunk_timeout_seconds = 1
-    cc.call_timeout_seconds = 1
-    cc.stream_heartbeat_seconds = 1
+    router.config.streaming.first_chunk_timeout_seconds = 1
+    router.config.streaming.idle_timeout_seconds = 1
+    router.config.streaming.heartbeat_seconds = 1
     calls = {"n": 0}
 
     def fake_iter(config, body, *, _accumulator=None, provider=None):
@@ -552,9 +551,9 @@ async def test_cc_resend_retry_preserves_prior_turn_content_in_cache(router_dual
     cc = router.config.cross_consult
     cc.enabled = True
     cc.pairs = {"deepseek": "mimo", "mimo": "deepseek"}
-    cc.first_chunk_timeout_seconds = 1
-    cc.call_timeout_seconds = 1
-    cc.stream_heartbeat_seconds = 1
+    router.config.streaming.first_chunk_timeout_seconds = 1
+    router.config.streaming.idle_timeout_seconds = 1
+    router.config.streaming.heartbeat_seconds = 1
     calls = {"n": 0}
 
     def fake_iter(config, body, *, _accumulator=None, provider=None):
