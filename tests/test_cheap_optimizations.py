@@ -413,6 +413,21 @@ class TestReadUrlsHelpers:
         from deep_proxy.optimization.skills_transform import _extract_urls
         assert _extract_urls("no link here") == []
 
+    def test_extract_urls_blocks_ssrf_private_hosts(self):
+        """SSRF 守卫：内网/回环/链路本地 IP 字面量 + localhost 的 URL 不进抓取列表，
+        公网域名放行。"""
+        from deep_proxy.optimization.skills_transform import _extract_urls
+        content = (
+            "ok https://example.com/page "
+            "meta http://169.254.169.254/latest/meta-data "
+            "loop http://127.0.0.1:8000/ "
+            "lan http://10.0.0.5/x "
+            "lh http://localhost/admin "
+            "v6 http://[::1]/"
+        )
+        urls = _extract_urls(content)
+        assert urls == ["https://example.com/page"]
+
     def test_substitute_urls_inlines_successful_results(self):
         from deep_proxy.optimization.skills_transform import _substitute_urls
         urls = ["https://a.com", "https://b.com"]

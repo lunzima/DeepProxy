@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import re
 from typing import Any, Dict, List
@@ -92,10 +93,39 @@ _READURLS_OK_CT_PREFIXES = (
 )
 
 
-def _extract_urls(content: str) -> List[str]:
-    """从 content 中提取去重 + 上限截断后的待抓取 URL 列表。
+_SSRF_BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
 
-    纯函数，无 I/O；抽出便于单元测试 URL 解析 / 去重 / 上限逻辑。
+
+def _is_ssrf_blocked(url: str) -> bool:
+    """SSRF 守卫：host 是内网/回环/链路本地/保留 IP 字面量，或 localhost 类名 → 拦截。
+
+    覆盖最常见向量（用户直接粘贴 http://169.254.169.254/… / localhost / RFC1918 字面量）。
+    注：不做 DNS 解析；普通域名放行——经由 follow_redirects 跳转到内网的残余风险此处不挡
+    （单用户玩具，权衡成本）。
+    """
+    try:
+        host = urlparse(url).hostname
+    except Exception:
+        return True  # 解析失败 → 保守拦截
+    if not host:
+        return True
+    host_l = host.lower()
+    if host_l in _SSRF_BLOCKED_HOSTNAMES or host_l.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # 非 IP 字面量（普通域名）→ 放行
+    return (
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_reserved or ip.is_unspecified or ip.is_multicast
+    )
+
+
+def _extract_urls(content: str) -> List[str]:
+    """从 content 中提取去重 + SSRF 过滤 + 上限截断后的待抓取 URL 列表。
+
+    纯函数，无 I/O；抽出便于单元测试 URL 解析 / 去重 / SSRF / 上限逻辑。
     """
     raw = _URL_RE.findall(content) or []
     seen: set[str] = set()
@@ -105,6 +135,9 @@ def _extract_urls(content: str) -> List[str]:
         if not cu or cu in seen:
             continue
         seen.add(cu)
+        if _is_ssrf_blocked(cu):
+            logger.debug("readurls: SSRF 守卫拦截内网/回环 URL: %s", cu)
+            continue
         clean.append(cu)
         if len(clean) >= _READURLS_MAX_PER_MSG:
             break
