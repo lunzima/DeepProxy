@@ -392,11 +392,9 @@ async def test_continuation_streams_consult_heartbeat_and_resend():
                for m in body["messages"])
 
 
-async def test_continuation_resend_timeout_emits_notice_then_errored():
-    """重发轮超时：先 yield 优雅超时通知（content + finish_reason=stop），再 yield
-    STREAM_ERRORED 哨兵（供调用方标记不提交升格记账）。绝不静默返回空轮。"""
-    from deep_proxy.cross_consult.client_stream import STREAM_ERRORED
-
+async def test_continuation_resend_timeout_hard_errors():
+    """重发轮 pre-content 持续挂死、总预算耗尽 → 发**硬错误帧**（{"error":...} 透传给
+    客户端使 SDK 抛错），不再注入已废弃的优雅通知 / clean stop / STREAM_ERRORED。"""
     cfg = ProxyConfig.model_validate(normalize_legacy_config({
         "deepseek": {"api_key": "sk", "api_base": "https://api.deepseek.com"},
     }))
@@ -406,6 +404,7 @@ async def test_continuation_resend_timeout_emits_notice_then_errored():
     # CrossConsultConfig 无 validate_assignment：直接赋小数加速测试
     cfg.cross_consult.first_chunk_timeout_seconds = 0.2
     cfg.cross_consult.stream_heartbeat_seconds = 0.1
+    cfg.streaming.max_stream_total_seconds = 1   # 1s 总预算 → 快速耗尽
     cfg.providers["mimo"] = Provider(
         name="mimo", api_base="https://x", api_key="t", litellm_prefix="openai/",
         flash_model="mimo-v2.5", pro_model="mimo-v2.5-pro",
@@ -414,7 +413,7 @@ async def test_continuation_resend_timeout_emits_notice_then_errored():
     acc = StreamingReasoningAccumulator(request_messages=[])
 
     async def hanging_resend(config, body, *, _accumulator=None, provider=None):
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(5.0)
         yield {"choices": [{"index": 0, "delta": {"content": "never"},
                             "finish_reason": None}]}
 
@@ -433,12 +432,13 @@ async def test_continuation_resend_timeout_emits_notice_then_errored():
             cc_config=cfg.cross_consult, accumulator=acc,
         )]
 
-    # 优雅通知透传给客户端
-    assert any("[DeepProxy]" in fr.get("choices", [{}])[0].get("delta", {}).get("content", "")
-               for fr in frames)
-    assert any(fr.get("choices", [{}])[0].get("finish_reason") == "stop" for fr in frames)
-    # 末尾 STREAM_ERRORED 哨兵（按 identity 识别）
-    assert any(fr is STREAM_ERRORED for fr in frames)
+    # 硬错误帧透传给客户端（is_error_frame: error 是 dict 且无 choices）
+    assert any(isinstance(fr.get("error"), dict) and not fr.get("choices") for fr in frames)
+    # 不再注入旧的优雅通知 / clean stop
+    assert not any("[DeepProxy]" in (fr.get("choices", [{}])[0].get("delta", {}) or {}).get("content", "")
+                   for fr in frames if "choices" in fr)
+    assert not any(fr.get("choices", [{}])[0].get("finish_reason") == "stop"
+                   for fr in frames if "choices" in fr)
 
 
 async def test_stream_one_turn_closes_upstream_on_early_close():

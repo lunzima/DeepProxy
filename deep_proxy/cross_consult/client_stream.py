@@ -617,26 +617,32 @@ async def stream_cross_consult_continuation(
                 "content": tool_text,
             })
 
-        # 重发：流式，逐 chunk 透传；复用同一 accumulator 写缓存
-        resend_iter = iter_litellm_chunks(
-            config, body, _accumulator=accumulator, provider=source_provider,
-        )
-        turn = TurnResult()
-        async for frame in stream_one_turn(
-            resend_iter, turn, tool_name=cc_config.tool_name,
-            idle_timeout=idle, first_chunk_timeout=first, heartbeat_seconds=hb,
+        # 重发：流式逐 chunk 透传 + pre-content 重试；复用同一 accumulator 写缓存。
+        sc = config.streaming
+        snap = accumulator.snapshot()
+        captured: dict[str, TurnResult] = {}
+
+        def make_attempt(turn: TurnResult, remaining: float):
+            accumulator.restore(snap)   # 丢弃失败重发的累加，保留更早轮次内容
+            return stream_one_turn(
+                iter_litellm_chunks(
+                    config, body, _accumulator=accumulator, provider=source_provider,
+                ),
+                turn, tool_name=cc_config.tool_name,
+                idle_timeout=idle,
+                reasoning_idle=min(float(sc.reasoning_idle_timeout_seconds), remaining),
+                first_chunk_timeout=min(first, remaining),
+                heartbeat_seconds=hb,
+            )
+
+        async for frame in stream_turn_with_retry(
+            make_attempt, max_total_seconds=float(sc.max_stream_total_seconds),
+            on_result=lambda t: captured.__setitem__("turn", t),
         ):
             yield frame
-        if turn.errored:
-            # 重发轮超时：先 yield 优雅超时通知（content + finish_reason=stop），让 agent
-            # 读到"上游超时、可重试"而非静默收到空轮后停止推理（根因修复）。真实上游 error
-            # frame（timed_out=False）已在上面的 stream_one_turn 循环里逐帧透传，不重复发。
-            if turn.timed_out:
-                for frame in make_timeout_notice_frames(turn):
-                    yield frame
-            # STREAM_ERRORED：通知调用方设 saw_error_frame（不提交升格记账），
-            # 该哨兵被 iter_chat_chunks 吞掉，不透传给客户端。
-            yield STREAM_ERRORED
+        turn = captured.get("turn")
+        if turn is None or turn.errored:
+            # 硬错误（已发 error frame）或真实上游 error frame（已逐帧透传）→ 终止。
             return
         turn_tool_calls = turn.accumulated_tool_calls
         turn_content = turn.content

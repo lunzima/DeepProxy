@@ -490,3 +490,55 @@ async def test_cc_initial_turn_post_content_stall_hard_errors(router_dual, monke
     assert calls["n"] == 1
     assert _content_of(out, "部分")
     assert any(is_error_frame(f) for f in out)
+
+
+# ----------------------------------------------------------------------------
+# Task 5: cross_consult 重发轮接入 stream_turn_with_retry
+# ----------------------------------------------------------------------------
+def _cc_tool_chunk():
+    return {"choices": [{"index": 0, "delta": {"tool_calls": [
+        {"index": 0, "id": "c1", "type": "function",
+         "function": {"name": "cross_consult", "arguments": '{"question":"q"}'}}]},
+        "finish_reason": None}]}
+
+
+async def test_cc_resend_turn_retries_then_succeeds(router_dual, monkeypatch):
+    """cc 重发轮 pre-content 挂死 → 重发 → 成功。初始轮发起 cc 调用，consult 直接返回，
+    第一次重发挂死，第二次成功。"""
+    router = router_dual
+    cc = router.config.cross_consult
+    cc.enabled = True
+    cc.pairs = {"deepseek": "mimo", "mimo": "deepseek"}
+    cc.first_chunk_timeout_seconds = 1
+    cc.call_timeout_seconds = 1
+    cc.stream_heartbeat_seconds = 1
+    calls = {"n": 0}
+
+    def fake_iter(config, body, *, _accumulator=None, provider=None):
+        n = calls["n"]; calls["n"] += 1
+        if n == 0:                       # 初始轮：发起 cc 调用
+            async def init():
+                yield _cc_tool_chunk()
+                yield _finish_chunk("tool_calls")
+            return init()
+        if n == 1:                       # 第一次重发：pre-content 挂死
+            async def stall():
+                await asyncio.sleep(10.0)
+                yield _delta_chunk(content="x")
+            return stall()
+        async def ok():                  # 第二次重发：成功
+            yield _delta_chunk(content="终答")
+            yield _finish_chunk("stop")
+        return ok()
+
+    async def fake_consult(tc, *, call_count, target_provider, config, cc_config):
+        return ("咨询结果", True)
+
+    monkeypatch.setattr("deep_proxy.router.iter_litellm_chunks", fake_iter)
+    monkeypatch.setattr("deep_proxy.cross_consult.client_stream.iter_litellm_chunks", fake_iter)
+    monkeypatch.setattr("deep_proxy.cross_consult.client_stream.resolve_consult_tool_call", fake_consult)
+    prov = router.config.providers["deepseek"]
+    out = [f async for f in router.iter_chat_chunks(_cc_body(), provider=prov)]
+    assert calls["n"] == 3               # 初始 + 2 次重发
+    assert _content_of(out, "终答")
+    assert not any(is_error_frame(f) for f in out)
