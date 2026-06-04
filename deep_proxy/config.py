@@ -323,7 +323,7 @@ class FlashUpgradeConfig(BaseModel):
     router_type: str = Field(
         default="bert",
         description="路由决策器类型："
-                    "bert（中文 RoBERTa-small + LoRA，需 torch+transformers）/ "
+                    "bert（中文 BERT-small + LoRA，需 torch+transformers）/ "
                     "rule（规则/启发式，始终可用，bert 加载失败时自动降级）",
     )
     bert_checkpoint: str = Field(

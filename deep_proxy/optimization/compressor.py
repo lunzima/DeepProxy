@@ -35,6 +35,15 @@ from .strip_telemetry import strip_telemetry_from_text as _strip_telemetry
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n(.*?)\n```$", re.DOTALL)
 
+# 压缩输出 max_tokens 上限：钳到 V4 模型输出上限，避免大 system prompt 把 len*4 估算值
+# 抬到 >384K 触发上游 400。压缩输出本就短于输入，384K 实际上永不会被截断。
+_COMPRESS_MAX_TOKENS_CEILING = 384_000
+
+
+def _compress_max_tokens(text_len: int) -> int:
+    """压缩请求的 max_tokens：max(下限, len*4 估算) 再钳到模型输出上限。"""
+    return min(_COMPRESS_MAX_TOKENS_CEILING, max(4096, text_len * 4 + 4096))
+
 
 def _strip_wrapping(text: str) -> str:
     """剥掉模型偶尔加的代码栅栏 / 前后引号。"""
@@ -331,7 +340,7 @@ class SystemPromptCompressor:
                 {"role": "system", "content": _COMPRESSION_INSTRUCTION},
                 {"role": "user", "content": text},
             ],
-            "max_tokens": max(4096, len(text) * 4 + 4096),
+            "max_tokens": _compress_max_tokens(len(text)),
             "thinking": {"type": "disabled", "reasoning_effort": "minimal"},
         }
         if self._sampling is not None:

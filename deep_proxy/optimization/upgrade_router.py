@@ -103,7 +103,8 @@ class RuleUpgradeRouter(UpgradeRouter):
 class BertUpgradeRouter(UpgradeRouter):
     """轻量 BERT 二分类器。
 
-    使用中文 RoBERTa-small + LoRA 做 flash→pro 升格决策（二分类：complex vs simple）。
+    使用中文 BERT-small + LoRA 做 flash→pro 升格决策（二分类：complex vs simple）。
+    （checkpoint 架构 = BertForSequenceClassification / model_type=bert）
     CPU 推理约 40-70ms（512 tokens），CUDA 约 10-20ms。
 
     torch / transformers 为可选项——导入失败或模型加载失败时自动降级到 RuleUpgradeRouter。

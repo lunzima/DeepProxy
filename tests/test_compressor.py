@@ -12,9 +12,19 @@ import pytest
 
 from deep_proxy.optimization.compressor import (
     _CACHE_VERSION,
+    _COMPRESS_MAX_TOKENS_CEILING,
+    _compress_max_tokens,
     SystemPromptCompressor,
 )
 from types import SimpleNamespace
+
+
+def test_compress_max_tokens_clamped_to_model_ceiling():
+    """压缩请求的 max_tokens 须钳制在模型输出上限内，避免大 prompt 触发上游 400。"""
+    assert _COMPRESS_MAX_TOKENS_CEILING == 384_000
+    assert _compress_max_tokens(0) == 4096                    # 空 → 4096 基线
+    assert _compress_max_tokens(50_000) == 50_000 * 4 + 4096  # 中 → 估算值
+    assert _compress_max_tokens(200_000) == 384_000          # 大 → 钳到上限（原 ~804K 超上限）
 
 
 # OptimizationConfig 18 个 skill flag 字段（与 deep_proxy.config 同步）

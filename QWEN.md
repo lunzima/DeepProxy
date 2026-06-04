@@ -14,7 +14,7 @@
 | **Pydantic v2** | 配置模型 / 数据校验 |
 | **httpx** | 异步 HTTP 客户端（上游 models 拉取 + readurls） |
 | **BeautifulSoup4 + lxml** | 网页正文抓取（readurls skill） |
-| **torch + transformers + peft** | BERT 路由器（中文 RoBERTa-small + LoRA） |
+| **torch + transformers + peft** | BERT 路由器（中文 BERT-small + LoRA） |
 | **pytest** | 测试框架（asyncio_mode=auto，无需 `@pytest.mark.asyncio`） |
 
 ### 架构概览
@@ -110,7 +110,7 @@ precise_sampling:    # code/math/逻辑
 # 阈值默认值以 deep_proxy/config.py::FlashUpgradeConfig 为准
 flash_upgrade:
   enabled: true
-  router_type: bert                       # BertUpgradeRouter（中文 RoBERTa-small + LoRA）
+  router_type: bert                       # BertUpgradeRouter（中文 BERT-small + LoRA）
   bert_checkpoint: "router_model"         # 微调后的二分类模型
   router_threshold: 0.65                  # 全局默认；MiMo per_provider 覆盖为 0.60
   heuristic_threshold: 8.0                # 全局默认；MiMo per_provider 覆盖为 7.5
@@ -167,7 +167,7 @@ D:\deepproxy\
 │       └── strip_telemetry.py     # 客户端 telemetry header 行剥离（共享正则供 compressor / router 复用）
 ├── docs/                      # 项目文档 + 设计 spec
 │   └── superpowers/specs/     # superpowers brainstorming 流程产出的 design spec
-├── router_model/              # 微调后的 BERT 路由器（中文 RoBERTa-small + LoRA）
+├── router_model/              # 微调后的 BERT 路由器（中文 BERT-small + LoRA）
 │   ├── config.json
 │   ├── model.safetensors
 │   ├── tokenizer.json
