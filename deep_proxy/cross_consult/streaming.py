@@ -68,7 +68,9 @@ async def aggregate_stream_to_response(
     upstream = fn(config, body, provider=provider)
     gen = consume_with_heartbeat(
         upstream, idle_timeout=idle_timeout,
-        first_chunk_timeout=(first_chunk_timeout or idle_timeout),
+        # 未给（None）才退回 idle 守护首 chunk；显式 0/负数保留"禁用首 chunk 超时"语义
+        first_chunk_timeout=(first_chunk_timeout if first_chunk_timeout is not None
+                             else idle_timeout),
         heartbeat_seconds=heartbeat_seconds, log_label="aggregate_stream",
         reasoning_idle=reasoning_idle,
     )

@@ -176,7 +176,7 @@ cross_consult:
     deepseek: mimo
     mimo: deepseek
   max_calls_per_request: 3            # 单次 client 请求内的 consult 次数上限
-  call_timeout_seconds: 30
+  # 超时旋钮统一由 streaming 段提供（cross_consult 与 plain 共用同一套）
   # consult 输入/输出不设武断上限：约束是 target provider 的 context_window（输入）
   # 与 max_output_tokens（输出，executor 用它做 max_tokens）。
   consult_system_prompt: |

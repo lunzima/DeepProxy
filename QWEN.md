@@ -39,7 +39,7 @@ DeepProxy 绑定**两个端口**，共享同一个 FastAPI app 实例：
 
 **Per-port 动态阈值控制器**（v0.4+）：`flash_upgrade.dynamic_threshold` 闭环反馈调整 `router_threshold`/`heuristic_threshold`，在配置值 ±`band` 带内浮动，把**仅升格可及请求**（flash 起始；不含 pool 直接 pro / sentinel / throttle / persist 命中）的升格率驱动到 `1-flash_floor`（默认 40% flash 均衡）。每 port 独立 `DynamicThresholdController`（滑动窗口 + 比例控制 + 暖机），`controller=None` 时行为与历史完全等价。见 `deep_proxy/optimization/dynamic_threshold.py`。
 
-**Cross-Consult**（可选 v0.3+）：启用后向请求注入虚拟工具 `cross_consult`，agent 可调用它向异家族 provider 的 pro 模型请求第二视角；DeepProxy 在响应路径拦截 tool_use、代为执行、把结果以 tool_result 注入会话后重发原 provider。`pairs` map 双向声明对偶关系（无主副层级）。默认 disabled，须显式开启。启用后流式 endpoint 对客户端真流式：content/reasoning 逐 token 透传、cross_consult 工具帧被抑制、consult 执行间隙发 SSE keep-alive 心跳（`stream_heartbeat_seconds`）；首 chunk prefill 与 inter-chunk idle 用独立超时预算（`first_chunk_timeout_seconds` / `call_timeout_seconds`）。见 `docs/mimo_integration.md` §12 与 `docs/superpowers/specs/2026-05-30-cross-consult-client-streaming-design.md`。
+**Cross-Consult**（可选 v0.3+）：启用后向请求注入虚拟工具 `cross_consult`，agent 可调用它向异家族 provider 的 pro 模型请求第二视角；DeepProxy 在响应路径拦截 tool_use、代为执行、把结果以 tool_result 注入会话后重发原 provider。`pairs` map 双向声明对偶关系（无主副层级）。默认 disabled，须显式开启。启用后流式 endpoint 对客户端真流式：content/reasoning 逐 token 透传、cross_consult 工具帧被抑制、consult 执行间隙发 SSE keep-alive 心跳；超时旋钮（first_chunk / idle / reasoning_idle / max_retries / heartbeat）统一取自 `streaming` 段（plain 与 cross_consult 共用单一引擎 `consume_with_heartbeat` + 单一配置）。见 `docs/mimo_integration.md` §12 与 `docs/superpowers/plans/2026-06-04-timeout-simplification.md`。
 
 ## Building and Running
 
