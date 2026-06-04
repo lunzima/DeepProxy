@@ -34,7 +34,7 @@ async def test_with_heartbeat_fast_awaitable_no_ping():
 
 
 from deep_proxy.cross_consult.client_stream import (
-    stream_one_turn, TurnResult, make_timeout_notice_frames, stream_with_idle_timeout,
+    stream_one_turn, TurnResult, stream_with_idle_timeout,
 )
 
 
@@ -213,29 +213,6 @@ async def test_stream_one_turn_reasoning_upgrades_idle_budget():
     assert {"content": "答案"} in texts
 
 
-def test_make_timeout_notice_frames_first_chunk():
-    res = TurnResult(timed_out=True, timeout_phase="first_chunk", timeout_seconds=120.0)
-    frames = make_timeout_notice_frames(res)
-    assert len(frames) == 2
-    content = frames[0]["choices"][0]["delta"]["content"]
-    assert "[DeepProxy]" in content and "120" in content
-    assert frames[0]["choices"][0]["finish_reason"] is None
-    # 终轮帧：clean finish（非 error），让 agent 当普通一轮收尾
-    assert frames[1]["choices"][0]["finish_reason"] == "stop"
-
-
-def test_make_timeout_notice_frames_mid_stream_distinct_text():
-    first = make_timeout_notice_frames(
-        TurnResult(timed_out=True, timeout_phase="first_chunk", timeout_seconds=10.0))
-    mid = make_timeout_notice_frames(
-        TurnResult(timed_out=True, timeout_phase="mid_stream", timeout_seconds=10.0))
-    first_text = first[0]["choices"][0]["delta"]["content"]
-    mid_text = mid[0]["choices"][0]["delta"]["content"]
-    assert first_text != mid_text
-    # mid_stream 语义关键词 + 前缀 + 秒数（避免仅"不相等"的弱断言）
-    assert "[DeepProxy]" in mid_text
-    assert "输出过程中" in mid_text and "10" in mid_text
-    assert mid[1]["choices"][0]["finish_reason"] == "stop"
 
 
 async def test_stream_with_idle_timeout_forwards_chunks_verbatim():

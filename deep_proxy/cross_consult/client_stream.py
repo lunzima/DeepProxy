@@ -8,9 +8,8 @@
 
 辅助：TurnResult（单轮累加结果容器）、make_terminal_frame（终轮帧构造）。
 
-哨兵（均为模块级单例 dict，不透传客户端）：
+哨兵（模块级单例 dict，不透传客户端）：
   - _HEARTBEAT {"_dp_heartbeat": True}：协议层序列化成 SSE 注释帧 / Anthropic ping
-  - STREAM_ERRORED {"_dp_stream_errored": True}：通知 iter_chat_chunks 重发轮 errored
 """
 from __future__ import annotations
 
@@ -37,10 +36,6 @@ from .interceptor import (
 logger = logging.getLogger(__name__)
 
 _HEARTBEAT: dict[str, Any] = {"_dp_heartbeat": True}
-
-# 跨模块哨兵（单例）：continuation 在重发轮 errored（超时/error）退出时 yield，供
-# iter_chat_chunks 按 identity 识别并设 saw_error_frame（不提交升格记账）。不透传给客户端。
-STREAM_ERRORED: dict[str, Any] = {"_dp_stream_errored": True}
 
 T = TypeVar("T")
 
@@ -83,10 +78,9 @@ class TurnResult:
     had_cc_call: bool = False
     finish_reason: str | None = None
     errored: bool = False
-    # 超时专属元数据（区别于上游 error frame）：errored=True 且 timed_out=True 时，调用方据
-    # phase/seconds 决定收尾——plain 路径（stream_with_retry）据此重试或发硬错误帧；
-    # cc 路径（stream_one_turn）构造已废弃的优雅通知（make_timeout_notice_frames）。
-    # timed_out=False 的 errored 表示真实上游 error frame。
+    # 超时专属元数据（区别于上游 error frame）：errored=True 且 timed_out=True 时，
+    # stream_turn_with_retry 据 phase/seconds 决定收尾（pre-content 重试 / 硬错误帧）。
+    # timed_out=False 的 errored 表示真实上游 error frame（已逐帧透传）。
     timed_out: bool = False
     timeout_phase: str | None = None    # "first_chunk" | "mid_stream"
     timeout_seconds: float | None = None
@@ -143,7 +137,7 @@ def make_terminal_frame(finish_reason: str | None, tool_calls: list[dict]) -> di
     """构造终轮 choice 帧：带 finish_reason（及可选非 cc tool_calls）。
 
     供多处终轮帧复用（iter_chat_chunks 的 no-cc-call 分支、stream_cross_consult_continuation
-    的终轮判定与硬轮次上限退出、make_timeout_notice_frames 的收尾帧），保证形状一致。
+    的终轮判定与硬轮次上限退出），保证形状一致。
     """
     delta: dict[str, Any] = {}
     if tool_calls:
@@ -153,44 +147,6 @@ def make_terminal_frame(finish_reason: str | None, tool_calls: list[dict]) -> di
         "delta": delta,
         "finish_reason": finish_reason or "stop",
     }]}
-
-
-def _timeout_notice_text(phase: str | None, seconds: float | None) -> str:
-    """超时通知正文。区分首 chunk 未达（疑似上游繁忙 / prefill 慢）与 mid-stream 停顿
-    （输出中途断流）。
-
-    ⚠️ 已废弃用于 plain 路径：文末"请直接重试"对 agent 结构上不可能触发重试（clean stop =
-    成功轮），plain 路径已改走 stream_with_retry + 硬错误帧。本函数**仅 cross_consult 路径
-    仍在用**（其重试改造为单独 follow-up）。见 make_timeout_notice_frames。"""
-    secs = f"{seconds:g}s" if seconds and seconds > 0 else "超时窗口"
-    if phase == "mid_stream":
-        return (
-            f"[DeepProxy] 上游在输出过程中连续 {secs} 没有新内容，本轮已中断。"
-            "这不是错误，也不是最终答案——上游可能仍在繁忙或网络缓慢。"
-            "请直接重试本次请求以继续。"
-        )
-    return (
-        f"[DeepProxy] 上游在 {secs} 内未返回任何响应（疑似上游繁忙或网络缓慢），本轮已中断。"
-        "这不是错误，也不是最终答案。请直接重试本次请求以继续。"
-    )
-
-
-def make_timeout_notice_frames(result: TurnResult) -> list[dict]:
-    """据 TurnResult 的超时元数据构造通知帧：一条 assistant content delta + 一个
-    finish_reason=stop 终轮帧。
-
-    ⚠️ **已废弃，仅 cross_consult 路径仍在用**（router._iter_cc_chunks /
-    stream_cross_consult_continuation）。原设想"content + clean finish 让 agent 读到通知后
-    自行重试"被证伪：clean stop 在协议上即一次**成功**轮，agent 无从据自然语言"请重试"触发
-    重试，只会渲染文本并停止。plain 路径已据此改走 stream_with_retry（pre-content 重发 +
-    post-content/预算耗尽硬错误帧 make_hard_error_frame）。cc 路径同等改造为单独 follow-up。
-    见 docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md。
-    """
-    notice = _timeout_notice_text(result.timeout_phase, result.timeout_seconds)
-    return [
-        {"choices": [{"index": 0, "delta": {"content": notice}, "finish_reason": None}]},
-        make_terminal_frame("stop", []),
-    ]
 
 
 @dataclass
@@ -294,20 +250,6 @@ async def consume_with_heartbeat(
                 await aclose()
             except BaseException:
                 pass
-
-
-def _make_reasoning_aware_idle(
-    base_idle: float,
-    first_chunk_timeout: float,
-) -> tuple[list[float], float]:
-    """构造推理自适应 idle 超时容器。
-
-    返回 (idle_ref, reasoning_idle)：
-      - idle_ref: 可变列表，传入 consume_with_heartbeat（其每轮动态解析）
-      - reasoning_idle: 检测到 reasoning_content 时写入 idle_ref[0] 的升级值
-        （公式见 reasoning_idle.compute_reasoning_idle，与 streaming.py 共享）
-    """
-    return [base_idle], compute_reasoning_idle(base_idle, first_chunk_timeout)
 
 
 async def stream_one_turn(
@@ -440,9 +382,8 @@ async def stream_with_idle_timeout(
 def make_hard_error_frame(reason: str) -> dict:
     """构造**客户端可见**的硬错误帧：`{"error": {...}}`（无 choices → is_error_frame True）。
 
-    与被吞掉的 STREAM_ERRORED 哨兵不同——本帧经协议层透传给客户端（data: {...} + [DONE]），
-    使 SDK 抛错，而非误判成一次成功轮。替代旧的"content 通知 + clean stop"（后者对 agent
-    结构上不可能触发重试）。
+    本帧经协议层透传给客户端（data: {...} + [DONE]），使 SDK 抛错，而非误判成一次成功轮。
+    替代旧的"content 通知 + clean stop"（后者对 agent 结构上不可能触发重试）。
     """
     return {"error": {"message": reason, "type": "timeout_error", "param": None, "code": 504}}
 
@@ -561,8 +502,8 @@ async def stream_cross_consult_continuation(
         消息一并写入对话历史——否则模型在 tool_call 前说的前导文本会从重发上下文
         丢失，与非流式 execute_cross_consult_loop（直接 append 完整 message）行为分叉。
 
-    终轮帧契约：除 error 退出（yield STREAM_ERRORED）外，本生成器在返回前总会 yield
-    一个带 finish_reason 的终轮 choice 帧（终轮判定 / 无 cc 调用 / 硬轮次上限三处统一）。
+    终轮帧契约：除硬错误 / 真实 error 退出（已发 error frame）外，本生成器在返回前总会
+    yield 一个带 finish_reason 的终轮 choice 帧（终轮判定 / 无 cc 调用 / 硬轮次上限三处统一）。
 
     与 interceptor.execute_cross_consult_loop 是**并行实现，按设计分叉**：本函数走客户端
     真流式（yield 帧），后者走非流式（返回 dict）。共享 resolve_consult_tool_call 与同一

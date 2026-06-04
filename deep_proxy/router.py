@@ -62,10 +62,8 @@ from .cross_consult.interceptor import (
 )
 from .cross_consult.streaming import aggregate_stream_to_response, stream_aggregated_call
 from .cross_consult.client_stream import (
-    STREAM_ERRORED,
     TurnResult,
     make_terminal_frame,
-    make_timeout_notice_frames,
     stream_cross_consult_continuation,
     stream_one_turn,
     stream_turn_with_retry,
@@ -568,8 +566,9 @@ class DeepProxyRouter:
         SSE 序列化（`data:` 前缀、`[DONE]` 前哨）由调用方在协议层完成。
 
         控制流：按 cc_active 选 cc / 普通子生成器，顶层只做统一的脏退出处理
-        （`STREAM_ERRORED` 哨兵吞掉并标脏、error frame 透传并标脏）+ finally 写
-        ReasoningCache 并在干净完成时提交升格记账。两条分支的细节封装进各自子生成器。
+        （error frame 透传并标脏 saw_error_frame）+ finally 写 ReasoningCache 并在干净
+        完成时提交升格记账。两条分支的细节封装进各自子生成器。超时收尾由
+        stream_turn_with_retry 直接发硬错误帧（is_error_frame），无需哨兵。
         """
         cc_active = (
             self.config.cross_consult.enabled
@@ -588,11 +587,7 @@ class DeepProxyRouter:
         )
         try:
             async for frame in sub:
-                # STREAM_ERRORED 哨兵（单例，按 identity 识别）：子生成器脏退出
-                # （超时 / 重发 error）标记，吞掉不透传客户端；error frame：透传 + 标脏。
-                if frame is STREAM_ERRORED:
-                    saw_error_frame = True
-                    continue
+                # error frame（含超时硬错误帧）：透传给客户端 + 标脏（不提交升格记账）。
                 if is_error_frame(frame):
                     saw_error_frame = True
                 yield frame
@@ -610,11 +605,12 @@ class DeepProxyRouter:
         accumulator: StreamingReasoningAccumulator,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """cross_consult 真流式子生成器：初始轮逐 token 透传 + 抑制 cc 工具帧 + 心跳，
-        据初始轮结果进入 continuation / 终轮 / 超时通知。
+        经 stream_turn_with_retry（pre-content 重试 + 硬错误）收尾，据胜出轮结果进入
+        continuation / 终轮。
 
-        脏退出（初始轮超时 / 重发轮 error）以 `STREAM_ERRORED` 哨兵 yield，供
-        iter_chat_chunks 统一标脏（不提交升格记账）。真实 error frame 由上游逐帧透传，
-        iter_chat_chunks 经 is_error_frame 标脏。
+        超时收尾由 stream_turn_with_retry 直接发硬错误帧（is_error_frame），真实上游
+        error frame 逐帧透传——两者皆经 iter_chat_chunks 的 is_error_frame 标脏（不提交
+        升格记账）。
         """
         cc = self.config.cross_consult
         sc = self.config.streaming

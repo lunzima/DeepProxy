@@ -5,7 +5,8 @@ plain 路径根因修复（见 docs/superpowers/specs/2026-06-04-mid-stream-time
 已废弃。现：pre-content stall → 代理重发（受 max_stream_total_seconds 总预算约束）；
 post-content stall / 预算耗尽 → 硬错误帧（{"error": {...}} 透传给客户端使 SDK 抛错）。
 
-cc 路径（cross_consult 激活）仍走旧的优雅通知（本设计 scope 外，单独跟进）。
+cc 路径（cross_consult 激活）已同等迁移：初始轮 + 重发轮经 stream_turn_with_retry
+做 pre-content 重试 + 硬错误（见 2026-06-04-cross-consult-retry-design.md）。
 """
 from __future__ import annotations
 
@@ -134,13 +135,14 @@ def _cc_router() -> tuple[DeepProxyRouter, Provider]:
     return DeepProxyRouter(cfg), cfg.providers["deepseek"]
 
 
-async def test_cc_initial_turn_timeout_emits_graceful_notice():
-    """cross_consult 激活：初始轮首 chunk 超时 → 优雅通知 + clean finish，不报错、
-    不提交升格记账。"""
+async def test_cc_initial_turn_timeout_hard_errors():
+    """cross_consult 激活：初始轮首 chunk 持续超时、总预算耗尽 → 硬错误帧（透传给
+    客户端），不再注入已废弃的优雅通知 / clean stop，不提交升格记账。"""
     router, provider = _cc_router()
+    router.config.streaming.max_stream_total_seconds = 1   # 1s 总预算 → 快速耗尽
 
     async def hang_iter(config, body, *, _accumulator=None, provider=None):
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(5.0)
         yield {"choices": [{"index": 0, "delta": {"content": "never"},
                             "finish_reason": None}]}
 
@@ -152,7 +154,7 @@ async def test_cc_initial_turn_timeout_emits_graceful_notice():
                       side_effect=lambda *a, **k: committed.__setitem__("hit", True)):
         out = [f async for f in router.iter_chat_chunks(body, provider=provider)]
 
-    assert _notice_present(out)
-    assert _clean_finish_present(out)
-    assert _no_error_frame(out)
+    assert not _notice_present(out)
+    assert not _clean_finish_present(out)
+    assert not _no_error_frame(out)        # 硬错误帧存在
     assert committed["hit"] is False
