@@ -666,8 +666,8 @@ class DeepProxyRouter:
         （含 tool_calls / finish_reason），并施加 mid-stream 超时**重试 + 硬错误**策略——
 
           - pre-content stall（首 chunk 前 / 推理中）→ 重发原请求（对客户端无缝，仅见心跳），
-            受 max_stream_total_seconds 总预算约束。
-          - post-content stall / 总预算耗尽 → 发**硬错误帧**（`{"error": {...}}`，经
+            最多 max_retries 次。健康流（持续产出）永不被打断。
+          - post-content stall / 重试耗尽 → 发**硬错误帧**（`{"error": {...}}`，经
             is_error_frame 透传给客户端使 SDK 抛错；iter_chat_chunks 据此标脏不提交升格记账）。
 
         旧"注入'请重试' content + clean stop"对 agent 结构上不可能触发重试（clean stop =

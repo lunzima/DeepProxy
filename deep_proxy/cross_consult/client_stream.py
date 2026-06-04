@@ -25,7 +25,6 @@ from ..litellm_client import iter_litellm_chunks
 from ..providers import Provider
 from .config import CrossConsultConfig
 from .reasoning_idle import chunk_has_reasoning as _has_reasoning_content
-from .reasoning_idle import compute_reasoning_idle
 from .interceptor import (
     extract_cross_consult_tool_calls,
     resolve_consult_tool_call,

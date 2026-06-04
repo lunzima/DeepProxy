@@ -6,9 +6,9 @@
 - target_provider.pro_model
 - 不带 tools / tool_choice（防递归）
 - _deepproxy_cross_consult_internal=True sentinel（防递归注入）
-- 全程走流式：上游用 iter_litellm_chunks 拉流，按 chunk 心跳累加。
-  call_timeout_seconds 语义改为"chunk-间最大空闲"——只要持续有 token / reasoning 流
-  到达就继续等下去；连续空闲超过该秒数才视为 hang。深度思考不再被墙钟误杀。
+- 全程走流式：上游经 aggregate_stream_to_response（统一 idle 引擎）按 chunk 累加。
+  超时取自 StreamingConfig（idle = "chunk-间最大空闲"）——只要持续有 token / reasoning
+  到达就继续；连续空闲超过该秒数才视为 hang。深度思考不再被墙钟误杀。
 - max_tokens 来自 cc_config
 - 失败/超时：返回带前缀的错误字符串，不抛异常（让上层把错误以 tool_result 形式返还 agent）
 """

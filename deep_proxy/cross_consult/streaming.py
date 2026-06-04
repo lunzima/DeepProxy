@@ -1,16 +1,16 @@
-"""流式聚合 helper：消费 iter_litellm_chunks 并把 deltas 拼回非流式响应 dict。
+"""流式聚合 helper：驱动统一超时引擎 consume_with_heartbeat，把 deltas 拼回非流式响应 dict。
 
 为什么需要这层：cross_consult 的内部往返（executor 调外部 pro 模型 + 重发原 provider）
-默认会触发深度思考。墙钟超时（asyncio.wait_for(call_litellm, timeout)）在模型仍在
-流式产出 reasoning token 时会被误杀。改走 streaming + 按 chunk 心跳的 idle timeout：
-只要 N 秒内仍有 chunk 到达就继续，连续 idle_timeout 秒没有 chunk 才视为 hang。
+默认会触发深度思考。纯墙钟超时会在模型仍流式产出 reasoning token 时误杀，故复用与客户端
+真流式同一个按-chunk idle 引擎（只要 N 秒内仍有 chunk 到达就继续）；本模块只是**忽略心跳、
+把 chunk 聚合成 dict** 的薄消费者。
 
-输出形状刻意贴近非流式 chat.completion 响应，让现有的 process_response / extract_*
-工具链与 cross_consult interceptor 无需感知差异。
+输出形状刻意贴近非流式 chat.completion 响应，让现有 process_response / extract_* 工具链
+与 cross_consult interceptor 无需感知差异。
 
-注：本模块仅供**内部聚合**——executor.py 的 consult 调用，以及非流式
-chat_completions 路径经 stream_aggregated_call 的重发。面向客户端的**真流式**
-（逐 token 透传 + 心跳）见 client_stream.py。
+注：本模块仅供**内部聚合**——executor.py 的 consult 调用，以及非流式 chat_completions
+路径经 stream_aggregated_call 的重发。面向客户端的**真流式**（逐 token 透传 + 心跳）见
+client_stream.py（共享同一 consume_with_heartbeat 引擎）。
 """
 from __future__ import annotations
 
