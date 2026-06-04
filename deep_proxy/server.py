@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+import logging.handlers  # 绑定 logging 与 logging.handlers（main 配置 RotatingFileHandler 用）
 import os
 import sys
 from pathlib import Path
@@ -52,8 +52,6 @@ async def _serve_both(host: str, coding_port: int, writing_port: int, log_level:
 
 def main():
     """启动 DeepProxy 服务器（同时绑定 coding_port 与 writing_port）。"""
-    import logging.handlers
-
     config = _load_config()
     log_level = config.log_level.lower()
 

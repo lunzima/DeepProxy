@@ -14,7 +14,8 @@ from typing import Any, Dict, List, Literal, Optional
 import httpx
 
 from ..compatibility.deepseek_fixes import has_tools
-from ..utils import append_to_system_message, find_system_message, prepend_to_system_message, sample_in_range
+from ..utils import append_to_system_message, find_system_message, prepend_to_system_message
+from ..utils import sample_in_range  # noqa: F401  公开 re-export（router 从 .optimization 导入）
 
 from .skills_general import (
     _SKILL_AVOID_AI_TICS,
@@ -40,7 +41,7 @@ from .skills_transform import (
     _apply_cot_reflection,
     _apply_readurls,
     _apply_re2,
-    extract_cot_output,
+    extract_cot_output,  # noqa: F401  公开 re-export（router 从 .optimization 导入）
 )
 from .tool_call_chinese_cot import (
     TOOL_CALL_CN_COT_SKILL,

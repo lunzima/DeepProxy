@@ -24,7 +24,6 @@ from ..utils import (
     count_user_messages,
     flatten_messages,
     get_text_from_content,
-    hash_str,
     last_user_hash,
     last_user_text,
 )
