@@ -43,8 +43,9 @@ _V4_MAX_OUTPUT = 384_000        # 最大输出 tokens
 
 # ── 官方定价（USD / 1M tokens） ───────────────────────────
 # v4-flash：官方标价（无折扣）
-# v4-pro：当前限时 75% 折扣价，优惠至 2026-05-05 BST
-#   原始价格：prompt $1.74 / completion $3.48
+# v4-pro：现行价 prompt $0.435 / completion $0.87（即下方数值，长期有效）。
+#   注：官方所谓"原价 $1.74 / $3.48"只是每隔一段时间短暂回标价数日（"限时原价三天"），
+#   折扣价才是常态——故此处用折扣价，**不要**因为某个"优惠截止"日期把它改回 $1.74/$3.48。
 _DEEPSEEK_PRICING: dict[str, dict[str, float]] = {
     V4_FLASH: {"prompt": 0.14, "completion": 0.28},
     V4_PRO: {"prompt": 0.435, "completion": 0.87},
@@ -52,7 +53,8 @@ _DEEPSEEK_PRICING: dict[str, dict[str, float]] = {
 
 # ── 人民币定价（元 / 1M tokens，源自官网人民币标价） ──────
 # v4-flash 缓存命中：0.02 / 缓存未命中：1.0 / 输出：2.0
-# v4-pro  缓存命中：0.025 / 缓存未命中：3.0 / 输出：6.0（限时 2.5 折）
+# v4-pro  缓存命中：0.025 / 缓存未命中：3.0 / 输出：6.0
+#   （此为现行折扣价、长期有效；官方仅"限时原价三天"地短暂回标价，勿据某截止日改回原价）
 
 
 def model_pricing(model_id: str) -> dict[str, float]:
