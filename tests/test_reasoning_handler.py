@@ -30,6 +30,22 @@ def test_accumulator_snapshot_restore_isolates_failed_attempt():
     assert snap[0]["content"] == "turn1"
 
 
+def test_accumulator_snapshot_restore_isolates_tool_calls():
+    """tool_calls 嵌套结构也须隔离：merge_tool_call_deltas 原地改 inner dict，浅拷贝
+    会让废弃尝试的 arguments 污染 snapshot，restore 后泄漏。"""
+    acc = StreamingReasoningAccumulator(request_messages=[])
+    acc.consume({"choices": [{"index": 0, "delta": {"tool_calls": [
+        {"index": 0, "id": "t1", "type": "function",
+         "function": {"name": "f", "arguments": '{"a":'}}]}}]})
+    snap = acc.snapshot()
+    # 失败尝试继续累加 tool_call arguments（merge 原地拼接 inner dict）
+    acc.consume({"choices": [{"index": 0, "delta": {"tool_calls": [
+        {"index": 0, "function": {"arguments": '1}'}}]}}]})
+    acc.restore(snap)
+    args = acc._slots[0]["tool_calls"][0]["function"]["arguments"]
+    assert args == '{"a":'        # 不含废弃尝试的 '1}'
+
+
 class TestProcessReasoningResponse:
     def test_keeps_reasoning_content_and_adds_alias(self):
         resp = {
