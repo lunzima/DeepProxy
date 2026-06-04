@@ -39,6 +39,35 @@ def test_mimo_models_constants():
     assert MIMO_PRO in MIMO_MODELS
 
 
+def test_mimo_models_list_defaults_to_mimo_output_limit():
+    """config 未显式设 max_output_tokens 时（Provider 默认 384K，DeepSeek 取向），
+    MiMo /v1/models 仍须报真实 128K，而非把 DeepSeek 默认泄漏给客户端。"""
+    from deep_proxy.providers import Provider
+    from deep_proxy.models_list import build_models_list
+    prov = Provider(
+        name="mimo", api_base="https://x", api_key="k", litellm_prefix="openai/",
+        flash_model="mimo-v2.5", pro_model="mimo-v2.5-pro",
+    )
+    assert prov.max_output_tokens == 384000   # 未覆盖 → Provider 通用默认
+    models = build_models_list(raw=[], provider=prov)
+    assert models
+    for m in models:
+        assert m["max_tokens"] == 128000, f"{m['id']} 报错误输出上限 {m['max_tokens']}"
+
+
+def test_mimo_models_list_respects_explicit_output_override():
+    """config 显式覆盖 max_output_tokens（≠ 通用默认）时尊重之。"""
+    from deep_proxy.providers import Provider
+    from deep_proxy.models_list import build_models_list
+    prov = Provider(
+        name="mimo", api_base="https://x", api_key="k", litellm_prefix="openai/",
+        flash_model="mimo-v2.5", pro_model="mimo-v2.5-pro", max_output_tokens=64000,
+    )
+    models = build_models_list(raw=[], provider=prov)
+    for m in models:
+        assert m["max_tokens"] == 64000
+
+
 def test_mimo_models_have_metadata():
     from deep_proxy.mimo_models import MIMO_MODELS
     flash = MIMO_MODELS["mimo-v2.5"]

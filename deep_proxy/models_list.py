@@ -29,7 +29,11 @@ from .deepseek_models import DEEPSEEK_MODELS, V4_MODELS, V4_MODELS_1M
 from .deepseek_pricing import _V4_CONTEXT_WINDOW, _V4_MAX_OUTPUT, model_pricing
 from .litellm_client import _to_litellm_api_base
 from .mimo_models import MIMO_MODELS
-from .mimo_pricing import model_pricing as mimo_model_pricing
+from .mimo_pricing import (
+    model_pricing as mimo_model_pricing,
+    _MIMO_CONTEXT_WINDOW,
+    _MIMO_MAX_OUTPUT,
+)
 from .providers import Provider
 
 logger = logging.getLogger(__name__)
@@ -111,7 +115,15 @@ def normalize_model_entry(entry: Dict[str, Any], *, provider: Provider | None = 
 
     # 上下文 / 输出上限：provider 给定时读取其配置字段（允许 config.yaml 覆盖），
     # 否则退回 V4 常量。
-    if provider is not None:
+    if provider is not None and provider.name == "mimo":
+        # MiMo 真实上限（128K 输出）。Provider 的通用默认（_V4_MAX_OUTPUT=384K）是 DeepSeek
+        # 取向，对 MiMo 错误——config 未显式覆盖时用 MiMo 常量，避免向客户端广播 384K；
+        # 显式覆盖（≠ 通用默认）时尊重 config。
+        _CTX = (provider.context_window if provider.context_window != _V4_CONTEXT_WINDOW
+                else _MIMO_CONTEXT_WINDOW)
+        _MXO = (provider.max_output_tokens if provider.max_output_tokens != _V4_MAX_OUTPUT
+                else _MIMO_MAX_OUTPUT)
+    elif provider is not None:
         _CTX = provider.context_window
         _MXO = provider.max_output_tokens
     else:
