@@ -16,6 +16,20 @@ from deep_proxy.compatibility.reasoning_handler import (
 from deep_proxy.optimization.flash_upgrade import conversation_fingerprint
 
 
+def test_accumulator_snapshot_restore_isolates_failed_attempt():
+    acc = StreamingReasoningAccumulator(request_messages=[{"role": "user", "content": "hi"}])
+    acc.consume({"choices": [{"index": 0, "delta": {"content": "turn1"}}]})
+    snap = acc.snapshot()
+    # 失败尝试追加内容后回滚
+    acc.consume({"choices": [{"index": 0, "delta": {"reasoning_content": "junk"}}]})
+    acc.restore(snap)
+    assert acc._slots[0]["content"] == "turn1"
+    assert acc._slots[0]["reasoning_content"] == ""
+    # snapshot 深拷贝：restore 后继续 consume 不污染已持有的 snap
+    acc.consume({"choices": [{"index": 0, "delta": {"content": "2"}}]})
+    assert snap[0]["content"] == "turn1"
+
+
 class TestProcessReasoningResponse:
     def test_keeps_reasoning_content_and_adds_alias(self):
         resp = {

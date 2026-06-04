@@ -288,6 +288,15 @@ class StreamingReasoningAccumulator:
         """
         self._slots = {}
 
+    def snapshot(self) -> Dict[int, Dict[str, Any]]:
+        """深拷贝当前 per-choice 槽，供流式重试在一轮开始时存档。"""
+        return {i: {**s} for i, s in self._slots.items()}
+
+    def restore(self, snap: Dict[int, Dict[str, Any]]) -> None:
+        """回滚到 snapshot：丢弃 snapshot 之后（失败尝试）的累加，保留更早的轮次。
+        深拷贝 snap 的槽，避免后续 consume 反向污染调用方持有的 snapshot。"""
+        self._slots = {i: {**s} for i, s in snap.items()}
+
     def consume(self, chunk_dict: Dict[str, Any]) -> None:
         for choice in chunk_dict.get("choices", []) or []:
             idx = choice.get("index", 0)
