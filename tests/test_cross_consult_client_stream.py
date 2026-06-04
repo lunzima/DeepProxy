@@ -79,7 +79,7 @@ async def test_stream_one_turn_forwards_content_and_reasoning_live():
 
 
 from deep_proxy.cross_consult.client_stream import (  # noqa: E402
-    consume_with_heartbeat, _Timeout, _HEARTBEAT,
+    consume_with_heartbeat, _Timeout,
 )
 
 
@@ -110,7 +110,7 @@ async def test_stream_one_turn_reasoning_idle_tolerates_gap():
         yield _finish_chunk("stop")
 
     res = TurnResult()
-    out = [f async for f in stream_one_turn(
+    [f async for f in stream_one_turn(  # 驱动流，断言走 res
         reasoning_then_pause(), res, tool_name="cross_consult",
         idle_timeout=0.15, reasoning_idle=2.0,
         first_chunk_timeout=5.0, heartbeat_seconds=0.1,

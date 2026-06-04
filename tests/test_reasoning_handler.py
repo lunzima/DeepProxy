@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from deep_proxy.compatibility.reasoning_handler import (
     ReasoningCache,
     StreamingReasoningAccumulator,

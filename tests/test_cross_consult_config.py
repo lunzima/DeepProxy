@@ -1,9 +1,6 @@
 """CrossConsultConfig pydantic 模型测试。"""
 from __future__ import annotations
 
-import pytest
-from pydantic import ValidationError
-
 from deep_proxy.cross_consult.config import CrossConsultConfig
 
 

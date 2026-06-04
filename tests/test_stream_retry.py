@@ -128,7 +128,7 @@ def _has_finish(out, reason):
 
 async def test_stream_turn_with_retry_on_result_captures_winning_turn():
     """泛化骨架：committed 前的超时触发重试；成功收尾时把 winning TurnResult 交给 on_result。"""
-    from deep_proxy.cross_consult.client_stream import stream_turn_with_retry, TurnResult
+    from deep_proxy.cross_consult.client_stream import stream_turn_with_retry
     calls = {"n": 0}
     captured = {}
 
@@ -159,7 +159,7 @@ async def test_stream_turn_with_retry_on_result_captures_winning_turn():
 
 async def test_stream_turn_with_retry_count_based_exhaustion():
     """pre-content 连续 stall，重发达 max_retries 后发硬错误帧（无 deadline/now）。"""
-    from deep_proxy.cross_consult.client_stream import stream_turn_with_retry, TurnResult
+    from deep_proxy.cross_consult.client_stream import stream_turn_with_retry
     calls = {"n": 0}
 
     def make_attempt(turn):
@@ -177,7 +177,7 @@ async def test_stream_turn_with_retry_count_based_exhaustion():
 
 async def test_stream_turn_with_retry_healthy_stream_never_walled():
     """健康流（产出 content 后干净 finish）一次成功，不重试、无硬错误。"""
-    from deep_proxy.cross_consult.client_stream import stream_turn_with_retry, TurnResult
+    from deep_proxy.cross_consult.client_stream import stream_turn_with_retry
     calls = {"n": 0}
 
     def make_attempt(turn):
@@ -591,5 +591,6 @@ async def test_cc_resend_retry_preserves_prior_turn_content_in_cache(router_dual
     monkeypatch.setattr("deep_proxy.cross_consult.client_stream.resolve_consult_tool_call", fake_consult)
     monkeypatch.setattr(StreamingReasoningAccumulator, "flush_to_cache", spy_flush)
     prov = router.config.providers["deepseek"]
-    out = [f async for f in router.iter_chat_chunks(_cc_body(), provider=prov)]
+    # 驱动整条流以触发 flush_to_cache（结果断言走 captured，不需 out）
+    [f async for f in router.iter_chat_chunks(_cc_body(), provider=prov)]
     assert captured["content"] == "前导终答"   # 初始前导保留 + 终答；失败重发的 'x' 不在

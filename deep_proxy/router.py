@@ -43,7 +43,7 @@ from .config import ProxyConfig, CreativeSamplingConfig
 from .providers import Provider
 from .utils import (
     SSE_DONE, append_to_system_message, is_error_frame, is_heartbeat,
-    merge_tool_call_deltas, prepend_to_system_message,
+    prepend_to_system_message,
 )
 from .litellm_client import call_litellm, iter_litellm_chunks, _to_litellm_api_base
 from .models_list import build_models_list, fetch_upstream_models

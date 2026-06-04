@@ -9,7 +9,7 @@ from typing import List, Optional
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from .providers import Provider, PortBinding, PoolEntry
+from .providers import Provider, PortBinding
 from .cross_consult import CrossConsultConfig
 
 
