@@ -284,6 +284,11 @@ async def stream_one_turn(
     try:
         async for item in gen:
             if isinstance(item, _Timeout):
+                # 上游已发 finish_reason 却不收尾（finish-then-hang）：本轮逻辑上已正常
+                # 结束，直接退出、**不**标超时（否则 stream_turn_with_retry 会把成功轮误报
+                # 成硬错误/504）。对齐 stream_with_idle_timeout 的同名守卫。
+                if result.finish_reason is not None:
+                    return
                 result.errored = True
                 result.timed_out = True
                 result.timeout_phase = item.phase

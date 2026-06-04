@@ -119,6 +119,26 @@ async def test_stream_one_turn_reasoning_idle_tolerates_gap():
     assert res.content == "答案"
 
 
+async def test_stream_one_turn_no_timeout_after_upstream_finish():
+    """上游发完 finish_reason 后又挂连接（finish-then-hang）：本轮逻辑已正常结束，
+    不得标 timed_out（否则 stream_turn_with_retry 会把成功轮误报成硬错误/504）。
+    对齐 stream_with_idle_timeout 的同名守卫。"""
+    async def finish_then_hang():
+        yield _delta_chunk(content="答案")
+        yield _finish_chunk("stop")
+        await asyncio.Event().wait()  # 发完 finish 后永久挂起（不抛 StopAsyncIteration）
+
+    res = TurnResult()
+    [f async for f in stream_one_turn(
+        finish_then_hang(), res, tool_name="cross_consult",
+        idle_timeout=0.2, first_chunk_timeout=5.0, heartbeat_seconds=0.1,
+    )]
+    assert res.timed_out is False
+    assert res.errored is False
+    assert res.finish_reason == "stop"
+    assert res.content == "答案"
+
+
 async def test_stream_one_turn_suppresses_cc_tool_call_frames():
     chunks = [
         _delta_chunk(content="让我咨询"),
