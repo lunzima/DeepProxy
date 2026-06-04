@@ -421,6 +421,45 @@ async def test_loop_calls_process_response_on_each_iteration(cfg_cross):
     )
 
 
+async def test_loop_drops_non_cc_tool_calls_from_resend_history(cfg_cross):
+    """同轮混用真实工具 + cross_consult：resend 历史的 assistant 消息只保留 cc 调用，
+    避免真实工具 tool_call 无 tool_result 悬空 → 上游 400（审核 #11）。"""
+    from deep_proxy.cross_consult.interceptor import execute_cross_consult_loop
+
+    initial = {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "real1", "type": "function",
+         "function": {"name": "read_file", "arguments": "{}"}},
+        {"id": "cc1", "type": "function",
+         "function": {"name": "cross_consult", "arguments": json.dumps({"question": "q"})}},
+    ]}, "finish_reason": "tool_calls"}]}
+
+    async def fake_call(config, body, *, provider=None):
+        return _make_text_response("done")
+
+    async def fake_consult(*a, **k):
+        return "external"
+
+    body = {"model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "go"}], "stream": False}
+    with patch("deep_proxy.cross_consult.interceptor.execute_consult",
+               side_effect=fake_consult):
+        await execute_cross_consult_loop(
+            body=body, initial_response=initial,
+            source_provider=cfg_cross.providers["deepseek"], config=cfg_cross,
+            cc_config=cfg_cross.cross_consult, call_litellm_fn=fake_call,
+        )
+
+    asst = [m for m in body["messages"]
+            if m.get("role") == "assistant" and m.get("tool_calls")]
+    assert asst
+    tc_ids = {tc["id"] for m in asst for tc in m["tool_calls"]}
+    tool_result_ids = {m["tool_call_id"] for m in body["messages"]
+                       if m.get("role") == "tool"}
+    assert tc_ids <= tool_result_ids, f"悬空 tool_call: {tc_ids - tool_result_ids}"
+    assert "real1" not in tc_ids   # 真实工具调用不进 resend 历史
+    assert "cc1" in tc_ids
+
+
 async def test_streaming_final_chunk_includes_reasoning_content_when_present(cfg_cross):
     """I4 regression: 真流式 cross_consult 路径应将 reasoning_content 帧逐帧透传到客户端。"""
     from deep_proxy.router import DeepProxyRouter

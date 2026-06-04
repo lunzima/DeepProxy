@@ -502,11 +502,12 @@ async def stream_cross_consult_continuation(
         if not cc_calls:
             return
 
-        # 追加 assistant 消息（含本轮 content + 全部 tool_calls）到历史
+        # 追加 assistant 消息到历史——**只保留 cc tool_calls**（同轮可能并存真实工具调用，
+        # 代理无法为其补 tool_result，全量保留会让 resend 出现悬空 tool_call_id → 上游 400）。
         body["messages"].append({
             "role": "assistant",
             "content": turn_content or None,
-            "tool_calls": turn_tool_calls,
+            "tool_calls": cc_calls,
         })
 
         for tc in cc_calls:

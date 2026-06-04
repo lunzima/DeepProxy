@@ -231,8 +231,11 @@ async def execute_cross_consult_loop(
         if not tool_calls:
             return response
 
-        # assistant 消息（含 tool_calls）追加到对话历史
-        assistant_msg = response["choices"][0]["message"]
+        # assistant 消息追加到对话历史——**只保留 cc tool_calls**：同轮可能并存真实
+        # （客户端执行的）工具调用，代理拦截后无法为其补 tool_result，全量保留会让 resend
+        # 出现悬空 tool_call_id → 多数上游 400。
+        assistant_msg = dict(response["choices"][0]["message"])
+        assistant_msg["tool_calls"] = tool_calls
         body["messages"].append(assistant_msg)
 
         for tc in tool_calls:
