@@ -359,6 +359,10 @@ def openai_response_to_claude(
 
     content_blocks = _openai_message_to_anthropic_content(msg)
     stop_reason = _map_stop_reason(choice.get("finish_reason"))
+    # 发了 tool_use 块时 stop_reason 必为 tool_use——上游偶尔 tool_calls 配 finish_reason=stop，
+    # Anthropic 客户端按 stop_reason 决定是否执行工具。
+    if any(b.get("type") == "tool_use" for b in content_blocks):
+        stop_reason = "tool_use"
 
     return {
         "id": openai_response.get("id") or f"msg_{uuid.uuid4().hex[:24]}",
@@ -691,7 +695,10 @@ class _AnthropicStreamBuilder:
             _sse_event("message_delta", {
                 "type": "message_delta",
                 "delta": {
-                    "stop_reason": _map_stop_reason(self._finish_reason),
+                    # 发过 tool_use 块时 stop_reason 必为 tool_use（上游偶尔 tool_calls 配
+                    # finish_reason=stop）；否则按 finish_reason 映射。
+                    "stop_reason": ("tool_use" if self._tool_calls
+                                    else _map_stop_reason(self._finish_reason)),
                     "stop_sequence": None,
                 },
                 # input_tokens 从 OpenAI usage.prompt_tokens 转写补齐；

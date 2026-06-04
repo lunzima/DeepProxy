@@ -333,6 +333,24 @@ class TestOpenAIResponseToClaude:
             "input": {"q": "x"},
         }
 
+    def test_tool_calls_with_stop_finish_still_tool_use(self):
+        """上游返回 tool_calls 但 finish_reason=stop 时，stop_reason 仍须为 tool_use
+        （Anthropic 客户端按 stop_reason 决定是否执行工具）。"""
+        resp = {
+            "choices": [{
+                "message": {
+                    "role": "assistant", "content": "",
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                    "function": {"name": "f", "arguments": "{}"}}],
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+        out = openai_response_to_claude(resp, requested_model="x")
+        assert out["stop_reason"] == "tool_use"
+        assert any(b["type"] == "tool_use" for b in out["content"])
+
     def test_empty_content_yields_empty_text_block(self):
         resp = {"choices": [{"message": {"content": None},
                              "finish_reason": "stop"}], "usage": {}}
@@ -446,6 +464,20 @@ class TestOpenAIStreamToClaude:
         assert delta_payload["delta"]["type"] == "input_json_delta"
         assert json.loads(delta_payload["delta"]["partial_json"]) == {"q": "hi"}
 
+        msg_delta = next(_parse_event(e)[1] for e in events
+                         if _parse_event(e)[0] == "message_delta")
+        assert msg_delta["delta"]["stop_reason"] == "tool_use"
+
+    async def test_tool_call_stream_with_stop_finish_still_tool_use(self):
+        """流式：发了 tool_call 但 finish_reason=stop 时，message_delta 仍报 tool_use。"""
+        async def fake():
+            yield {"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "c1",
+                "function": {"name": "f", "arguments": "{}"},
+            }]}}]}
+            yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+
+        events = await _collect(openai_stream_to_claude(fake(), requested_model="x"))
         msg_delta = next(_parse_event(e)[1] for e in events
                          if _parse_event(e)[0] == "message_delta")
         assert msg_delta["delta"]["stop_reason"] == "tool_use"
