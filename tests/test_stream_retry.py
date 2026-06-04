@@ -418,3 +418,75 @@ async def test_retry_resets_reasoning_accumulator_per_attempt(router, monkeypatc
     assert calls["n"] == 2
     assert _content_of(out, "answer")
     assert captured["reasoning"] == "BBB"        # 不是 "AAABBB"（废弃尝试不污染缓存）
+
+
+# ----------------------------------------------------------------------------
+# Task 4: cross_consult 初始轮接入 stream_turn_with_retry
+# ----------------------------------------------------------------------------
+def _cc_body():
+    return {"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "hi"}]}
+
+
+def _notice_text(out):
+    return any(
+        "[DeepProxy]" in (d.get("choices", [{}])[0].get("delta", {}) or {}).get("content", "")
+        for d in out if "choices" in d
+    )
+
+
+async def test_cc_initial_turn_retries_then_succeeds(router_dual, monkeypatch):
+    """cc 初始轮 pre-content 挂死 → 代理重发 → 成功；无 notice / error frame。"""
+    router = router_dual
+    router.config.cross_consult.enabled = True
+    router.config.cross_consult.pairs = {"deepseek": "mimo", "mimo": "deepseek"}
+    router.config.cross_consult.first_chunk_timeout_seconds = 1
+    router.config.cross_consult.call_timeout_seconds = 1
+    router.config.cross_consult.stream_heartbeat_seconds = 1
+    calls = {"n": 0}
+
+    def fake_iter(config, body, *, _accumulator=None, provider=None):
+        n = calls["n"]; calls["n"] += 1
+        if n == 0:
+            async def stall():
+                await asyncio.sleep(10.0)
+                yield _delta_chunk(content="x")
+            return stall()
+        async def ok():
+            yield _delta_chunk(content="答案")
+            yield _finish_chunk("stop")
+        return ok()
+
+    monkeypatch.setattr("deep_proxy.router.iter_litellm_chunks", fake_iter)
+    prov = router.config.providers["deepseek"]
+    out = [f async for f in router.iter_chat_chunks(_cc_body(), provider=prov)]
+    assert calls["n"] == 2
+    assert _content_of(out, "答案")
+    assert not any(is_error_frame(f) for f in out)
+    assert not _notice_text(out)
+
+
+async def test_cc_initial_turn_post_content_stall_hard_errors(router_dual, monkeypatch):
+    """cc 初始轮已输出 content 后挂死 → 硬错误帧，不重发。"""
+    router = router_dual
+    router.config.cross_consult.enabled = True
+    router.config.cross_consult.pairs = {"deepseek": "mimo", "mimo": "deepseek"}
+    router.config.cross_consult.first_chunk_timeout_seconds = 5
+    router.config.cross_consult.call_timeout_seconds = 1
+    router.config.cross_consult.stream_heartbeat_seconds = 1
+    router.config.streaming.reasoning_idle_timeout_seconds = 1
+    calls = {"n": 0}
+
+    def fake_iter(config, body, *, _accumulator=None, provider=None):
+        calls["n"] += 1
+        async def gen():
+            yield _delta_chunk(content="部分")
+            await asyncio.sleep(10.0)
+            yield _delta_chunk(content="never")
+        return gen()
+
+    monkeypatch.setattr("deep_proxy.router.iter_litellm_chunks", fake_iter)
+    prov = router.config.providers["deepseek"]
+    out = [f async for f in router.iter_chat_chunks(_cc_body(), provider=prov)]
+    assert calls["n"] == 1
+    assert _content_of(out, "部分")
+    assert any(is_error_frame(f) for f in out)

@@ -68,6 +68,7 @@ from .cross_consult.client_stream import (
     make_timeout_notice_frames,
     stream_cross_consult_continuation,
     stream_one_turn,
+    stream_turn_with_retry,
     stream_with_retry,
 )
 from .optimization.dynamic_threshold import DynamicThresholdController
@@ -616,33 +617,37 @@ class DeepProxyRouter:
         iter_chat_chunks 经 is_error_frame 标脏。
         """
         cc = self.config.cross_consult
-        turn = TurnResult()
-        initial_iter = iter_litellm_chunks(
-            self.config, body, _accumulator=accumulator, provider=provider,
-        )
-        async for frame in stream_one_turn(
-            initial_iter, turn, tool_name=cc.tool_name,
-            idle_timeout=float(cc.call_timeout_seconds),
-            first_chunk_timeout=float(cc.first_chunk_timeout_seconds),
-            heartbeat_seconds=float(cc.stream_heartbeat_seconds),
+        sc = self.config.streaming
+        snap = accumulator.snapshot()
+        captured: dict[str, TurnResult] = {}
+
+        def make_attempt(turn: TurnResult, remaining: float):
+            accumulator.restore(snap)   # 丢弃失败尝试的累加，保留更早内容（初始轮 snap 为空）
+            return stream_one_turn(
+                iter_litellm_chunks(
+                    self.config, body, _accumulator=accumulator, provider=provider,
+                ),
+                turn, tool_name=cc.tool_name,
+                idle_timeout=float(cc.call_timeout_seconds),
+                reasoning_idle=min(float(sc.reasoning_idle_timeout_seconds), remaining),
+                first_chunk_timeout=min(float(cc.first_chunk_timeout_seconds), remaining),
+                heartbeat_seconds=float(cc.stream_heartbeat_seconds),
+            )
+
+        async for frame in stream_turn_with_retry(
+            make_attempt, max_total_seconds=float(sc.max_stream_total_seconds),
+            on_result=lambda t: captured.__setitem__("turn", t),
         ):
             yield frame
-        if turn.errored:
-            # 初始轮超时：注入**已废弃**的优雅通知（content + finish_reason=stop）。该通知对
-            # agent 结构上不可能触发重试（clean stop = 成功轮）——plain 路径已改走
-            # stream_with_retry + 硬错误帧；cc 路径同等改造为单独 follow-up，暂沿用旧通知。
-            # 真实 error frame（timed_out=False）已在上面逐帧透传，不重复发——此处仅
-            # timed_out 才发通知。
-            if turn.timed_out:
-                for frame in make_timeout_notice_frames(turn):
-                    yield frame
-            yield STREAM_ERRORED
+        turn = captured.get("turn")
+        if turn is None or turn.errored:
+            # 硬错误（已发 error frame）或真实上游 error frame（已逐帧透传）→ 终止。
             return
         if not turn.had_cc_call:
             # 无 cc 调用：终轮，补发 finish_reason / 非 cc tool_calls
             yield make_terminal_frame(turn.finish_reason, turn.accumulated_tool_calls)
             return
-        # 进入 continuation（其自身在重发轮 errored 时会 yield STREAM_ERRORED）
+        # 进入 continuation（其自身在重发轮硬错误/真实 error 时直接收尾）
         async for frame in stream_cross_consult_continuation(
             initial_tool_calls=turn.accumulated_tool_calls,
             body=body, source_provider=provider, config=self.config,
