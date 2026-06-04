@@ -38,11 +38,12 @@ async def _iter(chunks):
 # ----------------------------------------------------------------------------
 def test_streaming_config_new_defaults():
     sc = StreamingConfig()
-    assert sc.idle_timeout_seconds == 15           # 60 → 15（content-phase "retry harder"）
-    assert sc.reasoning_idle_timeout_seconds == 45  # 新增：推理阶段较大窗口
-    assert sc.first_chunk_timeout_seconds == 120    # 不变
-    assert sc.max_stream_total_seconds == 600       # 新增：总墙钟预算
-    assert sc.heartbeat_seconds == 10               # 不变
+    assert sc.idle_timeout_seconds == 15
+    assert sc.reasoning_idle_timeout_seconds == 45
+    assert sc.first_chunk_timeout_seconds == 120
+    assert sc.max_retries == 2                       # 替代 max_stream_total_seconds
+    assert sc.heartbeat_seconds == 10
+    assert not hasattr(sc, "max_stream_total_seconds")
 
 
 # ----------------------------------------------------------------------------

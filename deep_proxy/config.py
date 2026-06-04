@@ -523,28 +523,23 @@ def normalize_legacy_config(raw: dict) -> dict:
 
 
 class StreamingConfig(BaseModel):
-    """普通（非 cross_consult）流式路径的 idle 超时守护 + 重试循环配置。
+    """流式路径的超时守护 + 重试配置（plain 与 cross_consult 共用同一套超时旋钮）。
 
-    cross_consult 路径用 CrossConsultConfig 的同名字段，本配置只管 cc 未激活时的
-    直通流式。两套超时刻意独立：cc 重发携带更大上下文，TTFT 预算需求不同。
+    单一规则：任一上游调用，连续 idle 秒无新 chunk（首 chunk 用 first_chunk）即判 stall；
+    **健康流（持续产出 token）永不被打断**——idle 只截断 dead-air，不截断在产出的流。
 
-    超时恢复模型（见 docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md）：
-    旧"注入'请重试'content + clean stop"对 agent 结构上不可能触发重试（clean stop =
-    成功轮），已废弃。改为**代理侧重试**——
-
-      - **pre-content stall**（首 chunk 前 / 推理中、尚无可见 content/tool_calls）：
-        放弃挂死连接、重发原请求，对客户端无缝（仅见心跳），直到上游完成或耗尽
-        max_stream_total_seconds 总预算。
-      - **post-content stall**（已输出可见 content/tool_calls 后停顿）：不可续传，
-        立即发**硬错误帧**（`{"error": {...}}`，使 SDK 抛错而非误判成功）。
-      - **总预算耗尽**：发硬错误帧。
+      - **pre-content stall**（首 chunk 前 / 推理中、尚无可见 content/tool_calls）：放弃挂死
+        连接、重发原请求（对客户端无缝、仅见心跳），最多重发 max_retries 次。
+      - **post-content stall**（已输出可见 content/tool_calls 后停顿）：不可续传，立即发
+        **硬错误帧**（`{"error": {...}}`，使 SDK 抛错而非误判成功）。
+      - **重试次数耗尽**：发硬错误帧。
     """
 
     first_chunk_timeout_seconds: int = Field(
         default=120, ge=1, le=600,
         description="等待首个 chunk（prefill / TTFT + 推理预热）的上限秒数。max-reasoning "
-                    "prefill 可合法耗时数十秒，故保持较大值避免误杀健康但慢的 prefill。"
-                    "属 pre-content，超时 → 重发原请求（受总预算约束）。",
+                    "prefill 可合法耗时数十秒，故给较大值避免误杀健康但慢的 prefill。"
+                    "属 pre-content，超时 → 重发原请求。",
     )
     idle_timeout_seconds: int = Field(
         default=15, ge=1, le=600,
@@ -556,10 +551,10 @@ class StreamingConfig(BaseModel):
         description="检测到 reasoning_content 后、**推理阶段**的 idle 预算（深度思考 burst "
                     "间隙属正常，需比 content idle 更宽容）。属 pre-content，超时 → 重发原请求。",
     )
-    max_stream_total_seconds: int = Field(
-        default=600, ge=1, le=3600,
-        description="单请求流式输出的总墙钟预算（覆盖所有重试与等待）。pre-content "
-                    "重试在此预算内反复进行；耗尽 → 发硬错误帧。须 ≥ 客户端读超时配置。",
+    max_retries: int = Field(
+        default=2, ge=0, le=20,
+        description="pre-content stall 时重发原请求的最大次数。健康流不触发重试，故此计数"
+                    "只约束 dead-air 重发；耗尽 → 发硬错误帧。post-content stall 不重试。",
     )
     heartbeat_seconds: int = Field(
         default=10, ge=1, le=120,
