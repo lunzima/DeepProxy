@@ -115,7 +115,7 @@ flash_upgrade:
   router_threshold: 0.65                  # 全局默认；MiMo per_provider 覆盖为 0.60
   heuristic_threshold: 8.0                # 全局默认；MiMo per_provider 覆盖为 7.5
   persist_turns: 1                        # 升格后保持 Pro 额外 N 轮
-  downgrade_threshold: 3.0                # 升格期间 score < 此值主动降回 flash（hysteresis；MiMo 2.5）
+  downgrade_threshold: 5.0                # 升格期间 score < 此值主动降回 flash（hysteresis；全局 gap=3.0，MiMo gap=2.5）
 ```
 
 详细配置见 [`config.example.yaml`](config.example.yaml)（模板）或 `config.py`（含每个字段的中文注释）。

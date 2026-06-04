@@ -162,12 +162,12 @@ flash_upgrade:
   enabled: true
   router_type: bert
   bert_checkpoint: "router_model"
-  router_threshold: 0.60
-  heuristic_threshold: 7.5
-  persist_turns: 2
+  router_threshold: 0.65            # 全局默认（偏保守）
+  heuristic_threshold: 8.0
+  persist_turns: 1
   per_provider:
     mimo:
-      router_threshold: 0.65          # 收紧起步，观察 MiMo pro 命中收益再调
+      router_threshold: 0.60          # 比全局 0.65 低，温和偏向升格（MiMo flash 略弱于 V4-flash）
 
 cross_consult:
   enabled: true
@@ -267,7 +267,7 @@ request → port → provider config bound
 
 ### 8.2 per-provider 部分
 
-- **阈值**：`router_threshold` 和 `heuristic_threshold` 支持 `per_provider` 覆盖。MiMo 起步用 `router_threshold: 0.65`（比 DeepSeek 的 0.60 严），少升格，观察 pro 实际收益再调
+- **阈值**：`router_threshold` 和 `heuristic_threshold` 支持 `per_provider` 覆盖。全局默认 `router_threshold: 0.65`（偏保守）；MiMo 覆盖为 `0.60`（比全局低，温和偏向升格，因 MiMo flash 略弱于 V4-flash）
 - **模型名**：升格后切换的目标模型从 `provider.pro_model` 取（不再硬编码 `deepseek-v4-pro`）
 - **session 状态隔离**：persist state 的 key 改为 `(client_session_id, provider_name)`，避免跨 provider 残留
 

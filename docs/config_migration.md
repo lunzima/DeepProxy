@@ -108,12 +108,12 @@ flash_upgrade:
   enabled: true
   router_type: bert
   bert_checkpoint: router_model
-  router_threshold: 0.60               # 全局默认
-  heuristic_threshold: 7.5
-  persist_turns: 2
+  router_threshold: 0.65               # 全局默认（偏保守）
+  heuristic_threshold: 8.0
+  persist_turns: 1
   per_provider:
     mimo:
-      router_threshold: 0.65            # MiMo 起步保守，少升格到 pro
+      router_threshold: 0.60            # MiMo flash 略弱于 V4-flash，温和偏向升格（比全局 0.65 低）
 ```
 
 `per_provider` 没有的 key 走全局默认。BERT checkpoint 在所有 provider 间共享（同一模型做二分类）。
