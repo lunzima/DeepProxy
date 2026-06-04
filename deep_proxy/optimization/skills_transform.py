@@ -149,7 +149,12 @@ def _substitute_urls(content: str, urls: List[str], results: List[Any]) -> str:
             domain = urlparse(cu).netloc or "url"
         except Exception:
             domain = "url"
-        modified = modified.replace(cu, f"{cu} [Content from {domain}: {snippet}]", 1)
+        replacement = f"{cu} [Content from {domain}: {snippet}]"
+        # 负向先行断言：仅在 cu 后面不是 URL 续接字符时替换，避免一个 URL 是另一个的前缀时
+        # （https://a.com vs https://a.com/page）短 URL 的替换切进长 URL 中间。
+        # 用函数替换而非字符串替换：snippet 里的 \1 / \g<0> 等不会被当作正则回引解释。
+        pattern = re.compile(re.escape(cu) + r"(?![\w./?#%=&~+:@!$*,;()\[\]-])")
+        modified = pattern.sub(lambda _m: replacement, modified, count=1)
     return modified
 
 

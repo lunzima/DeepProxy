@@ -441,6 +441,22 @@ class TestReadUrlsHelpers:
         with pytest.raises(asyncio.CancelledError):
             _substitute_urls("https://a.com", urls, results)
 
+    def test_substitute_urls_prefix_url_not_corrupted(self):
+        """一个 URL 是另一个的前缀时，短 URL 的替换不得切进长 URL 中间。"""
+        from deep_proxy.optimization.skills_transform import _substitute_urls
+        urls = ["https://a.com", "https://a.com/page"]
+        results = ["SHORT", "LONG"]
+        out = _substitute_urls("see https://a.com/page here", urls, results)
+        # 长 URL 完整保留并正确内联；短 URL（无独立出现）不破坏它
+        assert "https://a.com/page [Content from a.com: LONG]" in out
+        assert "[SHORT]/page" not in out          # 旧 bug：短替换切进长 URL
+
+    def test_substitute_urls_snippet_with_backslash_safe(self):
+        """抓取片段含正则替换特殊串（\\1 等）不应破坏替换。"""
+        from deep_proxy.optimization.skills_transform import _substitute_urls
+        out = _substitute_urls("x https://a.com y", ["https://a.com"], [r"\1\g<0>"])
+        assert r"[Content from a.com: \1\g<0>]" in out
+
 
 class TestCreativeMode:
     """验证 mode="creative" 时使用新 skills 路径。
