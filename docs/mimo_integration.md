@@ -335,7 +335,7 @@ def build_models_list(provider: Provider) -> list[dict]:
 | skills_general / skills_transform | 不变（消息层改写，provider-agnostic） |
 | dynamic_baskets | 不变 |
 | silly_priming | 不变 |
-| compressor | 配置项 `compressor.provider`（默认 deepseek），按配置调用对应 provider 做压缩 |
+| compressor | 模型由 `optimization.compressor_model` 配置（默认 `deepseek/deepseek-v4-flash`）；当前仅用 DeepSeek 凭据（MiMo 凭据复用未实现，见 router 启动日志） |
 | think_steering（V4 `<think>` 引导） | 仅 `provider.has_thinking_param=true && provider.name=="deepseek"` 时启用 — MiMo 跳过（其 thinking 协议虽然兼容，但 V4 角色沉浸引导是基于 DeepSeek 训练分布的，对 MiMo 无意义且可能反效果） |
 | tool_call_chinese_cot | 不变（中文 CoT 锚定与 provider 无关） |
 | strip_telemetry | 不变（与 Anthropic 客户端有关，与上游无关） |

@@ -15,12 +15,12 @@ MIMO_MODELS: Dict[str, Dict] = {
         "id": MIMO_FLASH,
         "object": "model",
         "owned_by": "xiaomi",
-        "created": 1716777600,  # 2026-05-27 价格更新公告日；首发日期未公开，用公告日占位
+        "created": 1779840000,  # 2026-05-27 价格更新公告日；首发日期未公开，用公告日占位
     },
     MIMO_PRO: {
         "id": MIMO_PRO,
         "object": "model",
         "owned_by": "xiaomi",
-        "created": 1716777600,
+        "created": 1779840000,  # 2026-05-27（同上）
     },
 }

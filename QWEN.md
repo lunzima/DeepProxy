@@ -259,7 +259,7 @@ D:\deepproxy\
 
 ### System Prompt 压缩（元功能）
 - 合并所有 skills + 用户 system → 调一次 LLM 压缩 → 按 `sha256(version + model + text)` 缓存到 `prompt_cache.json`
-- `inject_date` 使日期混入缓存键，每日自动刷新
+- `inject_date` **不**进压缩缓存键（在压缩之后才追加到 system 末尾），故缓存跨天持久、不每日 flush
 - 首次 miss 返回原文（非阻塞），后台压缩任务完成后后续命中
 
 ## Development Conventions

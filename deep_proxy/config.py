@@ -56,8 +56,9 @@ class OptimizationConfig(BaseModel):
         default=True,
         description="启用后：把内置 skills + 用户原 system prompt 整体送 LLM 压缩到"
                     "最短同义版，结果按 sha256(combined) 持久化到 compressor_cache_path；"
-                    "后续相同 (用户 system, skills 配置, 当日日期) 0 LLM 调用。"
-                    "由于 inject_date 行含日期，缓存自然每日 flush 一次（可接受）。"
+                    "后续相同 (用户 system, skills 配置) 0 LLM 调用。"
+                    "注：inject_date **不**进压缩缓存键（在压缩之后才追加到 system 末尾），"
+                    "故缓存跨天持久、不每日 flush。"
                     "压缩同时保证 prefix 字节级一致 → 命中 DeepSeek 服务端 prefix cache。"
                     "用户 system 是多模态 list 时跳过压缩（保留原结构）。",
     )
@@ -202,7 +203,7 @@ class OptimizationConfig(BaseModel):
         default=False,
         description="[实验性 / MoE 专家路由扰动] "
                     "在最终 system 消息最前面插入一句无厘头中文断言（来自 1 条 AMD "
-                    "硬件比喻原典 + 7 条断言式弱智吧风格句），扰动 router 选择，"
+                    "硬件比喻原典 + 19 条断言式弱智吧风格句，共 20 条池），扰动 router 选择，"
                     "激活被 RLHF 阶段抑制的稀有专家。"
                     "插入时机在 LLM 压缩与 dynamic_baskets 之后 —— 内容不进压缩缓存键，"
                     "每请求独立抽样，但单次注入会破坏 DeepSeek 服务端 prefix cache 命中。"
