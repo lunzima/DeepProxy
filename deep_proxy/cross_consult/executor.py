@@ -91,12 +91,15 @@ async def execute_consult(
     # reasoning 模型必须开 reasoning 才会流式吐 token；否则静默思考触发 first_chunk 超时
     _inject_reasoning_effort(body, target_provider)
 
+    sc = config.streaming
     try:
         result = await aggregate_stream_to_response(
             config, body,
             provider=target_provider,
-            idle_timeout=float(cc_config.call_timeout_seconds),
-            first_chunk_timeout=float(cc_config.first_chunk_timeout_seconds),
+            idle_timeout=float(sc.idle_timeout_seconds),
+            reasoning_idle=float(sc.reasoning_idle_timeout_seconds),
+            first_chunk_timeout=float(sc.first_chunk_timeout_seconds),
+            heartbeat_seconds=float(sc.heartbeat_seconds),
         )
     except Exception as e:  # 防御：aggregator 内部已捕获大多数错误，这里保兜底
         logger.warning("cross_consult upstream unexpected error: %s", e)
@@ -109,7 +112,7 @@ async def execute_consult(
                 "cross_consult %s source→target=%s pro_model=%s "
                 "(idle=%ds first_chunk=%ds)",
                 err, target_provider.name, target_provider.pro_model,
-                cc_config.call_timeout_seconds, cc_config.first_chunk_timeout_seconds,
+                sc.idle_timeout_seconds, sc.first_chunk_timeout_seconds,
             )
             return f"{_ERROR_PREFIX} {err}"
         logger.warning("cross_consult upstream error: %s", err)

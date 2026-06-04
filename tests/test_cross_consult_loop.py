@@ -262,7 +262,7 @@ async def test_iter_chat_chunks_heartbeat_during_consult(cfg_cross):
     from unittest.mock import patch
     from deep_proxy.router import DeepProxyRouter
     router = DeepProxyRouter(cfg_cross)
-    router.config.cross_consult.stream_heartbeat_seconds = 1
+    router.config.streaming.heartbeat_seconds = 1
     provider = cfg_cross.providers["deepseek"]
 
     async def initial_stream(config, body, *, _accumulator=None, provider=None):
@@ -303,8 +303,9 @@ async def test_iter_chat_chunks_timeout_does_not_commit_upgrade(cfg_cross):
     from deep_proxy.router import DeepProxyRouter
     router = DeepProxyRouter(cfg_cross)
     # 心跳 1s < 首 chunk 预算 2s → 先发一个心跳，再在第二个 tick 超时
-    router.config.cross_consult.first_chunk_timeout_seconds = 2
-    router.config.cross_consult.stream_heartbeat_seconds = 1
+    router.config.streaming.first_chunk_timeout_seconds = 2
+    router.config.streaming.max_retries = 0   # 首 chunk 超时立即硬错误，不重发
+    router.config.streaming.heartbeat_seconds = 1
     provider = cfg_cross.providers["deepseek"]
 
     async def never_first(config, body, *, _accumulator=None, provider=None):

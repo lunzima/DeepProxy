@@ -126,8 +126,6 @@ def _cc_router() -> tuple[DeepProxyRouter, Provider]:
     cfg.cross_consult = CrossConsultConfig(
         enabled=True, pairs={"deepseek": "mimo", "mimo": "deepseek"},
     )
-    cfg.cross_consult.first_chunk_timeout_seconds = 0.2
-    cfg.cross_consult.stream_heartbeat_seconds = 0.1
     cfg.providers["mimo"] = Provider(
         name="mimo", api_base="https://x", api_key="t", litellm_prefix="openai/",
         flash_model="mimo-v2.5", pro_model="mimo-v2.5-pro",

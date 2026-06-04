@@ -40,24 +40,8 @@ class CrossConsultConfig(BaseModel):
         default=3, ge=1, le=10,
         description="单次 client 请求内 cross_consult 调用次数上限。",
     )
-    call_timeout_seconds: int = Field(
-        default=60, ge=1, le=600,
-        description="流式 chunk 间最大空闲秒数（inter-chunk idle）。首 chunk 之后，"
-                    "相邻 chunk 间隔超过该值才视为 mid-stream hang。注：首 chunk 的 "
-                    "prefill/TTFT 由 first_chunk_timeout_seconds 单独管辖。",
-    )
-    first_chunk_timeout_seconds: int = Field(
-        default=120, ge=1, le=600,
-        description="等待首个 chunk（prefill / TTFT + 推理预热）的上限秒数。"
-                    "cross_consult 重发携带最大上下文（原对话 + 注入的 tool_result），"
-                    "其 time-to-first-chunk 可能远超 inter-chunk idle 预算；首 chunk "
-                    "因此单独给更宽预算，避免健康上游在预填充阶段被误杀。",
-    )
-    stream_heartbeat_seconds: int = Field(
-        default=10, ge=1, le=120,
-        description="客户端真流式下，静默间隙（consult 执行 / 重发 prefill）期间发送 "
-                    "SSE keep-alive 注释帧的间隔秒数。须显著小于客户端 idle-read 超时。",
-    )
+    # 注：超时旋钮（first_chunk / idle / reasoning_idle / heartbeat / max_retries）统一由
+    # StreamingConfig 提供——cross_consult 与 plain 共用同一套超时配置，不再各自独立。
     # 注：consult 的输入/输出不设武断上限。真正的约束是 target provider 自身的
     # context_window（输入）与 max_output_tokens（输出）——executor 用 provider 的
     # 输出上限做 max_tokens，输入超长由 provider 自然报错并以 tool_result 返还 agent。

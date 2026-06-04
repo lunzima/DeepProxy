@@ -80,9 +80,7 @@ cross_consult:
     deepseek: mimo
     mimo: deepseek
   max_calls_per_request: 3              # 单次 client 请求内 consult 次数上限
-  call_timeout_seconds: 30              # 流式 chunk 间最大空闲秒数（inter-chunk idle hang tripwire）
-  first_chunk_timeout_seconds: 120      # 首 chunk（prefill/TTFT+推理预热）上限；大上下文重发的 TTFT 远超 idle，单独给宽预算
-  stream_heartbeat_seconds: 10          # 客户端真流式静默间隙（consult/重发prefill）期发 SSE keep-alive 注释帧的间隔秒
+  # 超时旋钮统一由下面 streaming 段提供（cross_consult 与 plain 共用同一套）
   # consult 输入/输出不设武断上限：约束是 target provider 的 context_window（输入）
   # 与 max_output_tokens（输出，executor 用它做 max_tokens）。
   # —— §12.11 双家族机制 ——
@@ -92,19 +90,18 @@ cross_consult:
   redirect_tag_pattern: "\\[本轮对话使用不同家族的大语言模型\\]"
 
 # ============================================================
-# 普通（非 cross_consult）流式路径的 idle 超时**重试 + 硬错误**守护
-# 上游卡住时：pre-content（首 chunk 前 / 推理中、无可见输出）→ 代理重发原请求
-# （对客户端无缝，仅见心跳），受 max_stream_total_seconds 总预算约束；预算耗尽
-# 或 post-content（已输出 content/tool_calls 后停顿、不可续传）→ 发硬错误帧
-# （{"error":...} 透传使 SDK 抛错）。旧"请重试 content + clean stop"对 agent 结构上
-# 不可能触发重试，已废弃。cross_consult 路径用上面 cross_consult 同名字段，两套独立。
-# 设计：docs/superpowers/specs/2026-06-04-mid-stream-timeout-retry-design.md
+# 流式路径超时守护（plain 与 cross_consult 共用同一套）
+# 单一规则：连续 idle 秒无新 chunk（首 chunk 用 first_chunk）即判 stall；**健康流（持续
+# 产出 token）永不被打断**。pre-content stall（首 chunk 前 / 推理中、无可见输出）→ 代理
+# 重发原请求（对客户端无缝，仅见心跳），最多 max_retries 次；post-content stall（已输出
+# content/tool_calls 后停顿、不可续传）或重试耗尽 → 发硬错误帧（{"error":...} 透传使 SDK 抛错）。
+# 设计：docs/superpowers/plans/2026-06-04-timeout-simplification.md
 # ============================================================
 streaming:
   first_chunk_timeout_seconds: 120        # 首 chunk（prefill/TTFT+推理预热）上限秒；pre-content，超时 → 重发
   idle_timeout_seconds: 15                # content 阶段相邻 chunk 间最长无活动秒；超时 → 立即硬错误（不可续传）
   reasoning_idle_timeout_seconds: 45      # 推理阶段 idle 预算（深度思考 burst 间隙更宽容）；pre-content，超时 → 重发
-  max_stream_total_seconds: 600           # 单请求总墙钟预算（含所有重试）；耗尽 → 硬错误帧。须 ≥ 客户端读超时
+  max_retries: 2                          # pre-content stall 重发上限；耗尽 → 硬错误帧。健康流不触发重试
   heartbeat_seconds: 10                   # 等待间隙发 SSE keep-alive / Anthropic ping 的间隔秒，须 << 客户端读超时
 
 # ============================================================

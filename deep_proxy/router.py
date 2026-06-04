@@ -498,12 +498,16 @@ class DeepProxyRouter:
             and self.config.cross_consult.pair_for(provider.name) is not None
         )
 
+        sc = self.config.streaming
+        cc_idle = float(sc.idle_timeout_seconds)
+        cc_first = float(sc.first_chunk_timeout_seconds)
+        cc_reasoning = float(sc.reasoning_idle_timeout_seconds)
+        cc_hb = float(sc.heartbeat_seconds)
         if cc_active:
-            cc_idle = float(self.config.cross_consult.call_timeout_seconds)
-            cc_first = float(self.config.cross_consult.first_chunk_timeout_seconds)
             raw = await aggregate_stream_to_response(
                 self.config, body, provider=provider,
                 idle_timeout=cc_idle, first_chunk_timeout=cc_first,
+                reasoning_idle=cc_reasoning, heartbeat_seconds=cc_hb,
             )
             if "_dp_error" in raw:
                 raise HTTPException(status_code=504, detail={
@@ -526,6 +530,7 @@ class DeepProxyRouter:
                 return await stream_aggregated_call(
                     cfg, b, provider=provider,
                     idle_timeout=cc_idle, first_chunk_timeout=cc_first,
+                    reasoning_idle=cc_reasoning, heartbeat_seconds=cc_hb,
                 )
 
             result = await execute_cross_consult_loop(

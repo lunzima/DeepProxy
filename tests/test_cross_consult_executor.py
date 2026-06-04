@@ -262,6 +262,7 @@ async def test_execute_consult_returns_error_string_on_idle_timeout(
     cfg_for_executor, target_provider,
 ):
     """首 chunk 迟迟不到（连 first_chunk_timeout 都超），返回带前缀的错误字符串，不抛异常。"""
+    cfg_for_executor.streaming.first_chunk_timeout_seconds = 0.5
     async def slow_stream(config, body, *, provider=None):
         # 模拟连接成功但 chunk 永不到达——首 chunk 超时路径
         await asyncio.sleep(2.0)
@@ -276,9 +277,7 @@ async def test_execute_consult_returns_error_string_on_idle_timeout(
         out = await execute_consult(
             question="hi", context=None,
             target_provider=target_provider, config=cfg_for_executor,
-            cc_config=CrossConsultConfig(
-                enabled=True, call_timeout_seconds=1, first_chunk_timeout_seconds=1,
-            ),
+            cc_config=CrossConsultConfig(enabled=True),
         )
     assert out.startswith("[DeepProxy cross_consult error]")
     assert "timeout" in out.lower()
@@ -288,7 +287,10 @@ async def test_execute_consult_streams_long_thinking_without_timeout(
     cfg_for_executor, target_provider,
 ):
     """关键回归：模型流式吐了一长串 reasoning（每个 chunk 间隔短），即使总耗时超过
-    call_timeout_seconds 也不应被超时——只要 chunk 持续到达。"""
+    单个 idle 预算也不应被超时——只要 chunk 持续到达。"""
+    cfg_for_executor.streaming.first_chunk_timeout_seconds = 1
+    cfg_for_executor.streaming.idle_timeout_seconds = 0.2
+    cfg_for_executor.streaming.reasoning_idle_timeout_seconds = 0.5
     async def long_thinking_stream(config, body, *, provider=None):
         for i in range(5):
             await asyncio.sleep(0.1)  # 每 chunk 100ms，5 chunk → ~500ms 总
@@ -307,8 +309,6 @@ async def test_execute_consult_streams_long_thinking_without_timeout(
         out = await execute_consult(
             question="hi", context=None,
             target_provider=target_provider, config=cfg_for_executor,
-            cc_config=CrossConsultConfig(
-                enabled=True, call_timeout_seconds=1,
-            ),
+            cc_config=CrossConsultConfig(enabled=True),
         )
     assert out == "final"

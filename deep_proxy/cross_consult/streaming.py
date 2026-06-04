@@ -14,16 +14,13 @@ chat_completions 路径经 stream_aggregated_call 的重发。面向客户端的
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
-from typing import Any, AsyncGenerator, Awaitable, Callable
+from typing import Any, AsyncGenerator, Callable
 
 from ..config import ProxyConfig
 from ..litellm_client import iter_litellm_chunks
 from ..providers import Provider
 from ..utils import is_error_frame, merge_tool_call_deltas
-from .reasoning_idle import compute_reasoning_idle
 
 logger = logging.getLogger(__name__)
 
@@ -39,34 +36,23 @@ async def aggregate_stream_to_response(
     provider: Provider | None,
     idle_timeout: float,
     first_chunk_timeout: float | None = None,
+    reasoning_idle: float | None = None,
+    heartbeat_seconds: float = 10.0,
     iter_fn: IterFn | None = None,
 ) -> dict[str, Any]:
     """流式调上游、按 chunk 累加，返回非流式 chat.completion 风格 dict。
 
     返回形状：
-        {
-          "choices": [{
-            "message": {"role": "assistant",
-                        "content": "...", "reasoning_content": "...",
-                        "tool_calls": [...]},
-            "finish_reason": "stop" | "tool_calls" | ...,
-          }]
-        }
+        {"choices": [{"message": {"role": "assistant", "content": ...,
+          "reasoning_content": ..., "tool_calls": [...]},
+          "finish_reason": "stop" | "tool_calls" | ...}]}
 
-    错误（连接失败 / 流中途异常 / 超时）以 {"_dp_error": str} 返回，调用方
-    自行决定如何包装（executor 包成错误前缀字符串；interceptor 把它当成空响应处理）。
+    错误（连接失败 / 流中途异常 / 超时）以 {"_dp_error": str} 返回，调用方自行包装
+    （executor 包成错误前缀字符串；interceptor 当成空响应处理）。
 
-    两个超时预算（刻意分离，见模块 docstring）：
-      - first_chunk_timeout：等待**首个** chunk（prefill / TTFT + 推理预热）的上限。
-        大上下文重发的 time-to-first-chunk 远长于 chunk 间隙，故单独给宽预算。
-        None / 0 / 负数 = 退回 idle_timeout 守护首 chunk（向后兼容）。
-      - idle_timeout：首 chunk 之后，相邻 chunk 间允许的最长无活动时间（真正的
-        mid-stream hang tripwire）。0 / 负数 = 不限。**自适应**：首次出现非空
-        reasoning_content 后,该预算升级到 compute_reasoning_idle(idle, first_chunk)
-        （深度思考 burst 间隙属正常行为，不是 hang），与 client_stream 一致。
-
-    与 client_stream.stream_one_turn 的相似是**刻意分叉**，勿合并：本函数内部聚合成
-    dict（不发心跳、wait_for 即可），后者面向客户端真流式（yield + 心跳）。
+    超时与 reasoning 自适应走与客户端真流式**同一个引擎**（consume_with_heartbeat）：
+    忽略其心跳哨兵、累加 chunk、_Timeout → _dp_error。first/idle/reasoning_idle 语义与
+    client_stream 完全一致（单引擎、单配置）。first_chunk_timeout 未给则退回 idle_timeout。
     """
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -74,72 +60,48 @@ async def aggregate_stream_to_response(
     finish_reason: str | None = None
     usage: dict | None = None
 
+    # 延迟导入避免 client_stream → interceptor → executor → streaming 循环
+    from .client_stream import consume_with_heartbeat, _HEARTBEAT, _Timeout
+
     # 默认到模块级名（注：通过模块属性查找，便于测试 patch 整个 streaming.iter_litellm_chunks）
     fn = iter_fn if iter_fn is not None else iter_litellm_chunks
-    iterator = fn(config, body, provider=provider).__aiter__()
-    chunk_count = 0
-    start = time.monotonic()
-    # reasoning_content 自适应：首次检测到深度思考 token 后，idle 预算升级到
-    # reasoning_idle（公式与 client_stream 共享，见 reasoning_idle 模块）。
-    reasoning_seen = False
-    _effective_idle = idle_timeout
-    reasoning_idle = compute_reasoning_idle(idle_timeout, first_chunk_timeout)
-    while True:
-        first = chunk_count == 0
-        # 首 chunk 用 first_chunk_timeout（未给则退回 idle_timeout）；之后用 _effective_idle
-        # （reasoning_content 后升级到 reasoning_idle）
-        wait_timeout = (
-            first_chunk_timeout
-            if first and first_chunk_timeout and first_chunk_timeout > 0
-            else _effective_idle
-        )
-        try:
-            if wait_timeout and wait_timeout > 0:
-                chunk = await asyncio.wait_for(iterator.__anext__(), timeout=wait_timeout)
-            else:
-                chunk = await iterator.__anext__()
-        except StopAsyncIteration:
-            break
-        except asyncio.TimeoutError:
-            phase = "first_chunk" if first else "mid_stream"
-            elapsed = time.monotonic() - start
-            logger.warning(
-                "aggregate_stream %s timeout after %.1fs (chunks=%d, elapsed=%.1fs)",
-                phase, wait_timeout, chunk_count, elapsed,
-            )
-            return {
-                "_dp_error": (
-                    f"{phase} timeout after {wait_timeout}s "
-                    f"({chunk_count} chunks received)"
-                )
-            }
-        chunk_count += 1
-
-        if is_error_frame(chunk):
-            err = chunk["error"]
-            msg = err.get("message") if isinstance(err, dict) else None
-            return {"_dp_error": msg or str(err)}
-
-        if chunk.get("usage"):
-            usage = chunk["usage"]
-
-        for ch in chunk.get("choices") or []:
-            delta = ch.get("delta") or {}
-            if isinstance(delta.get("content"), str):
-                content_parts.append(delta["content"])
-            # reasoning_content 在 iter_litellm_chunks 已被 process_streaming_delta 规整
-            r = delta.get("reasoning_content")
-            if isinstance(r, str):
-                reasoning_parts.append(r)
-                if not reasoning_seen and r:
-                    reasoning_seen = True
-                    _effective_idle = reasoning_idle
-            tcs = delta.get("tool_calls")
-            if isinstance(tcs, list) and tcs:
-                tool_calls = merge_tool_call_deltas(tool_calls, tcs)
-            fr = ch.get("finish_reason")
-            if fr:
-                finish_reason = fr
+    upstream = fn(config, body, provider=provider)
+    gen = consume_with_heartbeat(
+        upstream, idle_timeout=idle_timeout,
+        first_chunk_timeout=(first_chunk_timeout or idle_timeout),
+        heartbeat_seconds=heartbeat_seconds, log_label="aggregate_stream",
+        reasoning_idle=reasoning_idle,
+    )
+    try:
+        async for item in gen:
+            if item is _HEARTBEAT:
+                continue
+            if isinstance(item, _Timeout):
+                logger.warning("aggregate_stream %s timeout after %.1fs",
+                               item.phase, item.seconds)
+                return {"_dp_error": f"{item.phase} timeout after {item.seconds}s"}
+            chunk = item
+            if is_error_frame(chunk):
+                err = chunk["error"]
+                msg = err.get("message") if isinstance(err, dict) else None
+                return {"_dp_error": msg or str(err)}
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+            for ch in chunk.get("choices") or []:
+                delta = ch.get("delta") or {}
+                if isinstance(delta.get("content"), str):
+                    content_parts.append(delta["content"])
+                r = delta.get("reasoning_content")
+                if isinstance(r, str):
+                    reasoning_parts.append(r)
+                tcs = delta.get("tool_calls")
+                if isinstance(tcs, list) and tcs:
+                    tool_calls = merge_tool_call_deltas(tool_calls, tcs)
+                fr = ch.get("finish_reason")
+                if fr:
+                    finish_reason = fr
+    finally:
+        await gen.aclose()
 
     message: dict[str, Any] = {"role": "assistant"}
     content_text = "".join(content_parts)
@@ -171,6 +133,8 @@ async def stream_aggregated_call(
     provider: Provider | None = None,
     idle_timeout: float = 30.0,
     first_chunk_timeout: float | None = None,
+    reasoning_idle: float | None = None,
+    heartbeat_seconds: float = 10.0,
     iter_fn: IterFn | None = None,
 ) -> dict[str, Any]:
     """`call_litellm_fn` 兼容签名的流式封装。
@@ -184,6 +148,7 @@ async def stream_aggregated_call(
     result = await aggregate_stream_to_response(
         config, body, provider=provider,
         idle_timeout=idle_timeout, first_chunk_timeout=first_chunk_timeout,
+        reasoning_idle=reasoning_idle, heartbeat_seconds=heartbeat_seconds,
         iter_fn=iter_fn,
     )
     if "_dp_error" in result:
