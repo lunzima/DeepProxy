@@ -19,6 +19,18 @@ from deep_proxy.optimization.compressor import (
 from types import SimpleNamespace
 
 
+def test_compress_kwargs_uses_fixed_fidelity_params():
+    """压缩是保真改写任务：用固定低温 + 零 repetition penalty，不受端口采样 profile 影响
+    （否则 penalty 会鼓励'不重复'，破坏对命名实体/规则词/引用片段的逐字保留）。"""
+    from pathlib import Path
+    c = SystemPromptCompressor(cache_path=Path("x"), api_key="k", api_base="b")
+    kw = c._build_compress_kwargs("some long system prompt text")
+    assert kw["temperature"] == 0.1
+    assert kw["presence_penalty"] == 0.0
+    assert kw["frequency_penalty"] == 0.0
+    assert kw["max_tokens"] == _compress_max_tokens(len("some long system prompt text"))
+
+
 def test_compress_max_tokens_clamped_to_model_ceiling():
     """压缩请求的 max_tokens 须钳制在模型输出上限内，避免大 prompt 触发上游 400。"""
     assert _COMPRESS_MAX_TOKENS_CEILING == 384_000

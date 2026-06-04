@@ -17,10 +17,9 @@ import logging
 import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Optional
 
 from ..deepseek_models import V4_FLASH
-from ..utils import hash_str, sample_in_range
+from ..utils import hash_str
 
 logger = logging.getLogger(__name__)
 
@@ -142,20 +141,12 @@ class SystemPromptCompressor:
         api_base: str,
         model: str = f"deepseek/{V4_FLASH}",
         max_memory: int = 256,
-        sampling: Optional[Any] = None,
     ):
-        """
-        Args:
-            sampling: 采样配置实例（PreciseSamplingConfig / CreativeSamplingConfig
-                duck-typed，需含 temperature_min/max、top_p_min/max 等字段）。
-                None 时退回旧硬编码 temperature=0.1 行为，便于测试隔离。
-        """
         self._cache_path = cache_path.resolve()
         self._api_key = api_key
         self._api_base = api_base
         self._model = model
         self._max_memory = max_memory
-        self._sampling = sampling
         self._mem: "OrderedDict[str, str]" = OrderedDict()
         # 非阻塞机制：缓存 miss 时后台压缩，主请求路径直接返回原文
         self._inflight: set = set()                 # 正在跑的 cache key（防重复任务）
@@ -320,6 +311,27 @@ class SystemPromptCompressor:
 
     # ---------------------------------------------------------------- LLM
 
+    def _build_compress_kwargs(self, text: str) -> dict:
+        """构造压缩 LLM 调用的 kwargs（不含 api_key/base）。
+
+        压缩是**保真改写**任务（须逐字保留 regex / JSON 键 / 引用的受保护片段）：固定低温 +
+        零 repetition penalty，**不**采用端口采样 profile——penalty 鼓励"不重复"，恰好破坏
+        对命名实体 / 重复规则词 / 引用片段的逐字保留；高温同理增加漂移。
+        同时主动请求 reasoning_effort=minimal（即使 thinking=disabled 被忽略也尽量短）。
+        """
+        return {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": _COMPRESSION_INSTRUCTION},
+                {"role": "user", "content": text},
+            ],
+            "max_tokens": _compress_max_tokens(len(text)),
+            "thinking": {"type": "disabled", "reasoning_effort": "minimal"},
+            "temperature": 0.1,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+        }
+
     async def _call_llm(self, text: str) -> str:
         """直连 LiteLLM 调一次压缩；不通过 router（避免递归注入 skills）。
 
@@ -332,29 +344,7 @@ class SystemPromptCompressor:
         """
         import litellm
 
-        # 同时主动请求 reasoning_effort=minimal（即使 thinking=disabled 被忽略，
-        # 服务端也会把 reasoning 控制到最短），双重防御。
-        kwargs = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": _COMPRESSION_INSTRUCTION},
-                {"role": "user", "content": text},
-            ],
-            "max_tokens": _compress_max_tokens(len(text)),
-            "thinking": {"type": "disabled", "reasoning_effort": "minimal"},
-        }
-        if self._sampling is not None:
-            s = self._sampling
-            kwargs["temperature"] = sample_in_range(s.temperature_min, s.temperature_max)
-            kwargs["top_p"] = sample_in_range(s.top_p_min, s.top_p_max)
-            kwargs["presence_penalty"] = sample_in_range(
-                s.presence_penalty_min, s.presence_penalty_max,
-            )
-            kwargs["frequency_penalty"] = sample_in_range(
-                s.frequency_penalty_min, s.frequency_penalty_max,
-            )
-        else:
-            kwargs["temperature"] = 0.1
+        kwargs = self._build_compress_kwargs(text)
         if self._api_key:
             kwargs["api_key"] = self._api_key
         if self._api_base:

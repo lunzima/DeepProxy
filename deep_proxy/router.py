@@ -147,7 +147,6 @@ class DeepProxyRouter:
                     api_key=ds_api_key,
                     api_base=_to_litellm_api_base(ds_api_base),
                     model=config.optimization.compressor_model,
-                    sampling=config.precise_sampling,
                 )
 
     def _get_http_client(self) -> httpx.AsyncClient:
