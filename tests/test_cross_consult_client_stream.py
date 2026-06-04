@@ -78,6 +78,25 @@ async def test_stream_one_turn_forwards_content_and_reasoning_live():
     assert res.finish_reason == "stop"
 
 
+async def test_stream_one_turn_reasoning_idle_tolerates_gap():
+    """显式 reasoning_idle：检测到 reasoning 后，超过 content idle 但 ≤ reasoning_idle
+    的停顿不触发超时。"""
+    async def reasoning_then_pause():
+        yield _delta_chunk(reasoning_content="思考")
+        await asyncio.sleep(0.35)          # > idle 0.15，< reasoning_idle 2.0
+        yield _delta_chunk(content="答案")
+        yield _finish_chunk("stop")
+
+    res = TurnResult()
+    out = [f async for f in stream_one_turn(
+        reasoning_then_pause(), res, tool_name="cross_consult",
+        idle_timeout=0.15, reasoning_idle=2.0,
+        first_chunk_timeout=5.0, heartbeat_seconds=0.1,
+    )]
+    assert res.timed_out is False
+    assert res.content == "答案"
+
+
 async def test_stream_one_turn_suppresses_cc_tool_call_frames():
     chunks = [
         _delta_chunk(content="让我咨询"),

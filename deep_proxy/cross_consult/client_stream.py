@@ -318,18 +318,24 @@ async def stream_one_turn(
     idle_timeout: float,
     first_chunk_timeout: float,
     heartbeat_seconds: float,
+    reasoning_idle: float | None = None,
 ) -> AsyncGenerator[Any, None]:
     """消费单轮上游 chunk 流：content/reasoning 即时透传；tool_calls 累加（不透传）
     留到轮末判定；等待间隙发心跳；error frame / 超预算 -> result.errored=True 并终止。
 
-    reasoning_content 自适应：首次检测到 reasoning_content token 时，将 idle 预算
-    升级到与 first_chunk_timeout 同级（深度思考 burst 间隙属于正常行为，不是 hang）。
+    reasoning_content 自适应：首次检测到 reasoning_content token 时，将 idle 预算升级到
+    reasoning_idle（深度思考 burst 间隙属正常，需比 content idle 更宽容）。reasoning_idle
+    为 None 时退回与 first_chunk_timeout 同级（向后兼容旧调用）。
 
-    超时仅写 result 元数据（errored/timed_out/phase/seconds）后 return——通知帧由调用方
-    （router.iter_chat_chunks 初始轮 / continuation 重发轮）据 result.timed_out 构造。
+    超时仅写 result 元数据（errored/timed_out/phase/seconds）后 return——收尾策略由调用方
+    （stream_turn_with_retry：重试 / 硬错误）据 result.timed_out 决定。
     并发骨架与清理委托给 consume_with_heartbeat。
     """
-    idle_ref, reasoning_idle = _make_reasoning_aware_idle(idle_timeout, first_chunk_timeout)
+    reasoning_idle_val = (
+        max(idle_timeout, reasoning_idle) if reasoning_idle is not None
+        else compute_reasoning_idle(idle_timeout, first_chunk_timeout)
+    )
+    idle_ref = [idle_timeout]
     gen = consume_with_heartbeat(
         chunk_iter, idle_timeout=idle_ref, first_chunk_timeout=first_chunk_timeout,
         heartbeat_seconds=heartbeat_seconds, log_label="stream_one_turn",
@@ -351,11 +357,11 @@ async def stream_one_turn(
                 yield chunk
                 return
             # reasoning_content 自适应：首次看到深度思考 token 时升级 idle 预算
-            if _has_reasoning_content(chunk) and idle_ref[0] < reasoning_idle:
-                idle_ref[0] = reasoning_idle
+            if _has_reasoning_content(chunk) and idle_ref[0] < reasoning_idle_val:
+                idle_ref[0] = reasoning_idle_val
                 logger.debug(
                     "stream_one_turn reasoning seen, idle %.0f→%.0f",
-                    idle_timeout, reasoning_idle,
+                    idle_timeout, reasoning_idle_val,
                 )
             _accumulate_turn(chunk, result, tool_name)
             fwd = _client_facing_chunk(chunk)
