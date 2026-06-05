@@ -31,6 +31,9 @@ logs/
 # === 训练数据（大文件，可重建） ===
 datasets/
 
+# === superpowers 流程产出（本地 spec/plan，不上传） ===
+docs/superpowers/
+
 # === OS 元数据 ===
 .DS_Store
 Thumbs.db
