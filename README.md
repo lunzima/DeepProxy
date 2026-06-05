@@ -12,11 +12,13 @@
 客户端 (OpenAI SDK / Anthropic SDK) → DeepProxy (:8000 / :8001)
   ├─ [兼容层] 参数过滤 / 老模型别名 / reasoning / 错误映射 / Anthropic↔OpenAI 翻译
   ├─ [模型层] 三生态 /v1/models（OpenAI/OpenRouter/Anthropic 同条目共存：定价 / 上下文长度 / display_name / 仿冒别名）
-  ├─ [升格层] Flash→Pro 选择路由器（BERT 二分类 + 启发式快速路径）
+  ├─ [升格层] Flash→Pro 选择路由器（BERT 二分类 + 启发式快速路径，per-provider 阈值 + per-port 动态阈值闭环）
   ├─ [优化层] 内建 skills（A/B/C/D 四组，0 额外 LLM 调用）
   │            + LLM 压缩（首次调一次，结果磁盘缓存复用）
-  │            + 动态短段注入（场景化 PUA-substance 提示词）
-  └─ [路由层] LiteLLM → DeepSeek API (api.deepseek.com)
+  │            + 动态短段注入（场景化中文短段提示词）
+  ├─ [协作层] Cross-Consult 虚拟工具（可选）：临时调用异家族 provider 的 pro 模型取第二视角
+  └─ [路由层] LiteLLM ──┬──→ DeepSeek API (api.deepseek.com)        # :8000 coding/precise
+                        └──→ MiMo API (token-plan-cn.xiaomimimo.com) # :8001 writing/creative
 ```
 
 ## 解决的问题
@@ -28,10 +30,12 @@
 | **Reasoning 处理** | 保留 `reasoning_content`，多轮缓存自愈；模型剥离时从原始对象兜底恢复 |
 | **错误映射** | 将 DeepSeek/LiteLLM 错误转换为标准 OpenAI 格式；429/5xx 指数退避重试 |
 | **提示词优化** | 内建 15+ 廉价 skills（通用风格 / 反幻觉 / 上下文 / 消息转换），全 in-process，0 额外 LLM 调用 |
-| **Flash→Pro 升格** | 四层路由器自动评估请求复杂度，高复杂度请求升格到 Pro（BERT 二分类 + 启发式快速路径） |
-| **Anthropic 兼容** | 将 Anthropic Messages API 请求转换为 OpenAI 格式路由到 DeepSeek，支持流式和非流式 |
+| **Flash→Pro 升格** | 四层路由器自动评估请求复杂度，高复杂度请求升格到 Pro（BERT 二分类 + 启发式快速路径，per-provider 阈值 + per-port 动态阈值闭环） |
+| **多 provider 路由** | 每个端口绑定一个 provider（coding→DeepSeek，writing→MiMo）；writing 端口可选配加权 `model_pool` 逐请求跨家族随机选模型 |
+| **Cross-Consult** | 可选虚拟工具，让 agent 临时调用异家族 provider 的 pro 模型获取第二视角；另含 user 标签触发的整轮 provider 重定向 |
+| **Anthropic 兼容** | 将 Anthropic Messages API 请求转换为 OpenAI 格式路由到上游，支持流式和非流式 |
 | **模型列表** | 三生态 `/v1/models`：单条目同时含 OpenAI / OpenRouter（定价/上下文）/ Anthropic（display_name + 社区扩展 max_input_tokens/max_tokens）字段，响应顶层带 Anthropic 分页（first_id/last_id/has_more）。故意不输出 `capabilities`（避免谎报代理未实现的 context-management beta） |
-| **克隆模型** | 将 pro/opus/codex 等仿冒模型别名映射到对应的 DeepSeek 实际模型 |
+| **克隆模型** | 将 pro/opus/codex 等仿冒模型别名映射到对应的上游实际模型 |
 
 ## 快速开始
 
@@ -104,24 +108,24 @@ curl http://localhost:8000/health
 
 ## 配置说明
 
-复制配置模板并编辑：
-
-```bash
-cp config.example.yaml config.yaml
-# 编辑 config.yaml，设置 deepseek.api_key
-```
-
-完整配置项见 [`config.example.yaml`](config.example.yaml)。关键结构：
+完整配置项见 [`config.example.yaml`](config.example.yaml)（复制为 `config.yaml` 并填入 API key）；老（v0.1.x）格式 → 新格式迁移见 [`docs/config_migration.md`](docs/config_migration.md)。关键结构（providers + ports 新格式）：
 
 ```yaml
-# 双端口绑定不同采样 profile
 host: "0.0.0.0"
-coding_port: 8000          # → precise_sampling
-writing_port: 8001         # → creative_sampling
 
-deepseek:
-  api_key: ""                          # 填入你的 DeepSeek API 密钥
-  api_base: "https://api.deepseek.com"
+# 多 provider 路由：每个 provider 一段
+providers:
+  deepseek:
+    api_base: https://api.deepseek.com
+    api_key: ""                        # 填入你的 DeepSeek API 密钥
+    flash_model: deepseek-v4-flash
+    pro_model: deepseek-v4-pro
+  # mimo: ...                          # 可选第二 provider，见 config.example.yaml
+
+# 端口绑定：每个 port 选一个 provider + 一个采样 profile
+ports:
+  - { port: 8000, provider: deepseek, sampling: precise }   # → precise_sampling
+  - { port: 8001, provider: deepseek, sampling: creative }  # → creative_sampling
 
 optimization:
   enabled: true
@@ -129,22 +133,18 @@ optimization:
   dynamic_baskets: true                # 场景化中文短段注入
   # ... 完整 skills 开关见 config.example.yaml
 
-creative_sampling:
+creative_sampling:                     # RP / 创作 / 通用写作
   temperature_min: 0.90
   temperature_max: 1.20
   top_p_min: 0.90
   top_p_max: 0.97
   # presence_penalty / frequency_penalty 略
 
-precise_sampling:
+precise_sampling:                      # 编程 / 数学 / 逻辑
   temperature_min: 0.25
   temperature_max: 0.45
   top_p_min: 0.95
   top_p_max: 0.95
-  presence_penalty_min: 0.0
-  presence_penalty_max: 0.0
-  frequency_penalty_min: 0.0
-  frequency_penalty_max: 0.0
 ```
 
 ### 环境变量
@@ -159,7 +159,7 @@ precise_sampling:
 | `PROXY_API_KEY` | 代理认证密钥(可选) | - |
 | `OPTIMIZATION_ENABLED` | 启用提示词优化 | `true` |
 | `LOG_LEVEL` | 日志级别 | `info` |
-| `DEEPPROXY_RELOAD` | 热重载模式（仅 coding_port 生效） | `false` |
+| `DEEPPROXY_RELOAD` | 热重载模式（仅首个端口生效，uvicorn 限制） | `false` |
 
 ## API 端点
 
@@ -215,11 +215,15 @@ tools\setup_claude_code_env.bat -Uninstall
 **按通用程度分四组：**
 
 ### A. 通用风格 skills（每请求激活）
-- `avoid_negative_style` — 禁说教套话
+- `avoid_negative_style` — 禁说教套话与情感抚慰套话
 - `assume_good_intent` — 合理意图假设
+- `natural_temperament` — 内在气质 priming
+- `contextual_register` — 句法复杂度匹配内容密度
 - `instruction_priority` — system 最高权威
 - `independent_analysis` — 自主推理（反谄媚）
 - `reason_genuinely` — 真实推理，禁进度/时间幻觉
+- `cot_reset` — 推理出现严重矛盾时允许在思维链中显式重启
+- `tool_call_chinese_cot` — tools 场景中文 CoT 双通路锚定
 - `inject_date` — 注入当前 UTC 日期
 
 ### B. 求证 / 反幻觉 skills（模型自门控）
@@ -237,51 +241,31 @@ tools\setup_claude_code_env.bat -Uninstall
 - `readurls` — 检测 URL 并内联网页正文
 
 ### LLM 压缩器（元功能）
-首次请求时，将所有 skills + 用户 system prompt 合并，调一次 LLM 压缩到最短同义版，按 `sha256(version + model + text)` 持久化到磁盘缓存文件。后续相同配置的请求直接命中缓存，0 上游调用。`inject_date` 使日期混入缓存键，每日自动刷新。
+首次请求时，将所有 skills + 用户 system prompt 合并，调一次 LLM 压缩到最短同义版，按 `sha256(version + model + text)` 持久化到磁盘缓存文件。后续相同配置的请求直接命中缓存，0 上游调用。`inject_date` **不**进压缩缓存键（在压缩之后才追加到 system 末尾），故缓存跨天持久、不每日刷新。
 
 ## 项目结构
 
-``` 
+```
 deep_proxy/
 ├── deep_proxy/
-│   ├── __init__.py              # 包标识（__version__ = "0.1.0"）
-│   ├── main.py                  # FastAPI 应用与端点
-│   ├── server.py                # 启动入口（双端口绑定）
-│   ├── router.py                # 核心路由器（请求/响应生命周期）
-│   ├── config.py                # Pydantic 配置模型
-│   ├── litellm_client.py        # LiteLLM 调用封装（流式/非流式）
-│   ├── models_list.py           # /v1/models 构建器（OpenAI/OpenRouter/Anthropic 三生态字段共存）
-│   ├── deepseek_models.py       # 真实模型列表 + 仿冒别名映射
-│   ├── deepseek_pricing.py      # USD / CNY 定价数据
-│   ├── clone_models.py          # 仿冒模型条目生成
-│   ├── utils.py                 # 共享工具函数（8 个）
-│   ├── compatibility/
-│   │   ├── __init__.py
-│   │   ├── deepseek_fixes.py    # 模型名规范化 / 别名映射 / stream_options 清理
-│   │   ├── reasoning_handler.py # reasoning_content 处理 + 服务端缓存
-│   │   ├── error_mapper.py      # 参数过滤 + 错误码映射
-│   │   └── anthropic_translator.py # Anthropic Messages API ↔ OpenAI 翻译层
-│   └── optimization/
-│       ├── __init__.py          # 编排入口（apply_cheap_optimizations）
-│       ├── compressor.py        # LLM-based system prompt 压缩器
-│       ├── skills_general.py    # 文本常量 + 辅助函数（A/B/C 组 skills）
-│       ├── skills_transform.py  # 消息转换 skills（D 组：RE2/CoT/readurls）
-│       ├── dynamic_baskets.py   # 场景化中文短段注入
-│       ├── silly_priming.py     # 无厘头 expert priming
-│       ├── flash_upgrade.py     # Flash→Pro 升格编排（四层架构）
-│       └── upgrade_router.py    # BertUpgradeRouter（二分类 + 启发式）
-├── router_model/                # 微调后的 BERT 路由器（中文 RoBERTa-small + LoRA）
-├── datasets/                    # 训练/测试数据
-├── tools/                       # 开发工具（训练脚本等）
-├── tests/                       # pytest 套件（197 项测试）
-├── config.yaml                  # 默认配置文件
-├── config.example.yaml          # 配置模板
-├── requirements.txt             # Python 依赖
-├── pytest.ini                   # pytest 配置
+│   ├── main.py / server.py / router.py   # 端点 / 启动 / 核心路由
+│   ├── config.py / providers.py / pool.py # 配置模型 / Provider 绑定 / 加权模型桶
+│   ├── litellm_client.py                  # LiteLLM 调用封装（流式/非流式）
+│   ├── models_list.py + *_models.py + *_pricing.py  # /v1/models 三生态构建器 + 定价
+│   ├── compatibility/                     # 参数过滤 / 别名 / reasoning / Anthropic 翻译 / MiMo 修复
+│   ├── cross_consult/                     # 虚拟工具 + 双家族重定向 + 流式协作
+│   └── optimization/                      # skills / 压缩器 / 动态短段 / flash_upgrade / 动态阈值
+├── router_model/                # 微调后的 BERT 路由器（中文 BERT-small + LoRA）
+├── datasets/                    # 训练 / 测试数据
+├── tools/                       # 开发工具（BERT 训练脚本 + Claude Code 环境配置）
+├── tests/                       # pytest 套件（默认排除 tests/integration）
+├── config.yaml / config.example.yaml      # 默认配置 / 配置模板
 ├── start.bat                    # Windows 启动脚本
-├── QWEN.md                      # 开发上下文指南
-└── CLAUDE.md                    # QWEN.md 的硬链接
+├── QWEN.md / CLAUDE.md          # 开发上下文指南（CLAUDE.md 为符号链接，含完整模块清单）
+└── README.md / LICENSE
 ```
+
+> 完整模块级结构与请求管道说明见 [`CLAUDE.md`](CLAUDE.md)。
 
 ## 开发
 

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**DeepProxy** 是一个单用户 FastAPI 代理服务器，位于 OpenAI-SDK 客户端与 **DeepSeek V4 API** 之间。它暴露 `/v1/chat/completions`、`/v1/models` 和 `/health` 三个端点。上游调用通过 LiteLLM SDK 路由到 DeepSeek 官方 API。
+**DeepProxy** 是一个单用户 FastAPI 代理服务器，位于 OpenAI / Anthropic SDK 客户端与上游 LLM API（**DeepSeek V4** / **MiMo**）之间。它暴露 `/v1/chat/completions`、`/v1/messages`（Anthropic 兼容）、`/v1/models` 和 `/health` 四个端点。上游调用通过 LiteLLM SDK 路由到对应 provider。
 
 ### 核心技术栈
 
@@ -86,9 +86,13 @@ DEEPSEEK_API_KEY=sk-... python -m pytest tests/integration
 关键配置项：
 
 ```yaml
-# 双端口绑定
-coding_port: 8000     # → precise_sampling
-writing_port: 8001    # → creative_sampling
+# 多 provider 路由 + 端口绑定（新格式；老 coding_port/writing_port 仍由 normalize_legacy_config 兼容）
+providers:
+  deepseek: { api_base: https://api.deepseek.com, flash_model: deepseek-v4-flash, pro_model: deepseek-v4-pro }
+  mimo:     { api_base: https://token-plan-cn.xiaomimimo.com/v1, flash_model: mimo-v2.5, pro_model: mimo-v2.5-pro }
+ports:
+  - { port: 8000, provider: deepseek, sampling: precise }   # → precise_sampling
+  - { port: 8001, provider: mimo,     sampling: creative }  # → creative_sampling
 
 # 优化引擎（默认启用，全 in-process，0 额外 LLM 调用）
 optimization:
@@ -138,6 +142,7 @@ D:\deepproxy\
 │   ├── mimo_models.py         # MiMo 真实模型列表（self-contained）
 │   ├── mimo_pricing.py        # MiMo USD/CNY 定价表（self-contained）
 │   ├── providers.py           # Provider / PortBinding pydantic 模型
+│   ├── pool.py                # writing_port 加权模型桶（逐请求跨家族随机选模型）
 │   ├── utils.py               # 共享工具函数（8 个）
 │   ├── compatibility/
 │   │   ├── __init__.py
@@ -152,7 +157,13 @@ D:\deepproxy\
 │   │   ├── config.py            # CrossConsultConfig pydantic
 │   │   ├── schema.py            # 工具 JSON schema + system prompt 增量
 │   │   ├── executor.py          # 单次目标 provider 调用
-│   │   └── interceptor.py       # 请求注入 + 响应拦截/重发循环
+│   │   ├── interceptor.py       # 请求注入 + 响应拦截/重发循环
+│   │   ├── awareness.py         # 双家族状态披露注入（§12.11）
+│   │   ├── redirect.py          # user 标签触发的整轮 provider 重定向
+│   │   ├── redirect_tracker.py  # 重定向窗口轮数追踪
+│   │   ├── streaming.py         # cross_consult 流式拦截/心跳
+│   │   ├── client_stream.py     # 对客户端真流式透传
+│   │   └── reasoning_idle.py    # 推理阶段 idle 超时守护
 │   └── optimization/
 │       ├── __init__.py            # 编排入口（apply_cheap_optimizations）
 │       ├── compressor.py          # LLM-based system prompt 压缩器
@@ -162,6 +173,8 @@ D:\deepproxy\
 │       ├── silly_priming.py       # 无厘头 expert priming
 │       ├── flash_upgrade.py       # Flash→Pro 升格编排（四层架构）
 │       ├── upgrade_router.py      # BertUpgradeRouter（二分类 + 启发式）
+│       ├── upgrade_decision.py    # Flash→Pro 升格决策引擎（5 步策略，从 router 抽出）
+│       ├── dynamic_threshold.py   # Per-port 动态阈值控制器（闭环反馈）
 │       ├── think_steering.py      # V4 <think> 角色沉浸引导（首/末 user 双注入）
 │       ├── tool_call_chinese_cot.py  # tools 场景中文 CoT 双通路锚定
 │       └── strip_telemetry.py     # 客户端 telemetry header 行剥离（共享正则供 compressor / router 复用）
@@ -208,7 +221,7 @@ D:\deepproxy\
 ├── pytest.ini                 # pytest 配置
 ├── start.bat                  # Windows 启动脚本
 ├── QWEN.md                    # This file
-├── CLAUDE.md                  # QWEN.md 的硬链接
+├── CLAUDE.md                  # QWEN.md 的符号链接
 ├── README.md
 └── LICENSE
 ```
