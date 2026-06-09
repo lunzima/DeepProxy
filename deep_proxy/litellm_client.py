@@ -87,6 +87,15 @@ def _is_retryable_litellm(exc: Exception) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _count_assistant_missing_reasoning(messages: List[Dict[str, Any]]) -> int:
+    """统计缺非空 reasoning_content 的 assistant 消息条数（安全网补齐前后对比用）。"""
+    return sum(
+        1 for m in messages
+        if isinstance(m, dict) and m.get("role") == "assistant"
+        and not m.get("reasoning_content")
+    )
+
+
 def _ensure_string_content(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """把消息中的数组 content 展平为纯字符串。
 
@@ -186,24 +195,16 @@ def _assemble_litellm_body(
     # provider 兜底补齐（thinking=disabled 时 ensure_* 自身跳过；已有 reasoning_content 的消息被
     # 保留，不覆盖 prepare_request/缓存回填的真实思考）。
     if provider is not None and provider.has_reasoning_content:
-        _missing_before = sum(
-            1 for m in call_body["messages"]
-            if isinstance(m, dict) and m.get("role") == "assistant"
-            and not m.get("reasoning_content")
-        )
+        missing_before = _count_assistant_missing_reasoning(call_body["messages"])
         ensure_reasoning_content_persistence(call_body["messages"], call_body)
-        if _missing_before:
-            _still = sum(
-                1 for m in call_body["messages"]
-                if isinstance(m, dict) and m.get("role") == "assistant"
-                and not m.get("reasoning_content")
-            )
+        if missing_before:
+            still = _count_assistant_missing_reasoning(call_body["messages"])
             # INFO 级、provider 标注：装配期补齐了几条历史 assistant 的 reasoning_content。
             # 这是定位「服务进程是否真在跑当前代码」的确证信号——若上游仍 400 且本行从未
             # 出现，说明跑的是旧进程/旧代码（见 stale-process 排查）。
             logger.info(
                 "reasoning safety-net[%s]: 补齐 %d/%d 条历史 assistant reasoning_content（剩余未补 %d）",
-                provider.name, _missing_before - _still, _missing_before, _still,
+                provider.name, missing_before - still, missing_before, still,
             )
 
     if provider is not None:
