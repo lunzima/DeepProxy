@@ -652,7 +652,6 @@ class DeepProxyRouter:
             initial_tool_calls=turn.accumulated_tool_calls,
             body=body, source_provider=provider, config=self.config,
             cc_config=cc, accumulator=accumulator, initial_content=turn.content,
-            initial_reasoning=turn.reasoning_content,
         ):
             yield frame
 
