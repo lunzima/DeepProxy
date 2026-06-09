@@ -40,6 +40,7 @@ from .interceptor import (
     drop_cc_tool_calls,
     resolve_consult_tool_call,
     build_initial_response_from_stream_tool_calls,
+    heal_reasoning_for_resend,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,10 @@ async def with_heartbeat(
 class TurnResult:
     accumulated_tool_calls: list[dict] = field(default_factory=list)
     content: str = ""            # 累加的 assistant 文本，供重发轮重建消息历史
+    # 累加的 reasoning_content（深度思考）：cc 重发轮把携带 cc tool_call 的 assistant
+    # 消息写回历史时须随附——DeepSeek thinking 模式要求每条历史 assistant 回传非空
+    # reasoning_content，否则重发 400。
+    reasoning_content: str = ""
     had_cc_call: bool = False
     finish_reason: str | None = None
     errored: bool = False
@@ -128,6 +133,8 @@ def _accumulate_turn(chunk: dict, result: TurnResult, tool_name: str) -> None:
         delta = ch.get("delta") or {}
         if isinstance(delta.get("content"), str):
             result.content += delta["content"]
+        if isinstance(delta.get("reasoning_content"), str):
+            result.reasoning_content += delta["reasoning_content"]
         tcs = delta.get("tool_calls")
         if isinstance(tcs, list) and tcs:
             result.accumulated_tool_calls = merge_tool_call_deltas(
@@ -467,6 +474,7 @@ async def stream_cross_consult_continuation(
     cc_config: CrossConsultConfig,
     accumulator: StreamingReasoningAccumulator,
     initial_content: str = "",
+    initial_reasoning: str = "",
 ) -> AsyncGenerator[Any, None]:
     """execute_cross_consult_loop 的流式变体：执行 consult（间隙发心跳）+ 重发
     （逐 chunk 透传）+ 跨轮循环。yield 客户端帧 / 心跳帧 / error 帧。
@@ -475,6 +483,9 @@ async def stream_cross_consult_continuation(
     initial_content：初始轮已累加的 assistant 文本（前导文本）。须随首条 assistant
         消息一并写入对话历史——否则模型在 tool_call 前说的前导文本会从重发上下文
         丢失，与非流式 execute_cross_consult_loop（直接 append 完整 message）行为分叉。
+    initial_reasoning：初始轮已累加的 reasoning_content（深度思考），随首条 assistant
+        消息写回以保留真实思考；剩余缺口在重发前由 heal_reasoning_for_resend 统一自愈
+        （见其 docstring）。
 
     终轮帧契约：除硬错误 / 真实 error 退出（已发 error frame）外，本生成器在返回前总会
     yield 一个带 finish_reason 的终轮 choice 帧（终轮判定 / 无 cc 调用 / 硬轮次上限三处统一）。
@@ -493,6 +504,7 @@ async def stream_cross_consult_continuation(
 
     turn_tool_calls = initial_tool_calls
     turn_content = initial_content
+    turn_reasoning = initial_reasoning
     call_count = 0
     max_turns = cc_config.max_calls_per_request * 2 + 1
 
@@ -505,11 +517,16 @@ async def stream_cross_consult_continuation(
 
         # 追加 assistant 消息到历史——**只保留 cc tool_calls**（同轮可能并存真实工具调用，
         # 代理无法为其补 tool_result，全量保留会让 resend 出现悬空 tool_call_id → 上游 400）。
-        body["messages"].append({
+        assistant_msg: dict[str, Any] = {
             "role": "assistant",
             "content": turn_content or None,
             "tool_calls": cc_calls,
-        })
+        }
+        # 真实思考优先随附（与非流式 aggregate_stream_to_response 携带 reasoning_content
+        # 对齐）；剩余缺口在重发前由 heal_reasoning_for_resend 统一自愈。
+        if turn_reasoning:
+            assistant_msg["reasoning_content"] = turn_reasoning
+        body["messages"].append(assistant_msg)
 
         for tc in cc_calls:
             tool_text = None
@@ -531,6 +548,8 @@ async def stream_cross_consult_continuation(
                 "tool_call_id": tc.get("id"),
                 "content": tool_text,
             })
+
+        heal_reasoning_for_resend(body, source_provider)
 
         # 重发：流式逐 chunk 透传 + pre-content 重试（自然窗口、不钳制）；复用同一 accumulator。
         snap = accumulator.snapshot()
@@ -560,6 +579,7 @@ async def stream_cross_consult_continuation(
             return
         turn_tool_calls = turn.accumulated_tool_calls
         turn_content = turn.content
+        turn_reasoning = turn.reasoning_content
         # 终轮（无 cc 调用）：把本轮 finish_reason / 非 cc tool_calls 作为终结帧透传
         if not turn.had_cc_call:
             yield make_terminal_frame(turn.finish_reason, turn_tool_calls)
