@@ -347,10 +347,12 @@ _DUMMY_REASONING = (
 
 
 def _inject_dummy_for_missing(messages: List[Dict[str, Any]]) -> int:
-    """对仍缺 reasoning_content 的 assistant 消息原地填占位字符串。
+    """对仍缺 reasoning_content 的**每条** assistant 消息原地填占位字符串。返回填充条数。
 
-    跳过完全空的 assistant 占位（无 content / tool_calls / function_call）。
-    返回填充的条数。
+    不跳过"空" assistant（content=None/""、无 tool_calls/function_call）——DeepSeek
+    thinking 模式对**所有**历史 assistant 校验 reasoning_content，含 Anthropic 端
+    thinking-only 轮翻译成的 {role:assistant, content:None}（thinking 被客户端剥离时
+    无 reasoning）。早期"跳过空占位"会漏补这类消息，触发 400 "must be passed back"。
     """
     n = 0
     for msg in messages:
@@ -363,8 +365,6 @@ def _inject_dummy_for_missing(messages: List[Dict[str, Any]]) -> int:
         if isinstance(alias, str) and alias:
             msg["reasoning_content"] = alias
             n += 1
-            continue
-        if not any(msg.get(k) for k in ("content", "tool_calls", "function_call")):
             continue
         msg["reasoning_content"] = _DUMMY_REASONING
         n += 1

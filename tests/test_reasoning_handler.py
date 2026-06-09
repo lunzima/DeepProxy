@@ -251,13 +251,28 @@ class TestEnsurePersistence:
         # reasoning 字段被提升为 reasoning_content
         assert msgs[0]["reasoning_content"] == "客户端保留的兼容字段"
 
-    def test_empty_assistant_placeholder_not_filled(self):
-        """完全空的 assistant 占位（无 content/tool_calls/function_call）跳过 dummy 注入。"""
+    def test_empty_assistant_placeholder_also_filled(self):
+        """空 assistant（无 content/tool_calls/function_call）同样必须补 reasoning_content。
+
+        回归：Anthropic 端 thinking-only 轮经翻译成 {role:assistant, content:None}（thinking
+        被客户端剥离时无 reasoning），DeepSeek thinking 模式仍校验 reasoning_content，
+        漏补即 400 'must be passed back'（生产日志 reasoning safety-net 补齐 0/3 即此）。"""
         msgs = [{"role": "assistant"}]
         body = {"thinking": {"type": "enabled"}}
         out = ensure_reasoning_content_persistence(msgs, body, cache=None)
         assert out["thinking"] == {"type": "enabled"}
-        assert "reasoning_content" not in msgs[0]
+        assert msgs[0]["reasoning_content"]
+
+    def test_content_none_assistant_filled(self):
+        """content=None 且无 tool_calls 的历史 assistant（翻译产物）必须补 reasoning_content。"""
+        msgs = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": None},
+            {"role": "user", "content": "again"},
+        ]
+        body = {"thinking": {"type": "enabled"}}
+        ensure_reasoning_content_persistence(msgs, body, cache=None)
+        assert msgs[1]["reasoning_content"]
 
     def test_thinking_disabled_no_op(self):
         msgs = [{"role": "assistant", "tool_calls": [{"id": "1"}], "content": "x"}]
