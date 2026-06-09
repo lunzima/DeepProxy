@@ -124,10 +124,42 @@ def _normalize_tool_calls(tool_calls: Any) -> Optional[List[Dict[str, Any]]]:
     return normalized
 
 
+def _strip_injected_markers(text: str) -> str:
+    """移除代理逐轮注入、位置可变的 user-content marker，稳定缓存 prefix 键。
+
+    tool_call_chinese_cot / think_steering 把 marker 追加到"首条+末条 user"，而"末条"
+    逐轮轮转：历史 user 在生成轮（末条）被打 marker、在后续回填轮（已非末条）无 marker，
+    导致 prefix 失配 → 缓存对最近几条 assistant 永远 miss → 退化成 dummy。键计算时剥离
+    这些 marker，使 prefix 等价于客户端原文、跨轮稳定。
+
+    懒导入 marker 常量：compatibility→optimization 的载入期循环（optimization/__init__
+    反向依赖 compatibility.deepseek_fixes）只能在调用时打破。
+    """
+    if not text:
+        return text
+    try:
+        from ..optimization.tool_call_chinese_cot import TOOL_CALL_CN_COT_USER_MARKER
+        text = text.replace(TOOL_CALL_CN_COT_USER_MARKER, "")
+    except Exception:
+        pass
+    try:
+        from ..optimization.think_steering import INNER_OS_MARKER
+        text = text.replace(INNER_OS_MARKER, "")
+    except Exception:
+        pass
+    return text
+
+
 def _normalize_content(content: Any) -> Any:
-    """content 可能是字符串、None 或 OpenAI 多模态数组；做稳定序列化。"""
-    if content is None or isinstance(content, str):
+    """content 可能是字符串、None 或 OpenAI 多模态数组；做稳定序列化。
+
+    字符串 content 先剥离代理注入的轮转 marker（见 _strip_injected_markers），保证
+    同一历史消息跨轮产出同一缓存键。
+    """
+    if content is None:
         return content
+    if isinstance(content, str):
+        return _strip_injected_markers(content)
     return json.dumps(content, sort_keys=True, ensure_ascii=False)
 
 

@@ -282,3 +282,57 @@ class TestTelemetryStripping:
         p = await router.prepare_request(body)
         # 不抛、不丢失原文（注：其它 skills 可能在 system 头/尾追加，但保留 'Plain system.'）
         assert "Plain system." in p["messages"][0]["content"]
+
+
+class TestReasoningCacheAcrossTurns:
+    """跨轮 ReasoningCache 命中：prepare_request 的 reasoning 自愈键必须与流式 flush 的键一致。
+
+    回归两处曾让缓存对历史 assistant 永久 miss、退化 dummy 的源头：
+    1. cross_consult system 增量注入须在 reasoning 自愈**之前**（否则 flush 含 cc 增量、
+       backfill 不含 → system prefix 失配）。
+    2. tool_call_chinese_cot 轮转的"末条 user" marker 须在缓存键里被剥离。
+    """
+
+    def _cc_dual(self, cfg_dual):
+        from deep_proxy.cross_consult.config import CrossConsultConfig
+        cfg_dual.cross_consult = CrossConsultConfig(
+            enabled=True, pairs={"deepseek": "mimo", "mimo": "deepseek"},
+        )
+        return cfg_dual
+
+    async def test_backfill_hits_real_reasoning_with_cross_consult(
+        self, cfg_dual, provider_deepseek,
+    ):
+        from deep_proxy.router import DeepProxyRouter
+        from deep_proxy.compatibility.reasoning_handler import StreamingReasoningAccumulator
+
+        router = DeepProxyRouter(self._cc_dual(cfg_dual))
+        sampling = router.config.creative_sampling
+        tools = [{"type": "function",
+                  "function": {"name": "Glob", "parameters": {"type": "object"}}}]
+
+        # Turn N: [sys, u1] → 生成 A1（reasoning="REAL1"），模拟流式 flush
+        body_n = {"model": "deepseek-v4-pro", "tools": [dict(t) for t in tools],
+                  "stream": True,
+                  "messages": [{"role": "system", "content": "You are a coding agent."},
+                               {"role": "user", "content": "find the config files"}]}
+        prepared_n = await router.prepare_request(
+            body_n, sampling_profile=sampling, provider=provider_deepseek, port=8000)
+        acc = StreamingReasoningAccumulator(request_messages=list(prepared_n["messages"]))
+        acc.consume({"choices": [{"index": 0, "delta": {
+            "content": "A1 answer", "reasoning_content": "REAL1"}}]})
+        acc.flush_to_cache(router._reasoning_cache)
+
+        # Turn N+1: 客户端回传 A1（无 reasoning_content）+ 追加 u2 → backfill 应命中真实推理
+        body_np1 = {"model": "deepseek-v4-pro", "tools": [dict(t) for t in tools],
+                    "stream": True,
+                    "messages": [{"role": "system", "content": "You are a coding agent."},
+                                 {"role": "user", "content": "find the config files"},
+                                 {"role": "assistant", "content": "A1 answer"},
+                                 {"role": "user", "content": "now read them"}]}
+        prepared_np1 = await router.prepare_request(
+            body_np1, sampling_profile=sampling, provider=provider_deepseek, port=8000)
+        a1 = next(m for m in prepared_np1["messages"]
+                  if m.get("role") == "assistant" and m.get("content") == "A1 answer")
+        assert a1.get("reasoning_content") == "REAL1", \
+            "历史 assistant 应回填真实推理（缓存命中），而非 dummy 兜底"

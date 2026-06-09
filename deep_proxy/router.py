@@ -383,18 +383,11 @@ class DeepProxyRouter:
                 if injected:
                     logger.debug("已注入 V4 角色沉浸 marker")
 
-        # 8. V4 多轮 reasoning 自愈：在全部消息修改之后执行，确保
-        #    缓存键与 remember_response 存储时的对话前缀一致。
-        #    provider 给定时走 provider.has_reasoning_content，否则保持老 V4 判定。
-        has_rc = provider.has_reasoning_content if provider is not None else is_v4_model(model)
-        if has_rc:
-            messages = body.get("messages", [])
-            if messages:
-                body = ensure_reasoning_content_persistence(
-                    messages, body, cache=self._reasoning_cache,
-                )
-
-        # 9. Cross-Consult 工具注入（在所有 skills 之后，避免改变 has_tools 影响其它步骤）
+        # 8. Cross-Consult 工具注入（在所有 skills 之后，避免改变 has_tools 影响其它步骤）。
+        #    **必须在 reasoning 自愈之前**：自愈的 ReasoningCache 键含 system prefix，而
+        #    flush（iter_chat_chunks 在 prepare_request 全部完成后捕获 request_messages）看到
+        #    的是 cc 注入**后**的 system；若自愈/backfill 在 cc 注入前算键，则 flush 与 backfill
+        #    的 system 不一致（差 cc 增量）→ 缓存对历史 assistant 永远 miss → 退化 dummy。
         if (
             self.config.cross_consult.enabled
             and provider is not None
@@ -404,6 +397,17 @@ class DeepProxyRouter:
                 source_provider_name=provider.name,
                 cc_config=self.config.cross_consult,
             )
+
+        # 9. V4 多轮 reasoning 自愈：在全部消息修改（含 cc 注入）之后执行，确保缓存键 prefix
+        #    与 remember_response / 流式 flush 存储时的对话前缀（同样含 cc 注入）一致。
+        #    provider 给定时走 provider.has_reasoning_content，否则保持老 V4 判定。
+        has_rc = provider.has_reasoning_content if provider is not None else is_v4_model(model)
+        if has_rc:
+            messages = body.get("messages", [])
+            if messages:
+                body = ensure_reasoning_content_persistence(
+                    messages, body, cache=self._reasoning_cache,
+                )
 
         logger.debug(
             "准备请求: model=%s, stream=%s, params_keys=%s",

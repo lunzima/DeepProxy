@@ -113,6 +113,32 @@ class TestReasoningCache:
         assert c.lookup([], "x", [{"function": {"name": "f", "arguments": "2"}}],
                         fingerprint=self._FP_EMPTY) is None
 
+    def test_backfill_hits_despite_rotating_user_marker(self):
+        """回归：cot/inner_os marker 注入到逐轮轮转的"末条 user"不得破坏缓存键。
+
+        生成轮该 user 是末条→带 marker；回填轮它已非末条→无 marker。键须剥离 marker、
+        使 prefix 等价客户端原文，否则最近几条 assistant 永远 miss → dummy 兜底
+        （生产 reasoning safety-net 补齐 0/N 即此连锁）。"""
+        from deep_proxy.optimization.tool_call_chinese_cot import (
+            TOOL_CALL_CN_COT_USER_MARKER as MK,
+        )
+        c = ReasoningCache()
+        sys = {"role": "system", "content": "S"}
+        u1 = {"role": "user", "content": "Q1"}
+        a1 = {"role": "assistant", "content": "A1", "reasoning_content": "r1"}
+        t1 = {"role": "tool", "tool_call_id": "1", "content": "tool out"}
+        u2 = {"role": "user", "content": "Q2"}
+        # 生成轮：u2 末条 → 带 marker；存 A2 的 reasoning
+        flush_prefix = [sys, u1, a1, t1, {**u2, "content": u2["content"] + MK}]
+        c.remember(flush_prefix, "A2", None, "REAL_A2",
+                   fingerprint=conversation_fingerprint(flush_prefix))
+        # 回填轮：u2 已非末条 → 无 marker
+        backfill_prefix = [sys, u1, a1, t1, u2]
+        full = [*backfill_prefix, {"role": "assistant", "content": "A2"},
+                {"role": "user", "content": "Q3"}]
+        assert c.lookup(backfill_prefix, "A2", None,
+                        fingerprint=conversation_fingerprint(full)) == "REAL_A2"
+
     def test_prefix_role_distinguishes(self):
         c = ReasoningCache()
         prefix = [{"role": "user", "content": "Q"}]
