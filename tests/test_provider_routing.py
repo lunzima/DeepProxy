@@ -277,6 +277,64 @@ def test_assemble_litellm_body_no_extra_body_for_deepseek():
     assert "extra_body" not in call_body
 
 
+def _missing_rc_body(model):
+    return {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "a", "type": "function",
+                             "function": {"name": "Glob", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "a", "content": "r"},
+        ],
+        "thinking": {"type": "enabled"},
+    }
+
+
+def test_assemble_litellm_body_heals_missing_reasoning_content_deepseek():
+    """安全网：任何绕过 prepare_request 的上游调用（cc 重发 / aggregate / 直调）经
+    _assemble_litellm_body 时，has_reasoning_content provider 的 thinking 模式历史
+    assistant 必须被补上非空 reasoning_content——否则 DeepSeek 400。"""
+    from deep_proxy.config import ProxyConfig, normalize_legacy_config
+    from deep_proxy.providers import Provider
+    from deep_proxy.litellm_client import _assemble_litellm_body
+
+    cfg = ProxyConfig.model_validate(normalize_legacy_config({
+        "deepseek": {"api_key": "sk", "api_base": "https://api.deepseek.com"},
+    }))
+    ds = Provider(
+        name="deepseek", api_base="https://api.deepseek.com", api_key="sk-x",
+        litellm_prefix="deepseek/", flash_model="deepseek-v4-flash",
+        pro_model="deepseek-v4-pro",
+    )
+    call_body = _assemble_litellm_body(_missing_rc_body("deepseek-v4-pro"), cfg, provider=ds)
+    asst = [m for m in call_body["messages"] if m.get("role") == "assistant"]
+    assert asst and all(m.get("reasoning_content") for m in asst), \
+        "thinking 模式历史 assistant 须在装配期被补上 reasoning_content"
+
+
+def test_assemble_litellm_body_skips_heal_when_thinking_disabled():
+    """显式 thinking=disabled 时不校验 reasoning_content，装配期不应注入。"""
+    from deep_proxy.config import ProxyConfig, normalize_legacy_config
+    from deep_proxy.providers import Provider
+    from deep_proxy.litellm_client import _assemble_litellm_body
+
+    cfg = ProxyConfig.model_validate(normalize_legacy_config({
+        "deepseek": {"api_key": "sk", "api_base": "https://api.deepseek.com"},
+    }))
+    ds = Provider(
+        name="deepseek", api_base="https://api.deepseek.com", api_key="sk-x",
+        litellm_prefix="deepseek/", flash_model="deepseek-v4-flash",
+        pro_model="deepseek-v4-pro",
+    )
+    body = _missing_rc_body("deepseek-v4-pro")
+    body["thinking"] = {"type": "disabled"}
+    call_body = _assemble_litellm_body(body, cfg, provider=ds)
+    asst = [m for m in call_body["messages"] if m.get("role") == "assistant"]
+    assert asst and not any(m.get("reasoning_content") for m in asst)
+
+
 async def test_prepare_request_force_mimo_model_when_client_sends_alien_name(
     router_dual, provider_mimo,
 ):

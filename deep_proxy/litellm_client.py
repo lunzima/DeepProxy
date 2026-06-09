@@ -26,6 +26,7 @@ from litellm.exceptions import RateLimitError, ServiceUnavailableError, APIError
 
 from .compatibility.reasoning_handler import (
     StreamingReasoningAccumulator,
+    ensure_reasoning_content_persistence,
     process_streaming_delta,
     recover_reasoning_content,
 )
@@ -177,6 +178,15 @@ def _assemble_litellm_body(
     # async iterator 而非 dict。
     call_body["stream"] = stream
     call_body["messages"] = _ensure_string_content(call_body.get("messages", []))
+
+    # reasoning_content 自愈安全网（最后防线）：所有上游调用——初始 / cross_consult 重发 /
+    # executor consult / aggregate / 任何直调——都经此装配函数。prepare_request 的 step 8
+    # 只覆盖主请求；绕过它的路径（cc 重发循环、stream_aggregated_call 等）会把缺 reasoning_content
+    # 的历史 assistant 直接送上游，触发 DeepSeek thinking 模式 400。这里对 has_reasoning_content
+    # provider 兜底补齐（thinking=disabled 时 ensure_* 自身跳过；已有 reasoning_content 的消息被
+    # 保留，不覆盖 prepare_request/缓存回填的真实思考）。
+    if provider is not None and provider.has_reasoning_content:
+        ensure_reasoning_content_persistence(call_body["messages"], call_body)
 
     if provider is not None:
         call_body["model"] = _to_litellm_model(

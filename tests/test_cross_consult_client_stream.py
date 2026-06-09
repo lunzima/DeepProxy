@@ -478,51 +478,12 @@ def _cc_continuation_cfg():
     return cfg
 
 
-async def test_continuation_appended_assistant_carries_reasoning_content():
-    """回归：cc 重发轮追加的 assistant 消息（携带 cc tool_call）必须带**非空**
-    reasoning_content。DeepSeek thinking 模式要求每条历史 assistant 回传 reasoning_content，
-    缺失 → 400 'The reasoning_content in the thinking mode must be passed back to the API.'
-
-    重发路径直接 iter_litellm_chunks、绕过 prepare_request/ensure_reasoning_content_persistence，
-    故须在 continuation 内自补（真实思考缺失时用 dummy 兜底）。"""
-    cfg = _cc_continuation_cfg()
-    source = cfg.providers["deepseek"]          # has_reasoning_content=True
-    acc = StreamingReasoningAccumulator(request_messages=[])
-
-    async def resend_iter(config, body, *, _accumulator=None, provider=None):
-        yield {"choices": [{"index": 0, "delta": {"content": "答案"},
-                            "finish_reason": "stop"}]}
-
-    body = {"model": "deepseek-v4-flash",
-            "messages": [{"role": "user", "content": "use cc"}]}
-
-    async def consult_ok(**kw):
-        return "外部视角"
-
-    with patch("deep_proxy.cross_consult.interceptor.execute_consult", new=consult_ok), \
-         patch("deep_proxy.cross_consult.client_stream.iter_litellm_chunks",
-               new=resend_iter):
-        _ = [f async for f in stream_cross_consult_continuation(
-            initial_tool_calls=[_cc_tool_call()],
-            body=body, source_provider=source, config=cfg,
-            cc_config=cfg.cross_consult, accumulator=acc,
-        )]
-
-    from deep_proxy.compatibility.reasoning_handler import _DUMMY_REASONING
-
-    assistant_cc_msgs = [
-        m for m in body["messages"]
-        if m.get("role") == "assistant" and m.get("tool_calls")
-    ]
-    assert assistant_cc_msgs, "应追加携带 cc tool_call 的 assistant 消息"
-    # 兜底走既有 ensure_reasoning_content_persistence 设施（而非内联自造），故为其规范 dummy
-    assert all(m.get("reasoning_content") == _DUMMY_REASONING for m in assistant_cc_msgs), \
-        "缺真实思考时须由 ensure_reasoning_content_persistence 注入规范 dummy"
-
-
 async def test_continuation_preserves_real_reasoning_content():
-    """有真实思考时 continuation 须保留之（而非 dummy），与非流式
-    aggregate_stream_to_response 携带 reasoning_content 的行为对齐。"""
+    """有真实思考时 continuation 须把它随 cc tool_call assistant 消息写回（而非丢弃），
+    与非流式 aggregate_stream_to_response 携带 reasoning_content 的行为对齐。
+
+    缺失真实思考时的 dummy 兜底不在此层——已下移到 _assemble_litellm_body 安全网
+    （见 tests/test_provider_routing.py::test_assemble_litellm_body_heals_missing_reasoning_content_deepseek）。"""
     cfg = _cc_continuation_cfg()
     source = cfg.providers["deepseek"]
     acc = StreamingReasoningAccumulator(request_messages=[])

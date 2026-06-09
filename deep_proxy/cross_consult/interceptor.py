@@ -9,7 +9,6 @@ import json
 import logging
 from typing import Any
 
-from ..compatibility.reasoning_handler import ensure_reasoning_content_persistence
 from ..config import ProxyConfig
 from ..providers import Provider
 from .awareness import build_awareness_prompt
@@ -134,19 +133,6 @@ def build_initial_response_from_stream_tool_calls(
             "finish_reason": "tool_calls",
         }],
     }
-
-
-def heal_reasoning_for_resend(body: dict[str, Any], source_provider: Provider) -> None:
-    """重发前复用主管道的 reasoning 自愈步骤（流式/非流式两条重发循环共用）。
-
-    cc 重发直接走 iter_litellm_chunks / call_litellm、绕过 prepare_request，故须在此
-    重新施加 ensure_reasoning_content_persistence（缓存回填 + dummy 兜底 + thinking=enabled），
-    确保新追加的 assistant（cc tool_call）在 thinking 模式下携带非空 reasoning_content，
-    否则上游 400 "reasoning_content must be passed back"。已携真实思考的消息会被自动跳过。
-    仅当源 provider 暴露 reasoning_content 时生效。
-    """
-    if source_provider.has_reasoning_content:
-        ensure_reasoning_content_persistence(body["messages"], body)
 
 
 def _parse_args(tc: dict) -> dict:
@@ -277,9 +263,7 @@ async def execute_cross_consult_loop(
                 "content": tool_text,
             })
 
-        heal_reasoning_for_resend(body, source_provider)
-
-        # 重发原 provider
+        # 重发原 provider（reasoning_content 自愈由 _assemble_litellm_body 安全网统一兜底）
         response = await call_litellm_fn(config, body, provider=source_provider)
         if process_response_fn is not None:
             response = process_response_fn(response, provider=source_provider)

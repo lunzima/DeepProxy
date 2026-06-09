@@ -40,7 +40,6 @@ from .interceptor import (
     drop_cc_tool_calls,
     resolve_consult_tool_call,
     build_initial_response_from_stream_tool_calls,
-    heal_reasoning_for_resend,
 )
 
 logger = logging.getLogger(__name__)
@@ -484,8 +483,8 @@ async def stream_cross_consult_continuation(
         消息一并写入对话历史——否则模型在 tool_call 前说的前导文本会从重发上下文
         丢失，与非流式 execute_cross_consult_loop（直接 append 完整 message）行为分叉。
     initial_reasoning：初始轮已累加的 reasoning_content（深度思考），随首条 assistant
-        消息写回以保留真实思考；剩余缺口在重发前由 heal_reasoning_for_resend 统一自愈
-        （见其 docstring）。
+        消息写回以保留真实思考；剩余缺口由 _assemble_litellm_body 的 reasoning 安全网
+        在上游装配期统一 dummy 兜底。
 
     终轮帧契约：除硬错误 / 真实 error 退出（已发 error frame）外，本生成器在返回前总会
     yield 一个带 finish_reason 的终轮 choice 帧（终轮判定 / 无 cc 调用 / 硬轮次上限三处统一）。
@@ -523,7 +522,7 @@ async def stream_cross_consult_continuation(
             "tool_calls": cc_calls,
         }
         # 真实思考优先随附（与非流式 aggregate_stream_to_response 携带 reasoning_content
-        # 对齐）；剩余缺口在重发前由 heal_reasoning_for_resend 统一自愈。
+        # 对齐）；缺失时由 _assemble_litellm_body 安全网在装配期 dummy 兜底。
         if turn_reasoning:
             assistant_msg["reasoning_content"] = turn_reasoning
         body["messages"].append(assistant_msg)
@@ -549,9 +548,9 @@ async def stream_cross_consult_continuation(
                 "content": tool_text,
             })
 
-        heal_reasoning_for_resend(body, source_provider)
-
         # 重发：流式逐 chunk 透传 + pre-content 重试（自然窗口、不钳制）；复用同一 accumulator。
+        # reasoning_content 自愈由 _assemble_litellm_body 安全网统一兜底（真实思考已随
+        # turn_reasoning 写入上方 assistant_msg，缺失时由安全网 dummy 补齐）。
         snap = accumulator.snapshot()
         captured: dict[str, TurnResult] = {}
 
