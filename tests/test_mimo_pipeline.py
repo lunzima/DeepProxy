@@ -43,6 +43,8 @@ def test_inject_clamps_unknown_to_high():
 
 import pytest
 
+from deep_proxy.router import DeepProxyRouter
+
 
 async def test_prepare_request_mimo_injects_top_level_reasoning_effort(
     router_dual, provider_mimo,
@@ -78,10 +80,11 @@ async def test_prepare_request_deepseek_keeps_thinking_reasoning_effort(
     assert "reasoning_effort" not in out
 
 
-async def test_prepare_request_mimo_disable_thinking_skips_reasoning_effort(
+async def test_prepare_request_mimo_force_thinking_overrides_disabled(
     router_dual, provider_mimo,
 ):
-    """MiMo + thinking.type=disabled：不注入 reasoning_effort。"""
+    """force_thinking_enabled（默认开）：MiMo 即便客户端传 thinking=disabled 也被强制 enabled，
+    并照常注入顶层 reasoning_effort（has_thinking_param provider 全模式启用 reasoning）。"""
     body = {
         "model": "mimo-v2.5",
         "messages": [{"role": "user", "content": "hello"}],
@@ -89,6 +92,24 @@ async def test_prepare_request_mimo_disable_thinking_skips_reasoning_effort(
     }
     out = await router_dual.prepare_request(
         body, sampling_profile=router_dual.config.creative_sampling, provider=provider_mimo,
+    )
+    assert out["thinking"]["type"] == "enabled"
+    assert out["reasoning_effort"] == "high"
+
+
+async def test_prepare_request_mimo_force_off_respects_disabled(
+    cfg_dual, provider_mimo,
+):
+    """force_thinking_enabled=False：恢复按客户端 thinking 决定——disabled 时不注入 reasoning_effort。"""
+    cfg_dual.force_thinking_enabled = False
+    router = DeepProxyRouter(cfg_dual)
+    body = {
+        "model": "mimo-v2.5",
+        "messages": [{"role": "user", "content": "hello"}],
+        "thinking": {"type": "disabled"},
+    }
+    out = await router.prepare_request(
+        body, sampling_profile=cfg_dual.creative_sampling, provider=provider_mimo,
     )
     assert "reasoning_effort" not in out
 

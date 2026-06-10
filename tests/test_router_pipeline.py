@@ -30,18 +30,18 @@ class TestPrepareRequestChat:
         # thinking 已扩充 reasoning_effort=max
         assert p["thinking"]["reasoning_effort"] == "max"
 
-    async def test_chat_alias_to_v4_flash_thinking_disabled(self, router: DeepProxyRouter):
-        """官方：deepseek-chat 是 deepseek-v4-flash 的非思考模式别名。"""
+    async def test_chat_alias_to_v4_flash_thinking_forced_enabled(self, router: DeepProxyRouter):
+        """deepseek-chat 仍映射到 v4-flash，但 force_thinking_enabled（默认开）把别名隐含的
+        disabled 强制改成 enabled——用户要求全模式启用 reasoning。"""
         body = {
             "model": "deepseek-chat",
             "messages": [{"role": "user", "content": "hi"}],
         }
         p = await router.prepare_request(body)
         assert p["model"] == "deepseek-v4-flash"
-        # 别名隐含 thinking=disabled
-        assert p["thinking"]["type"] == "disabled"
-        # disabled 时不注入 reasoning_effort
-        assert "reasoning_effort" not in p["thinking"]
+        # force_thinking_enabled 覆盖别名 disabled → enabled + reasoning_effort
+        assert p["thinking"]["type"] == "enabled"
+        assert p["thinking"]["reasoning_effort"] == "max"
 
     async def test_v4_default_keeps_api_default_thinking(self, router: DeepProxyRouter):
         """直接用 deepseek-v4-flash 且无 thinking 字段时，代理仅注入 reasoning_effort=max，
@@ -56,16 +56,32 @@ class TestPrepareRequestChat:
         assert p["thinking"].get("type") != "disabled"
         assert p["thinking"]["reasoning_effort"] == "max"
 
-    async def test_v4_explicit_thinking_disabled_respected(self, router: DeepProxyRouter):
+    async def test_v4_explicit_thinking_disabled_overridden_to_enabled(self, router: DeepProxyRouter):
+        """force_thinking_enabled（默认开）：客户端显式 thinking=disabled 也被强制 enabled。
+
+        根因上 DeepSeek 也无法真正 disabled（LiteLLM 丢弃 {type:disabled}），强制 enabled
+        让代理状态与上游一致，并满足用户"全模式启用 reasoning"诉求。"""
         body = {
             "model": "deepseek-v4-pro",
             "thinking": {"type": "disabled"},
             "messages": [{"role": "user", "content": "x"}],
         }
         p = await router.prepare_request(body)
-        assert p["thinking"] == {"type": "disabled"}
-        # disabled 时不强行注入 reasoning_effort
-        assert "reasoning_effort" not in p["thinking"]
+        assert p["thinking"]["type"] == "enabled"
+        assert p["thinking"]["reasoning_effort"] == "max"
+
+    async def test_force_off_respects_alias_and_client_disabled(self, cfg: ProxyConfig):
+        """force_thinking_enabled=False：恢复旧行为——deepseek-chat 别名与客户端显式 disabled
+        都被尊重（机制仍在，仅默认被 force 覆盖）。"""
+        cfg.force_thinking_enabled = False
+        local = DeepProxyRouter(cfg)
+        alias = await local.prepare_request(
+            {"model": "deepseek-chat", "messages": [{"role": "user", "content": "hi"}]})
+        assert alias["thinking"]["type"] == "disabled"
+        explicit = await local.prepare_request(
+            {"model": "deepseek-v4-pro", "thinking": {"type": "disabled"},
+             "messages": [{"role": "user", "content": "x"}]})
+        assert explicit["thinking"] == {"type": "disabled"}
 
     async def test_v4_explicit_thinking_enabled_keeps_user_reasoning_effort(
         self, router: DeepProxyRouter

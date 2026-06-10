@@ -9,6 +9,12 @@ host: "0.0.0.0"
 api_key: null              # 代理认证密钥（可选，留空则不校验）
 log_level: "info"
 
+# 全模式强制启用 reasoning/thinking（默认 true）：覆盖客户端显式 thinking=disabled 与
+# deepseek-chat 别名的 disabled，对 has_thinking_param provider 一律置 enabled。
+# 根因上 DeepSeek 也无法真正 disabled（LiteLLM 丢弃 {type:disabled} → 服务端默认 enabled），
+# 强制 enabled 让代理状态与上游一致。置 false 恢复按别名/客户端决定 thinking。
+force_thinking_enabled: true
+
 # ============================================================
 # 多 provider 路由（必填）
 # ============================================================

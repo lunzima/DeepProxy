@@ -256,6 +256,19 @@ class DeepProxyRouter:
             self._maybe_upgrade(body, provider=provider, controller=self._controller_for_port(port))
             model = body.get("model", "")
 
+        # 0e. 全模式强制 thinking=enabled（force_thinking_enabled，默认开）：覆盖客户端显式
+        #     disabled 与 deepseek-chat 别名的 disabled。须在 step 1（reasoning_effort 注入，
+        #     按 is_thinking_disabled 门控）之前，让被覆盖的请求也注入 reasoning_effort。
+        #     仅对支持 thinking 的 provider（has_thinking_param / 老路径 V4）生效。
+        #     根因：DeepSeek 无法真正 disabled（LiteLLM 丢弃 {type:disabled} → 服务端默认
+        #     enabled），强制 enabled 让代理状态与上游一致。
+        if self.config.force_thinking_enabled:
+            supports_thinking = (
+                provider.has_thinking_param if provider is not None else is_v4_model(model)
+            )
+            if supports_thinking:
+                ensure_thinking_dict(body)["type"] = "enabled"
+
         # 1. 默认 reasoning_effort 注入（仅当未显式 disabled 且未指定）
         #    DeepSeek: thinking.reasoning_effort = "max"（嵌套）
         #    MiMo:     reasoning_effort = "high"（顶层）

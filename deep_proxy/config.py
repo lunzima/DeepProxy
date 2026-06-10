@@ -580,6 +580,16 @@ class ProxyConfig(BaseModel):
     api_key: Optional[str] = Field(default=None, description="代理的 API 密钥验证（可选）")
     log_level: str = Field(default="info", description="日志级别")
 
+    force_thinking_enabled: bool = Field(
+        default=True,
+        description="全模式强制启用 reasoning/thinking：覆盖客户端显式 thinking.type=disabled "
+                    "及 deepseek-chat 别名的 disabled，对支持 thinking 的 provider"
+                    "（has_thinking_param / V4）一律置 enabled。根因上 DeepSeek 也无法真正 "
+                    "disabled（LiteLLM 丢弃 {type:disabled} → 服务端默认 enabled），强制 enabled "
+                    "让代理状态与上游一致、并满足用户'不要禁用'诉求。置 False 恢复按别名/客户端"
+                    "决定 thinking（此时 cot_reflection 等依赖 disabled 的功能才可能触发）。",
+    )
+
     deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
     optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
     flash_upgrade: FlashUpgradeConfig = Field(default_factory=FlashUpgradeConfig)
