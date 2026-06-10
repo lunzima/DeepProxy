@@ -300,17 +300,21 @@ class TestEnsurePersistence:
         ensure_reasoning_content_persistence(msgs, body, cache=None)
         assert msgs[1]["reasoning_content"]
 
-    def test_thinking_disabled_no_op(self):
+    def test_thinking_disabled_still_injects(self):
+        """thinking=disabled 也必须补 reasoning_content。
+
+        回归：LiteLLM deepseek transform 丢弃 {type:disabled}（只透传 enabled），上游
+        收到"无 thinking"→ DeepSeek 默认 enabled → 仍校验 reasoning_content。早期"disabled
+        即跳过"导致漏补 → 400（生产 reasoning safety-net 补齐 0/1 即此）。
+        thinking 字段保留用户原值（disabled 由 LiteLLM 丢弃，不在此强改）。"""
         msgs = [{"role": "assistant", "tool_calls": [{"id": "1"}], "content": "x"}]
         body = {"thinking": {"type": "disabled"}}
-        out = ensure_reasoning_content_persistence(msgs, body, cache=ReasoningCache())
-        assert out["thinking"] == {"type": "disabled"}
-        # disabled 模式下不注入 dummy（DeepSeek 不会校验）
-        assert "reasoning_content" not in msgs[0]
+        ensure_reasoning_content_persistence(msgs, body, cache=ReasoningCache())
+        assert msgs[0]["reasoning_content"]
 
-    def test_thinking_disabled_skips_cache_backfill(self):
-        """disabled 时跳过**整个**流程，包括 cache.backfill——否则会把缓存 reasoning_content
-        回填进历史，污染 disabled 模式（DeepSeek 不校验也不期望）。"""
+    def test_thinking_disabled_runs_cache_backfill(self):
+        """disabled 时仍跑 cache.backfill——上游实际按 enabled 校验，回填真实 reasoning
+        正是所需（早期"disabled 跳过 backfill"会让历史漏带 reasoning_content）。"""
         called = {"backfill": False}
 
         class _SpyCache:
@@ -324,8 +328,8 @@ class TestEnsurePersistence:
         ]
         body = {"thinking": {"type": "disabled"}}
         ensure_reasoning_content_persistence(msgs, body, cache=_SpyCache())
-        assert called["backfill"] is False
-        assert "reasoning_content" not in msgs[1]
+        assert called["backfill"] is True
+        assert msgs[1]["reasoning_content"]
 
 
 class TestRecoverReasoningContent:

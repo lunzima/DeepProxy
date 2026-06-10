@@ -31,7 +31,7 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 from ..utils import conversation_fingerprint, hash_payload, merge_tool_call_deltas
-from .deepseek_fixes import ensure_thinking_dict, is_thinking_disabled
+from .deepseek_fixes import ensure_thinking_dict
 
 logger = logging.getLogger(__name__)
 
@@ -422,19 +422,20 @@ def ensure_reasoning_content_persistence(
     （文档描述的"普通轮 reasoning_content 会被忽略"在生产 API 上不成立）。
     因此这里对每条缺失的 assistant 消息都做兜底，不做 tool-call 链路区分。
 
-    用户显式 thinking.type=disabled 时跳过整个流程（disabled 模式不校验 reasoning_content）。
+    **即便 body.thinking.type=disabled 也照常自愈**——根因：LiteLLM 的 deepseek
+    transform 只透传 {type:enabled}，把 {type:disabled} **整个丢弃**（见
+    llms/deepseek/chat/transformation.py），上游因此收到"无 thinking"→ DeepSeek
+    服务端默认 **enabled** → 仍校验 reasoning_content。早期"disabled 即跳过自愈"导致
+    这类请求漏补 → 400（生产日志 reasoning safety-net 补齐 0/N 即此）。补进历史的
+    reasoning_content 对真正 disabled 的上游只是被忽略的额外字段，无害。
 
     调用方负责按 provider.has_reasoning_content 门控；本函数无条件处理。
     """
-    # 用户显式 disabled → 跳过**整个**流程（含 cache backfill）：disabled 模式不校验也不
-    # 期望 reasoning_content，回填会污染历史。
-    if is_thinking_disabled(body.get("thinking")):
-        return body
-
     if cache is not None:
         cache.backfill(messages)
 
-    # 没显式禁用 → 显式启用 thinking 模式，确保 DeepSeek 接受 reasoning_content
+    # 显式启用 thinking 模式（setdefault：不覆盖用户显式 disabled——disabled 会被 LiteLLM
+    # 丢弃，上游仍按 enabled 校验，下方注入的 reasoning_content 正是为此兜底）
     ensure_thinking_dict(body).setdefault("type", "enabled")
 
     # 缓存补不齐 → 注入 dummy 而非降级 thinking

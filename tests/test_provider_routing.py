@@ -314,8 +314,9 @@ def test_assemble_litellm_body_heals_missing_reasoning_content_deepseek():
         "thinking 模式历史 assistant 须在装配期被补上 reasoning_content"
 
 
-def test_assemble_litellm_body_skips_heal_when_thinking_disabled():
-    """显式 thinking=disabled 时不校验 reasoning_content，装配期不应注入。"""
+def test_assemble_litellm_body_heals_even_when_thinking_disabled():
+    """thinking=disabled 时**仍**补 reasoning_content：LiteLLM deepseek transform 丢弃
+    {type:disabled}，上游按默认 enabled 校验——漏补即 400。装配期安全网须照常兜底。"""
     from deep_proxy.config import ProxyConfig, normalize_legacy_config
     from deep_proxy.providers import Provider
     from deep_proxy.litellm_client import _assemble_litellm_body
@@ -332,7 +333,7 @@ def test_assemble_litellm_body_skips_heal_when_thinking_disabled():
     body["thinking"] = {"type": "disabled"}
     call_body = _assemble_litellm_body(body, cfg, provider=ds)
     asst = [m for m in call_body["messages"] if m.get("role") == "assistant"]
-    assert asst and not any(m.get("reasoning_content") for m in asst)
+    assert asst and all(m.get("reasoning_content") for m in asst)
 
 
 async def test_prepare_request_force_mimo_model_when_client_sends_alien_name(
