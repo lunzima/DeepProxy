@@ -273,6 +273,24 @@ class OptimizationConfig(BaseModel):
     )
 
 
+class StyleGuardConfig(BaseModel):
+    """响应侧风格后处理配置。
+
+    在 upstream 返回后、返回客户端前，用正则扫描 assistant 响应文本。
+    命中违规模式时，注入用户反馈消息并重发 upstream（最多 max_retries 轮），
+    让 LLM 自行修正。不执行自动替换，修复权交 LLM。
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="启用响应侧风格扫描与反馈循环（默认关闭）。",
+    )
+    max_retries: int = Field(
+        default=4, ge=0, le=10,
+        description="最大修正轮数。0 表示仅扫描不重发。",
+    )
+
+
 class DynamicThresholdConfig(BaseModel):
     """Per-port 动态阈值控制器配置（闭环反馈）。
 
@@ -592,6 +610,7 @@ class ProxyConfig(BaseModel):
 
     deepseek: DeepSeekConfig = Field(default_factory=DeepSeekConfig)
     optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
+    style_guard: StyleGuardConfig = Field(default_factory=StyleGuardConfig)
     flash_upgrade: FlashUpgradeConfig = Field(default_factory=FlashUpgradeConfig)
     creative_sampling: CreativeSamplingConfig = Field(default_factory=CreativeSamplingConfig)
     precise_sampling: PreciseSamplingConfig = Field(default_factory=PreciseSamplingConfig)

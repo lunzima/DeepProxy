@@ -564,6 +564,19 @@ class DeepProxyRouter:
                 msg = choice.get("message")
                 if isinstance(msg, dict) and isinstance(msg.get("content"), str):
                     msg["content"] = extract_cot_output(msg["content"])
+        # ── StyleGuard：响应侧风格扫描 + 反馈重发循环 ──
+        if self.config.style_guard.enabled:
+            from .optimization.style_guard import apply_style_guard_loop, RULES
+            async def _resend():
+                return await call_litellm(self.config, body, provider=provider)
+            result = await apply_style_guard_loop(
+                body=body,
+                call_upstream=_resend,
+                result=result,
+                rules=RULES,
+                max_retries=self.config.style_guard.max_retries,
+            )
+            result = self.process_response(result, provider=provider)
         # 按对话前缀写缓存，供下一轮补齐
         self._reasoning_cache.remember_response(request_messages, result)
         # 上游成功，提交挂起的升格记账（失败路径会 raise，下方不会执行）

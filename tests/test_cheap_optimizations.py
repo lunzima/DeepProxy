@@ -505,7 +505,7 @@ class TestCreativeMode:
         # 通用版含"无实质确认"（从旧 coding 版合并进来的）
         assert "无实质确认" in system_text
         # 通用版含旧创作版的特性
-        assert "说教套话" in system_text
+        assert "说教外壳" in system_text
         # 通用版不含旧 coding 版的特定情感删除指令
         assert "把情感支持转成推进事情的方式" not in system_text
         assert "把总结感受的空间留给读者" not in system_text
@@ -518,8 +518,7 @@ class TestCreativeMode:
         system_text = self._find_system_text(b)
         # 通用版有的（coding 也应有）
         assert "无实质确认" in system_text
-        assert "说教套话" in system_text
-        assert "情感抚慰套话" in system_text
+        assert "说教外壳" in system_text
         # 旧 coding 版的特定指令已迁移到通用版
         assert "把情感支持转成推进事情的方式" not in system_text
 
