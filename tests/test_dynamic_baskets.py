@@ -30,10 +30,11 @@ class TestAssembleParas:
         assert len(paras) == 3
         for para in paras:
             parts: List[str] = [p for p in para.split("。") if p]
-            assert len(parts) == 3
+            assert len(parts) == 4
             assert parts[0] in {s.rstrip("。") for s in CODING_BASKETS["methodology"]}
             assert parts[1] in {s.rstrip("。") for s in CODING_BASKETS["best_practices"]}
-            assert parts[2] in {s.rstrip("。") for s in CODING_BASKETS["moderate_encouragement"]}
+            assert parts[2] in {s.rstrip("。") for s in CODING_BASKETS["style_anchors"]}
+            assert parts[3] in {s.rstrip("。") for s in CODING_BASKETS["moderate_encouragement"]}
 
     def test_unknown_scenario_returns_empty(self):
         assert assemble_paragraphs("nonexistent") == []
@@ -44,10 +45,11 @@ class TestAssembleParas:
         assert len(paras) == 3
         for para in paras:
             parts: List[str] = [p for p in para.split("。") if p]
-            assert len(parts) == 3
+            assert len(parts) == 4
             assert parts[0] in {s.rstrip("。") for s in CREATIVE_BASKETS["methodology"]}
             assert parts[1] in {s.rstrip("。") for s in CREATIVE_BASKETS["best_practices"]}
-            assert parts[2] in {s.rstrip("。") for s in CREATIVE_BASKETS["moderate_encouragement"]}
+            assert parts[2] in {s.rstrip("。") for s in CREATIVE_BASKETS["style_anchors"]}
+            assert parts[3] in {s.rstrip("。") for s in CREATIVE_BASKETS["moderate_encouragement"]}
 
     def test_writing_general_picks_from_general_baskets(self):
         rng = random.Random(0)
@@ -55,10 +57,11 @@ class TestAssembleParas:
         assert len(paras) == 3
         for para in paras:
             parts: List[str] = [p for p in para.split("。") if p]
-            assert len(parts) == 3
+            assert len(parts) == 4
             assert parts[0] in {s.rstrip("。") for s in GENERAL_BASKETS["methodology"]}
             assert parts[1] in {s.rstrip("。") for s in GENERAL_BASKETS["best_practices"]}
-            assert parts[2] in {s.rstrip("。") for s in GENERAL_BASKETS["moderate_encouragement"]}
+            assert parts[2] in {s.rstrip("。") for s in GENERAL_BASKETS["style_anchors"]}
+            assert parts[3] in {s.rstrip("。") for s in GENERAL_BASKETS["moderate_encouragement"]}
 
     def test_unknown_writing_kind_falls_back_to_creative(self):
         rng = random.Random(0)
@@ -150,9 +153,10 @@ class TestCodingBasketsContent:
             assert 18 <= n <= 45, f"长度异常 ({n}字): {s!r}"
 
     def test_coding_basket_sizes(self):
-        assert len(CODING_BASKETS["methodology"]) == 16
-        assert len(CODING_BASKETS["best_practices"]) == 16
-        assert len(CODING_BASKETS["moderate_encouragement"]) == 16
+        assert len(CODING_BASKETS["methodology"]) == 12
+        assert len(CODING_BASKETS["best_practices"]) == 12
+        assert len(CODING_BASKETS["style_anchors"]) == 12
+        assert len(CODING_BASKETS["moderate_encouragement"]) == 12
 
 
 class TestGeneralBasketsContent:
@@ -174,9 +178,10 @@ class TestGeneralBasketsContent:
             assert 18 <= n <= 45, f"长度异常 ({n}字): {s!r}"
 
     def test_general_basket_sizes(self):
-        assert len(GENERAL_BASKETS["methodology"]) == 16
-        assert len(GENERAL_BASKETS["best_practices"]) == 16
-        assert len(GENERAL_BASKETS["moderate_encouragement"]) == 16
+        assert len(GENERAL_BASKETS["methodology"]) == 12
+        assert len(GENERAL_BASKETS["best_practices"]) == 12
+        assert len(GENERAL_BASKETS["style_anchors"]) == 12
+        assert len(GENERAL_BASKETS["moderate_encouragement"]) == 12
 
 
 class TestAppendToSystem:
@@ -249,6 +254,7 @@ class TestRouterIntegration:
         all_coding = (
             CODING_BASKETS["methodology"]
             + CODING_BASKETS["best_practices"]
+            + CODING_BASKETS["style_anchors"]
             + CODING_BASKETS["moderate_encouragement"]
         )
         text = sys_msgs[0]["content"]
