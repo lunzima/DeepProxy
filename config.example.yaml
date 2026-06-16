@@ -57,9 +57,11 @@ ports:
   - port: 8000              # → precise_sampling（高确定性，code/math/逻辑）
     provider: deepseek
     sampling: precise
+    # system_prompt: "你是谭浩强，著名计算机教育家，著有《C程序设计》教材。面对代码、数学或技术问题时，你优先给出最直接、实用的答案。只有当问题确实需要逐步理解时，才自底向上展示关键的中间状态和验证结果。回答结构根据问题自然组织。能用一句话说清的，就只写一句话。"
   - port: 8001              # → creative_sampling（高多样性，RP/创作/通用写作）
     provider: mimo          # home provider：/v1/models 默认 + pool 兜底；不用 MiMo 时改回 deepseek
     sampling: creative
+    # system_prompt: "你是余华，当代著名作家，代表作《活着》。写小说时你注重细腻绵密的感官铺陈，情感通过具体细节层层递进。你不在人物行为之后追加因果归因解释，让叙事自然展开。不将人物当作物件拆成关节，用日常人性化语言写人。每段不强求收束，留空白供读者想象。情感不贴标签，嵌入行为与感官。避免模糊指代，始终呈现具体可感细节。"
     # 加权模型桶（默认启用）：逐请求加权随机选 (provider, model)，跨 provider 家族轮询。
     # flash 起始 → BERT/启发式可升格；pro 起始 → pin 在 pro。每个条目的 model 必须是
     # 该 provider 的 flash_model 或 pro_model。如需退回单一 provider 路由，删除整个 model_pool 块。
@@ -68,6 +70,10 @@ ports:
       - { provider: mimo,     model: mimo-v2.5,         weight: 1 }
       - { provider: deepseek, model: deepseek-v4-pro,   weight: 1 }
       - { provider: mimo,     model: mimo-v2.5-pro,     weight: 1 }
+
+  # 其他风格参考：
+  #   system_prompt: "你是吕叔湘，著名语言学家、教育家，著有《语文常谈》。写说明文、评论或分析时，你用贴近生活的具体例子把抽象事理说透，语言清晰准确，富有自然节奏。不用固定搭配或模板收束论点，不用感叹句做安慰式结语，不拟人化情感动词或抽象概念，正文后不加总结句，用具体描写替代空洞抽象词，语言生动精确。"
+
 
 # ============================================================
 # Cross-Consult 双家族机制（默认开启）

@@ -196,11 +196,204 @@ class TestStyleGuardLoop:
         assert call_count == 1
         assert final["choices"][0]["message"]["content"] == "他坐在那里，双手搁在桌面。"
 
+    @pytest.mark.asyncio
+    async def test_tool_calls_are_stripped_and_retry_continues(self):
+        """原始响应含 tool_calls + 文本违规：剥离 tool_calls 后修正循环继续。"""
+        first = {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "他坐在那里，没有动。",
+                "tool_calls": [
+                    {"id": "tc1", "type": "function",
+                     "function": {"name": "Edit", "arguments": "{}"}}
+                ],
+            }}]
+        }
+        second = {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "他坐在那里，双手搁在桌面。",
+                "tool_calls": [
+                    {"id": "tc1", "type": "function",
+                     "function": {"name": "Edit", "arguments": "{}"}}
+                ],
+            }}]
+        }
+        call_count = 0
+
+        async def fake_upstream():
+            nonlocal call_count
+            call_count += 1
+            return second
+
+        body = {"messages": [
+            {"role": "user", "content": "写一段叙事"}
+        ]}
+
+        final = await apply_style_guard_loop(
+            body=body,
+            call_upstream=fake_upstream,
+            result=first,
+            rules=RULES,
+            max_retries=2,
+        )
+        assert call_count == 1, "tool_calls 剥离后应继续修正循环"
+        final_msg = final["choices"][0]["message"]
+        assert final_msg["content"] == "他坐在那里，双手搁在桌面。"
+        assert final_msg["tool_calls"][0]["id"] == "tc1"
+
+    @pytest.mark.asyncio
+    async def test_tool_calls_in_corrected_result_merged_with_original(self):
+        """修正后响应含 tool_calls：回滚到前一版并合并原始 tool_calls。"""
+        first = {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "他坐在那里，没有动。",
+                "tool_calls": [
+                    {"id": "tc1", "type": "function",
+                     "function": {"name": "Edit", "arguments": "{}"}}
+                ],
+            }}]
+        }
+        # 重发后上游返回修正文本 + 全新 tool_calls（应丢弃，只保留原始 tool_calls）
+        second = {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "修正后的文本。",
+                "tool_calls": [
+                    {"id": "tc_new", "type": "function",
+                     "function": {"name": "Bash", "arguments": "{}"}}
+                ],
+            }}]
+        }
+        call_count = 0
+
+        async def fake_upstream():
+            nonlocal call_count
+            call_count += 1
+            return second
+
+        body = {"messages": [
+            {"role": "user", "content": "写一段叙事"}
+        ]}
+
+        final = await apply_style_guard_loop(
+            body=body,
+            call_upstream=fake_upstream,
+            result=first,
+            rules=RULES,
+            max_retries=2,
+        )
+        assert call_count == 1
+        final_msg = final["choices"][0]["message"]
+        # 修正后含 tool_calls → 回滚到 first，first 的 tool_calls 已在循环末尾合并
+        assert final_msg["tool_calls"][0]["id"] == "tc1"
+
+    @pytest.mark.asyncio
+    async def test_no_violation_with_tool_calls_passes_through(self):
+        """无违规 + 有 tool_calls：直接返回原 result，不调用上游。"""
+        result = {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "这段文本干净。",
+                "tool_calls": [
+                    {"id": "tc1", "type": "function",
+                     "function": {"name": "Edit", "arguments": "{}"}}
+                ],
+            }}]
+        }
+
+        async def fake_upstream():
+            raise AssertionError("不应调用上游重发")
+
+        final = await apply_style_guard_loop(
+            body={"messages": []},
+            call_upstream=fake_upstream,
+            result=result,
+            rules=RULES,
+            max_retries=2,
+        )
+        assert final is result
+
+    @pytest.mark.asyncio
+    async def test_tool_call_edit_args_with_violations_not_merged(self):
+        """Edit tool 参数含违规时，原 tool_call 不合并回修正结果。"""
+        import json as _json
+        first = {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "修正如下。",
+                "tool_calls": [{"id": "tc1", "type": "function", "function": {
+                    "name": "Edit",
+                    "arguments": _json.dumps({
+                        "file_path": "test.md",
+                        "new_string": "他站在那里，没有动。"
+                    })
+                }}],
+            }}]
+        }
+        second = {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "他站在那里，双手放在身体两侧。",
+            }}]
+        }
+        call_count = 0
+
+        async def fake_upstream():
+            nonlocal call_count
+            call_count += 1
+            return second
+
+        body = {"messages": [{"role": "user", "content": "写一段叙事"}]}
+
+        final = await apply_style_guard_loop(
+            body=body,
+            call_upstream=fake_upstream,
+            result=first,
+            rules=RULES,
+            max_retries=2,
+        )
+        assert call_count == 1
+        # 参数违规→不合并原 tool_calls，保留 LLM 修正后的无 tool_calls 响应
+        assert "tool_calls" not in final["choices"][0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_tool_call_write_args_clean_merged_normally(self):
+        """Write tool 参数无违规时，原 tool_call 正常合并。"""
+        import json as _json
+        result = {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "文件写入完成。",
+                "tool_calls": [{"id": "tc1", "type": "function", "function": {
+                    "name": "Write",
+                    "arguments": _json.dumps({
+                        "file_path": "test.md",
+                        "content": "print('hello world')"
+                    })
+                }}],
+            }}]
+        }
+
+        async def fake_upstream():
+            raise AssertionError("不应调用上游重发")
+
+        final = await apply_style_guard_loop(
+            body={"messages": []},
+            call_upstream=fake_upstream,
+            result=result,
+            rules=RULES,
+            max_retries=2,
+        )
+        # 无违规→tool_calls 保留
+        assert final["choices"][0]["message"]["tool_calls"][0]["id"] == "tc1"
+
 
 class TestAllRulesHaveIds:
     def test_all_rules_present(self):
         # 29 original + 5 first repo batch + 4 second repo batch + 2 third repo batch = 40
-        assert len(RULES) == 40
+        assert len(RULES) == 47
         seen = set()
         for r in RULES:
             assert isinstance(r, StyleRule)

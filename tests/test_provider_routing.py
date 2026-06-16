@@ -417,3 +417,16 @@ async def test_prepare_request_deepseek_provider_still_normalizes_legacy_alias(
     )
     # DeepSeek 路径 deepseek-chat 应被规范化为 v4-flash
     assert out["model"] == "deepseek-v4-flash"
+
+
+def test_port_binding_with_system_prompt():
+    b = PortBinding(
+        port=8001, provider="mimo", sampling="creative",
+        system_prompt="你是一位严谨的系统架构师，回答简洁精确。",
+    )
+    assert b.system_prompt == "你是一位严谨的系统架构师，回答简洁精确。"
+
+
+def test_port_binding_default_no_system_prompt():
+    b = PortBinding(port=8000, provider="deepseek", sampling="precise")
+    assert b.system_prompt is None
