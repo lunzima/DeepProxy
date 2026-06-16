@@ -63,6 +63,11 @@ class PortBinding(BaseModel):
     sampling: Literal["precise", "creative"] = Field(
         description="precise → PreciseSamplingConfig；creative → CreativeSamplingConfig",
     )
+    system_prompt: str | None = Field(
+        default=None,
+        description="可选的端口级角色扮演 system prompt（1-3 句，描述角色身份与风格）。"
+                    "在全部 skills / 压缩之后注入到 system 消息的最开头。",
+    )
     model_pool: list[PoolEntry] | None = Field(
         default=None,
         description="加权随机模型桶。给定时该 port 逐请求从池中选 (provider, model)，"

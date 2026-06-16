@@ -397,6 +397,30 @@ class StreamingReasoningAccumulator:
                 fingerprint=fp,
             )
 
+    def get_slot(self, idx: int = 0) -> Dict[str, Any]:
+        """返回指定 choice 槽的累加结果（content / reasoning_content / tool_calls）。
+
+        返回的是活槽对象本身（非副本）。调用方应只读；如需改写用 update_slot_content。
+        槽不存在时返回临时空默认 dict（不写回 self._slots）。
+        """
+        slot = self._slots.get(idx)
+        if slot is None:
+            return {"content": "", "reasoning_content": "", "tool_calls": None}
+        return slot
+
+    def update_slot_content(
+        self, idx: int, content: str, reasoning_content: str = "",
+        tool_calls: Any = ...,
+    ) -> None:
+        """就地更新指定槽的 content / reasoning_content（可选 tool_calls）。"""
+        if idx not in self._slots:
+            return
+        self._slots[idx]["content"] = content
+        if reasoning_content:
+            self._slots[idx]["reasoning_content"] = reasoning_content
+        if tool_calls is not ...:
+            self._slots[idx]["tool_calls"] = tool_calls
+
 
 # ---------------------------------------------------------------------------
 # 多轮 trace 自愈：先从缓存补齐，补不齐注入 dummy 占位（保持 thinking=enabled）

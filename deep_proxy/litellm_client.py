@@ -186,6 +186,9 @@ def _assemble_litellm_body(
     # 在非流式 re-call（如 cross_consult 重发循环）中泄漏，导致 LiteLLM 返回
     # async iterator 而非 dict。
     call_body["stream"] = stream
+    # stream_options 仅对 stream=True 有效；残留值在 stream=False 时导致上游 400
+    if not stream:
+        call_body.pop("stream_options", None)
     call_body["messages"] = _ensure_string_content(call_body.get("messages", []))
 
     # reasoning_content 自愈安全网（最后防线）：所有上游调用——初始 / cross_consult 重发 /

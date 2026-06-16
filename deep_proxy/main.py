@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import ProxyConfig
 from .router import DeepProxyRouter
+from .utils import prepend_to_system_message
 
 logger = logging.getLogger("deep_proxy")
 
@@ -82,9 +83,11 @@ async def lifespan(app: FastAPI):
     # 便于确认运行进程到底加载了哪份配置（排查 round-robin 未生效）。
     for _b in config.ports:
         _pool = [(e.provider, e.model, e.weight) for e in (_b.model_pool or [])]
+        _sp = _b.system_prompt
+        _sp_tag = f"system_prompt={_sp[:40]}..." if (_sp and len(_sp) > 40) else f"system_prompt={_sp}" if _sp else "system_prompt=(无)"
         logger.info(
-            "[startup] port=%s provider=%s sampling=%s model_pool=%s",
-            _b.port, _b.provider, _b.sampling,
+            "[startup] port=%s provider=%s sampling=%s %s model_pool=%s",
+            _b.port, _b.provider, _b.sampling, _sp_tag,
             _pool if _pool else "（无）",
         )
     _dt = config.flash_upgrade.dynamic_threshold
@@ -416,6 +419,12 @@ async def _prepare_inbound(
     prepared = await router.prepare_request(
         body, sampling_profile=sampling, provider=provider, port=port,
     )
+    # 端口级角色 system_prompt：在所有优化完成后注入到 system 消息的最开头。
+    port_binding = config.binding_for_port(port) if (config is not None and port is not None) else None
+    if port_binding is not None and port_binding.system_prompt:
+        messages = prepared.get("messages")
+        if isinstance(messages, list) and messages:
+            prepend_to_system_message(messages, port_binding.system_prompt)
     _temp = prepared.get("temperature")
     logger.info(
         "请求 model=%s temp=%.2f stream=%s provider=%s port=%s",

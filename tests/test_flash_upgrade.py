@@ -555,7 +555,9 @@ class TestMaybeUpgradeIntegration:
         Step 1 sentinel 路径，从未真正命中 Step 2 持久化 cache。本回归显式：
         触发升格 → commit → 下一轮命中 Step 2 cache。
         """
-        cfg = _make_upgrade_cfg()
+        # router_type="rule"：测试不依赖 BERT（transformers 为可选依赖），
+        # router_threshold=0.2 匹配 RuleUpgradeRouter 对复杂中文请求的评分
+        cfg = _make_upgrade_cfg(router_type="rule", router_threshold=0.2)
         router = DeepProxyRouter(cfg)
         # 第一轮：复杂内容触发升格（启发式 / Router）
         body1 = {
