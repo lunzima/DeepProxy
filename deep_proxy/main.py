@@ -324,6 +324,23 @@ def _binding_for_request(request: Request):
     return provider, sampling, port, selected_model
 
 
+def _inject_port_system_prompt(body: Dict[str, Any], port: int | None) -> None:
+    """若该 port 配置了 system_prompt，逐请求注入为 messages 最前的 system 消息。
+
+    每个请求由服务端注入（客户端历史不含它），故每轮 insert(0) 幂等且不累积。
+    在 telemetry 剥离 / prepare_request 之前调用，使 persona 参与压缩/skills 流水线。
+    """
+    if config is None or port is None:
+        return
+    binding = config.binding_for_port(port)
+    if binding is None or not binding.system_prompt:
+        return
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return
+    messages.insert(0, {"role": "system", "content": binding.system_prompt})
+
+
 def _strip_telemetry_if_enabled(body: Dict[str, Any]) -> None:
     """按 optimization.strip_client_telemetry 配置剥离 user/system 消息中的
     x-anthropic-* telemetry header。在 _maybe_redirect_provider 之前调用，
@@ -382,6 +399,8 @@ async def _prepare_inbound(
     # pool 选中的模型覆盖客户端请求的 model（逐请求重掷）
     if selected_model is not None:
         body["model"] = selected_model
+    # port persona system prompt 注入（在压缩/skills 流水线之前，参与压缩缓存）
+    _inject_port_system_prompt(body, port)
     # telemetry 剥离必须先于 redirect/prepare_request，否则两个 tracker 的
     # conversation_fingerprint 会包含 session-变化的 header → persist 窗口失稳
     _strip_telemetry_if_enabled(body)

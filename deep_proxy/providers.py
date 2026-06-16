@@ -70,3 +70,8 @@ class PortBinding(BaseModel):
                     "（/v1/models 默认）。条目的 provider/model 合法性由 "
                     "ProxyConfig 的 model_validator 校验（providers 字典就绪后）。",
     )
+    system_prompt: str | None = Field(
+        default=None,
+        description="该 port 的 persona 系统提示词。给定时逐请求以 system 消息注入到 "
+                    "messages 最前（参与压缩/skills 流水线）。用于按 port 绑定写作/编码人格。",
+    )

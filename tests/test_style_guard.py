@@ -8,8 +8,10 @@ from deep_proxy.optimization.style_guard import (
     RULES,
     StyleRule,
     _extract_sentence,
+    _has_narrative_anchors,
     apply_style_guard_loop,
     build_feedback_message,
+    scan_tool_call_violations,
     scan_violations,
 )
 
@@ -119,6 +121,12 @@ class TestScanViolations:
         hits = scan_violations(text)
         f1_hits = [h for h in hits if h["rule_id"] == "f1"]
         assert len(f1_hits) <= 1
+
+    def test_identical_sentences_distinct_positions_not_collapsed(self):
+        """同形句子出现在不同位置应各报一次（span 去重，非 text.find 首次出现）。"""
+        text = "他没有动。中间隔一句拉开距离填充足够字数避免误合并。他没有动。"
+        fr5 = [h for h in scan_violations(text) if h["rule_id"] == "fr5"]
+        assert len(fr5) == 2
 
 
 class TestBuildFeedbackMessage:
@@ -388,6 +396,247 @@ class TestStyleGuardLoop:
         )
         # 无违规→tool_calls 保留
         assert final["choices"][0]["message"]["tool_calls"][0]["id"] == "tc1"
+
+    @pytest.mark.asyncio
+    async def test_failed_retry_does_not_blank_original(self):
+        """重发返回空/故障响应时，不得用空响应取代有内容的原始响应。"""
+        original = {
+            "choices": [{"message": {"role": "assistant", "content": "他坐在那里，没有动。"}}]
+        }  # 1 个违规
+
+        async def fake_upstream():
+            return {"choices": []}  # 模拟上游瞬时故障
+
+        final = await apply_style_guard_loop(
+            body={"messages": [{"role": "user", "content": "写"}]},
+            call_upstream=fake_upstream,
+            result=original,
+            rules=RULES,
+            max_retries=2,
+        )
+        # 返回原始（有内容、虽有瑕疵），而非被清空
+        assert final is original
+        assert final["choices"][0]["message"]["content"] == "他坐在那里，没有动。"
+
+    @pytest.mark.asyncio
+    async def test_body_messages_restored_after_loop(self):
+        """循环结束后 body['messages'] 应回滚到入口状态（与流式路径一致）。"""
+        first = {"choices": [{"message": {"role": "assistant", "content": "他坐着，没有动。"}}]}
+        clean = {"choices": [{"message": {"role": "assistant", "content": "他坐着，翻开卷宗。"}}]}
+
+        async def fake_upstream():
+            return clean
+
+        body = {"messages": [{"role": "user", "content": "写"}]}
+        await apply_style_guard_loop(
+            body=body, call_upstream=fake_upstream, result=first, rules=RULES, max_retries=2,
+        )
+        assert len(body["messages"]) == 1  # 入口只有 1 条 user，修正轮已回滚
+
+    @pytest.mark.asyncio
+    async def test_content_violation_preserves_clean_tool_calls(self):
+        """prose 违规 + 干净 tool_calls：即使重发改写成纯文本（丢 tool_calls），也须回挂原始。"""
+        first = {"choices": [{"message": {
+            "role": "assistant", "content": "他坐着，没有动。",
+            "tool_calls": [{"id": "w1", "type": "function",
+                            "function": {"name": "Write", "arguments": "{}"}}],
+        }}]}
+        # 重发只改了 prose，没有带回 tool_calls
+        plain = {"choices": [{"message": {"role": "assistant",
+                                          "content": "他坐着，翻开了卷宗。"}}]}
+        calls = 0
+
+        async def fake_upstream():
+            nonlocal calls
+            calls += 1
+            return plain
+
+        final = await apply_style_guard_loop(
+            body={"messages": [{"role": "user", "content": "写"}]},
+            call_upstream=fake_upstream, result=first, rules=RULES, max_retries=2,
+        )
+        assert calls == 1
+        msg = final["choices"][0]["message"]
+        assert msg["content"] == "他坐着，翻开了卷宗。"
+        assert msg["tool_calls"][0]["id"] == "w1"  # 干净工具调用被保留
+
+    @pytest.mark.asyncio
+    async def test_override_on_retry_returns_stripped_result(self):
+        """override 标签出现在重试响应上时，返回（已剥离标签的）该响应，而非更早候选。"""
+        first = {"choices": [{"message": {"role": "assistant", "content": "他坐着，没有动。"}}]}
+        override_resp = {
+            "choices": [{"message": {"role": "assistant",
+                                     "content": "[style-override]他不看也不应。"}}]
+        }
+
+        async def fake_upstream():
+            return override_resp
+
+        final = await apply_style_guard_loop(
+            body={"messages": [{"role": "user", "content": "写"}]},
+            call_upstream=fake_upstream,
+            result=first,
+            rules=RULES,
+            max_retries=2,
+        )
+        assert final is override_resp
+        assert "[style-override]" not in final["choices"][0]["message"]["content"]
+        assert final["choices"][0]["message"]["content"] == "他不看也不应。"
+
+    @pytest.mark.asyncio
+    async def test_returns_best_when_retries_worse(self):
+        """重试结果比原始更差时，返回原始（最优）而非最后一次。"""
+        original = {
+            "choices": [{"message": {"role": "assistant", "content": "他坐在那里，没有动。"}}]
+        }  # 1 个违规 (fr5)
+        worse = {
+            "choices": [{"message": {"role": "assistant",
+                                     "content": "他没有动，没有说话，目光扫到桌角。"}}]
+        }  # 多个违规
+
+        async def fake_upstream():
+            return worse
+
+        final = await apply_style_guard_loop(
+            body={"messages": [{"role": "user", "content": "写"}]},
+            call_upstream=fake_upstream,
+            result=original,
+            rules=RULES,
+            max_retries=2,
+        )
+        # 原始违规数 < 重试违规数 → 返回原始
+        assert final is original
+
+
+class TestScanToolCallViolations:
+    """tool_call 参数（Edit.new_string / Write.content）违规扫描。"""
+
+    def _tc(self, name: str, args: dict):
+        import json
+        return [{"id": "tc1", "type": "function",
+                 "function": {"name": name, "arguments": json.dumps(args)}}]
+
+    def test_edit_new_string_violation(self):
+        hits = scan_tool_call_violations(self._tc("Edit", {"new_string": "他站在那里，没有动。"}))
+        assert any(h["rule_id"] == "fr5" for h in hits)
+
+    def test_write_content_violation(self):
+        hits = scan_tool_call_violations(self._tc("Write", {"content": "他走向办公室——里面坐了人。"}))
+        assert any(h["rule_id"] == "dash" for h in hits)
+
+    def test_clean_tool_args_no_violation(self):
+        hits = scan_tool_call_violations(self._tc("Write", {"content": "print('hello')"}))
+        assert hits == []
+
+    def test_non_target_tool_ignored(self):
+        hits = scan_tool_call_violations(self._tc("Bash", {"command": "他没有动"}))
+        assert hits == []
+
+    def test_non_dict_json_args_does_not_crash(self):
+        # arguments 是合法 JSON 但非对象（null / 数字）—— 旧实现会 AttributeError
+        assert scan_tool_call_violations(
+            [{"function": {"name": "Write", "arguments": "null"}}]) == []
+        assert scan_tool_call_violations(
+            [{"function": {"name": "Edit", "arguments": "123"}}]) == []
+
+    def test_malformed_json_args_skipped(self):
+        assert scan_tool_call_violations(
+            [{"function": {"name": "Write", "arguments": "{not json"}}]) == []
+
+    def test_none_and_empty_tool_calls(self):
+        assert scan_tool_call_violations(None) == []
+        assert scan_tool_call_violations([]) == []
+
+
+class TestNarrativeAnchors:
+    """_has_narrative_anchors 必须在真实中文叙事文本上命中（修复 \\b CJK bug）。"""
+
+    def test_narrative_text_detected(self):
+        text = "他走到门前，转身看向窗外。她坐下，茶杯放在桌上。夜色里，码头的灯光很暗。"
+        assert _has_narrative_anchors(text) is True
+
+    def test_code_text_not_detected(self):
+        assert _has_narrative_anchors("def foo():\n    return sum(range(10))") is False
+
+    def test_common_chinese_not_false_positive(self):
+        # 裸单字锚点已移除：常见非叙事词（时光/声明/部门/光阴）不应误判为叙事
+        text = "时光荏苒，声明部门发布了声明，光阴似箭，门口的声响。"
+        assert _has_narrative_anchors(text) is False
+
+    def test_non_string_safe(self):
+        assert _has_narrative_anchors(None) is False
+        assert _has_narrative_anchors("") is False
+
+
+class TestFluencyToolCalls:
+    """apply_fluency_fix 对含 tool_calls 的响应须审查工具写入的叙事正文并就地回写，
+    同时**保留 tool_calls**（这是 agent 写小说到文件的核心场景，不可整体跳过）。"""
+
+    @pytest.mark.asyncio
+    async def test_fluency_reviews_tool_written_content_and_preserves_call(self):
+        import json
+        from deep_proxy.optimization.style_guard import apply_fluency_fix
+        # Write.content 是叙事正文（含充足锚点）；message.content 为简短状态（无锚点）
+        narrative = "他走到门前，转身看向窗外。她坐下，茶杯放在桌上。夜色里，码头很暗。"
+        result = {"choices": [{"message": {
+            "role": "assistant", "content": "已写入文件。",
+            "tool_calls": [{"id": "t1", "type": "function", "function": {
+                "name": "Write",
+                "arguments": json.dumps({"file_path": "ch1.md", "content": narrative}),
+            }}],
+        }}]}
+
+        async def fake_upstream():
+            # fluency 审查返回改写后的正文
+            return {"choices": [{"message": {"content": narrative + "（已润色）"}}]}
+
+        out = await apply_fluency_fix(
+            {"messages": [{"role": "user", "content": "写"}]}, fake_upstream, result,
+        )
+        msg = out["choices"][0]["message"]
+        # 工具调用保留
+        assert msg["tool_calls"][0]["id"] == "t1"
+        # 工具写入正文被就地润色
+        new_args = json.loads(msg["tool_calls"][0]["function"]["arguments"])
+        assert new_args["content"] == narrative + "（已润色）"
+        assert new_args["file_path"] == "ch1.md"  # 其余参数不变
+
+    @pytest.mark.asyncio
+    async def test_fluency_skips_non_narrative_tool_args(self):
+        import json
+        from deep_proxy.optimization.style_guard import apply_fluency_fix
+        # Write.content 是代码（无叙事锚点）→ 不审查、不改写
+        result = {"choices": [{"message": {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "t1", "type": "function", "function": {
+                "name": "Write",
+                "arguments": json.dumps({"file_path": "a.py", "content": "def f():\n    return 1"}),
+            }}],
+        }}]}
+        called = 0
+
+        async def fake_upstream():
+            nonlocal called
+            called += 1
+            return {"choices": [{"message": {"content": "x"}}]}
+
+        out = await apply_fluency_fix({"messages": []}, fake_upstream, result)
+        assert called == 0  # 无叙事锚点 → 不触发审查
+        assert json.loads(out["choices"][0]["message"]["tool_calls"][0]
+                          ["function"]["arguments"])["content"] == "def f():\n    return 1"
+
+    @pytest.mark.asyncio
+    async def test_fluency_missing_messages_key_safe(self):
+        """body 缺 messages（形态异常）时直接返回原 result，不 KeyError。"""
+        from deep_proxy.optimization.style_guard import apply_fluency_fix
+        result = {"choices": [{"message": {"role": "assistant",
+            "content": "他走到门前，转身看向窗外。她坐下，茶杯放在桌上。夜色里，码头很暗。"}}]}
+
+        async def fake_upstream():
+            raise AssertionError("不应调用上游")
+
+        out = await apply_fluency_fix({}, fake_upstream, result)
+        assert out is result
 
 
 class TestAllRulesHaveIds:

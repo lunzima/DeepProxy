@@ -11,9 +11,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -508,8 +509,8 @@ RULES: list[StyleRule] = [
 # ---------------------------------------------------------------------------
 
 
-def _extract_sentence(text: str, match_start: int, match_end: int) -> str:
-    """提取匹配所在的完整句子（以句号/问号/感叹号/换行切割）。"""
+def _sentence_span(text: str, match_start: int, match_end: int) -> tuple[int, int]:
+    """返回匹配所在完整句子的 [start, end) 区间（以句号/问号/感叹号/换行切割）。"""
     # 向前找句首
     start = match_start
     while start > 0 and text[start - 1] not in "。！？\n":
@@ -520,7 +521,32 @@ def _extract_sentence(text: str, match_start: int, match_end: int) -> str:
         end += 1
     if end < len(text) and text[end] in "。！？":
         end += 1  # 包含句尾标点
+    return start, end
+
+
+def _extract_sentence(text: str, match_start: int, match_end: int) -> str:
+    """提取匹配所在的完整句子（以句号/问号/感叹号/换行切割）。"""
+    start, end = _sentence_span(text, match_start, match_end)
     return text[start:end].strip()
+
+
+def _make_hit(
+    rule_id: str, pattern_name: str, match_text: str,
+    sentence: str, example_fix: str, quote_violation: bool,
+) -> dict:
+    """统一构造一条命中 dict，供规则级与段落级扫描共用。
+
+    集中在一处避免 build_feedback_message / _log_alert / _measure_violations
+    依赖的键名在多个产出点漂移。
+    """
+    return {
+        "rule_id": rule_id,
+        "pattern_name": pattern_name,
+        "match_text": match_text,
+        "sentence": sentence,
+        "example_fix": example_fix,
+        "quote_violation": quote_violation,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -576,14 +602,12 @@ def _detect_short_sentence_chains(text: str) -> list[dict]:
                         and not _is_dialogue_sentence(sentences[j]):
                     j += 1
                 chain = sentences[i:j]
-                hits.append({
-                    "rule_id": "g1_short",
-                    "pattern_name": f"连续{j - i}个短句（均≤{_SHORT_SENTENCE_LIMIT}字）",
-                    "match_text": " ".join(chain),
-                    "sentence": "".join(chain),
-                    "example_fix": "将短句合并为语义完整的复合句，用逗号或分号连接。",
-                    "quote_violation": True,
-                })
+                hits.append(_make_hit(
+                    "g1_short",
+                    f"连续{j - i}个短句（均≤{_SHORT_SENTENCE_LIMIT}字）",
+                    " ".join(chain), "".join(chain),
+                    "将短句合并为语义完整的复合句，用逗号或分号连接。", True,
+                ))
                 break  # 每段只报一次
     return hits
 
@@ -591,37 +615,33 @@ def _detect_short_sentence_chains(text: str) -> list[dict]:
 def _detect_deshihou_density(text: str) -> list[dict]:
     """G3：检测单段内「的时候」超过阈值。"""
     hits: list[dict] = []
-    paragraphs = _split_paragraphs(text)
-    for para in paragraphs:
+    for para in _split_paragraphs(text):
         count = para.count("的时候")
         if count > _DESHIHOU_LIMIT:
-            hits.append({
-                "rule_id": "g3_deshihou",
-                "pattern_name": f"本段「的时候」出现{count}次（上限{_DESHIHOU_LIMIT}）",
-                "match_text": "的时候",
-                "sentence": para[:200],
-                "example_fix": "将「的时候」替换为「时」或重写句子为自然中文时序。",
-                "quote_violation": True,
-            })
+            hits.append(_make_hit(
+                "g3_deshihou",
+                f"本段「的时候」出现{count}次（上限{_DESHIHOU_LIMIT}）",
+                "的时候", para[:200],
+                "将「的时候」替换为「时」或重写句子为自然中文时序。", True,
+            ))
     return hits
+
+
+_RE_METAPHOR = re.compile(r"仿佛|似乎|好像")
 
 
 def _detect_metaphor_density(text: str) -> list[dict]:
     """G11：检测单段内「仿佛/似乎/好像」超过阈值。"""
     hits: list[dict] = []
-    _re_metaphor = re.compile(r"仿佛|似乎|好像")
-    paragraphs = _split_paragraphs(text)
-    for para in paragraphs:
-        count = len(_re_metaphor.findall(para))
+    for para in _split_paragraphs(text):
+        count = len(_RE_METAPHOR.findall(para))
         if count > _METAPHOR_LIMIT:
-            hits.append({
-                "rule_id": "g11_metaphor",
-                "pattern_name": f"本段比喻词「仿佛/似乎/好像」出现{count}次（上限{_METAPHOR_LIMIT}）",
-                "match_text": "仿佛/似乎/好像",
-                "sentence": para[:200],
-                "example_fix": "减少比喻词使用，用具体感官细节替代。「像……一样」的比喻应以叙事效率为先。",
-                "quote_violation": True,
-            })
+            hits.append(_make_hit(
+                "g11_metaphor",
+                f"本段比喻词「仿佛/似乎/好像」出现{count}次（上限{_METAPHOR_LIMIT}）",
+                "仿佛/似乎/好像", para[:200],
+                "减少比喻词使用，用具体感官细节替代。「像……一样」的比喻应以叙事效率为先。", True,
+            ))
     return hits
 
 
@@ -645,30 +665,28 @@ def scan_violations(text: str, rules: list[StyleRule] | None = None) -> list[dic
         rules = RULES
 
     hits: list[dict] = []
-    seen: set[tuple[str, int]] = set()  # (rule_id, sentence_start)
+    seen: set[tuple] = set()  # (rule_id, sentence_start) / (rule_id, sentence)
 
     for rule in rules:
         for m in rule.pattern.finditer(text):
-            sentence = _extract_sentence(text, m.start(), m.end())
-            key = (rule.id, text.find(sentence))  # sentence start position
+            # 以**匹配位置**所在句子的起点去重，而非 text.find(sentence)——后者返回
+            # 句子在全文的首次出现，会把不同位置的同形句子误判为同一处（漏报）。
+            start, end = _sentence_span(text, m.start(), m.end())
+            key = (rule.id, start)
             if key in seen:
                 continue
             seen.add(key)
-            hits.append({
-                "rule_id": rule.id,
-                "pattern_name": rule.pattern_name,
-                "match_text": m.group(),
-                "sentence": sentence,
-                "example_fix": rule.example_fix,
-                "quote_violation": rule.quote_violation,
-            })
+            hits.append(_make_hit(
+                rule.id, rule.pattern_name, m.group(),
+                text[start:end].strip(), rule.example_fix, rule.quote_violation,
+            ))
 
     # ── 段落级扫描 ──
     for para_check in [_detect_short_sentence_chains, _detect_deshihou_density,
                         _detect_metaphor_density]:
         for pv in para_check(text):
-            # 段落级规则同一段只报一次
-            key = (pv["rule_id"], pv["sentence"][:80])
+            # 段落级规则同一段只报一次（用完整 sentence 作键，避免共享前缀误合并）
+            key = (pv["rule_id"], pv["sentence"])
             if key in seen:
                 continue
             seen.add(key)
@@ -677,22 +695,64 @@ def scan_violations(text: str, rules: list[StyleRule] | None = None) -> list[dic
     return hits
 
 
+# tool_call 中会被写入磁盘的文本参数（工具名 → 参数键）。
+# Agent 通过这些工具写入的正文绕过了 content 扫描，需单独检查。
+_TOOL_TEXT_ARG_KEYS = {"Edit": "new_string", "Write": "content"}
+
+
+def scan_tool_call_violations(
+    tool_calls: list | None, rules: list[StyleRule] | None = None,
+) -> list[dict]:
+    """扫描 tool_call 参数中写入文件的文本内容（Edit.new_string / Write.content）。
+
+    解析失败、参数非 JSON 对象、或非目标工具时跳过。
+    返回命中列表（与 scan_violations 同结构）。流式与非流式路径共用，避免逻辑漂移。
+    """
+    if not tool_calls:
+        return []
+    out: list[dict] = []
+    for tc in tool_calls:
+        fn = (tc.get("function") if isinstance(tc, dict) else None) or {}
+        arg_key = _TOOL_TEXT_ARG_KEYS.get(fn.get("name"))
+        if arg_key is None:
+            continue
+        raw_args = fn.get("arguments", "")
+        if not raw_args:
+            continue
+        try:
+            parsed = json.loads(raw_args)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        value = parsed.get(arg_key)
+        if isinstance(value, str):
+            out.extend(scan_violations(value, rules))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # AI 通顺性审查（G10 / G12 / G14 / 通顺性 / 口语化 / 翻译腔）
 # 仅对含叙事锚点词的文本触发，对工具调用和纯代码内容不触发。
 # ---------------------------------------------------------------------------
 
+# 注意：中文没有词边界，`\b` 在 CJK 字符间几乎不匹配（会让本正则恒返回空）。
+# 锚点词按子串直接匹配即可。仅用区分度高的多字锚点 + 第三人称代词——
+# 不用裸单字（光/声/门/夜/街/船），它们会命中"时光/声明/部门"等常见非叙事词，
+# 在通用内容上误判为叙事 → 触发多余的 fluency 上游调用。
 _NARRATIVE_ANCHORS = re.compile(
-    r"(?:^|\b)(?:他|她|说：|码头|转身|站起|走到|坐下|门前|窗外|茶杯|卷宗"
-    r"|书记|证据|码头|街|门|船|声|光|夜|夜色)\b"
+    r"他|她|说：|转身|站起|走到|坐下|门前|窗外|茶杯|卷宗"
+    r"|书记|证据|码头|夜色"
 )
+
+_NARRATIVE_ANCHOR_MIN = 5  # 判定为叙事文本所需的锚点命中数
 
 
 def _has_narrative_anchors(text: str) -> bool:
-    """检测文本是否含有足够多的叙事锚点词（>=5个）以判定为叙事文本。"""
+    """检测文本是否含有足够多的叙事锚点词以判定为叙事文本。"""
     if not isinstance(text, str) or not text:
         return False
-    return len(_NARRATIVE_ANCHORS.findall(text)) >= 5
+    return len(_NARRATIVE_ANCHORS.findall(text)) >= _NARRATIVE_ANCHOR_MIN
 
 
 _FLUENCY_SYSTEM_PROMPT = """\
@@ -711,48 +771,99 @@ _FLUENCY_SYSTEM_PROMPT = """\
 只输出修正后的完整正文，不要解释、不要标注修改位置、不要加任何前言或后记。"""
 
 
+async def _fluency_rewrite(body: dict, call_upstream: Callable, text: str) -> str | None:
+    """对一段文本做一次 AI 通顺性审查，返回修正后的文本；无叙事锚点/未改动/失败时返回 None。
+
+    将文本嵌入 fluency 审查提示作为一次性 user 消息注入 body 后调用上游，
+    完成后就地回滚该消息。供 inline 正文与 tool_call 写入正文共用同一审查机制。
+    """
+    if not text or not _has_narrative_anchors(text):
+        return None
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return None
+    _prev_len = len(messages)
+    messages.append({
+        "role": "user",
+        "content": f"{_FLUENCY_SYSTEM_PROMPT}\n\n---\n\n{text}",
+    })
+    try:
+        corrected = await call_upstream()
+        cc = corrected.get("choices", [])
+        if not cc:
+            return None
+        new_text = cc[0].get("message", {}).get("content", "")
+        # 空 / 过短（疑似截断或拒答） / 未改动 → 视为无修正
+        if not new_text or len(new_text) < len(text) * 0.5 or new_text == text:
+            return None
+        return new_text
+    except Exception:
+        logger.warning("fluency rewrite 异常，回退到原文本", exc_info=True)
+        return None
+    finally:
+        del messages[_prev_len:]
+
+
+async def _fluency_fix_tool_calls(
+    body: dict, call_upstream: Callable, result: dict, tool_calls: list,
+) -> dict:
+    """对含 tool_calls 的响应做通顺性审查：审查工具写入的叙事正文
+    （Edit.new_string / Write.content）并就地回写 tool_call 参数，同时审查随附 prose。
+    **保留 tool_calls**——逐个改写参数文本，绝不丢弃工具调用。
+    """
+    message = result["choices"][0].get("message") or {}
+    for tc in tool_calls:
+        fn = (tc.get("function") if isinstance(tc, dict) else None) or {}
+        arg_key = _TOOL_TEXT_ARG_KEYS.get(fn.get("name"))
+        if arg_key is None:
+            continue
+        raw = fn.get("arguments", "")
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(parsed, dict) or not isinstance(parsed.get(arg_key), str):
+            continue
+        new_text = await _fluency_rewrite(body, call_upstream, parsed[arg_key])
+        if new_text is not None:
+            parsed[arg_key] = new_text
+            fn["arguments"] = json.dumps(parsed, ensure_ascii=False)
+    # 随附 prose（保留 tool_calls，仅就地替换 content）
+    new_content = await _fluency_rewrite(body, call_upstream, message.get("content", "") or "")
+    if new_content is not None:
+        message["content"] = new_content
+    return result
+
+
 async def apply_fluency_fix(
     body: dict,
     call_upstream: Callable,
     result: dict,
 ) -> dict:
-    """对含叙事锚点词的文本执行一次 AI 通顺性审查。
+    """对叙事文本执行 AI 通顺性审查（捕捉 regex 规则之外的不通顺/口语化/翻译腔）。
 
-    无叙事锚点（工具调用、纯代码）时直接返回原 result。
-    审查后若有修正，返回修正后的 result；无修正时返回原 result。
+    - 含 tool_calls 的响应：审查工具写入的叙事正文（Edit.new_string / Write.content）
+      并就地回写参数，同时审查随附 prose——**保留 tool_calls**，不丢弃工具调用。
+    - 纯文本响应：审查 message.content，就地替换（保留原 reasoning_content 等其余字段）。
+
+    无叙事锚点（纯代码 / 工具命令）的文本不触发。审查异常/无改动时回退到原 result。
     """
     choices = result.get("choices", [])
     if not choices:
         return result
-    content = choices[0].get("message", {}).get("content", "")
-    if not content or not _has_narrative_anchors(content):
-        return result
+    message = choices[0].get("message") or {}
+    tool_calls = message.get("tool_calls")
+    if tool_calls:
+        return await _fluency_fix_tool_calls(body, call_upstream, result, tool_calls)
 
-    # 构建一次性审查请求
-    _prev_len = len(body["messages"])
-    body["messages"].append({
-        "role": "user",
-        "content": f"{_FLUENCY_SYSTEM_PROMPT}\n\n---\n\n{content}",
-    })
-    try:
-        corrected = await call_upstream()
-        corrected_choices = corrected.get("choices", [])
-        if not corrected_choices:
-            return result
-        corrected_content = corrected_choices[0].get("message", {}).get("content", "")
-        # 空或过短的修正视为失败，回退
-        if not corrected_content or len(corrected_content) < len(content) * 0.5:
-            return result
-        # 若内容完全相同（未修正），返回原 result
-        if corrected_content == content:
-            return result
-        return corrected
-    except Exception:
-        logger.warning("apply_fluency_fix: 通顺性审查异常，回退到原响应", exc_info=True)
+    new_content = await _fluency_rewrite(body, call_upstream, message.get("content", "") or "")
+    if new_content is None:
         return result
-    finally:
-        # 回滚追加的消息，恢复 body 到审查前状态
-        body["messages"] = body["messages"][:_prev_len]
+    # 就地替换 content，保留 result 其余字段（含原 reasoning_content）
+    message["content"] = new_content
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -794,6 +905,46 @@ def build_feedback_message(violations: list[dict]) -> str:
 # 重发循环（供 router 调用）
 # ---------------------------------------------------------------------------
 
+_RETRY_INSTRUCTION = (
+    "请继续完成上文未完成的响应。下面检测到风格问题需要修正，同时参考下方的改进草稿，"
+    "将修正融入你的下一次回复中。响应时不要重复反馈内容，不要以Changelog或修改列表的"
+    "形式汇报你做了什么改动，直接输出修正后的全文。\n\n"
+)
+
+
+def _measure_violations(result: dict, rules: list[StyleRule]) -> int | None:
+    """统计一个响应的总违规数（content + tool_call 参数），用于"最优结果"比较。
+
+    返回 None 表示"无可度量内容"（空 choices / 无 content 且无 tool_calls，
+    如上游瞬时故障返回的空/错误响应）——调用方据此**排除**该候选，
+    避免空响应以 0 违规"击败"原始好响应、把客户端结果清空。
+    """
+    choices = result.get("choices") or []
+    if not choices:
+        return None
+    msg = choices[0].get("message") or {}
+    content = msg.get("content") or ""
+    tool_calls = msg.get("tool_calls")
+    if not content and not tool_calls:
+        return None
+    return len(scan_violations(content, rules)) + len(
+        scan_tool_call_violations(tool_calls, rules)
+    )
+
+
+def _log_alert(retry: int, total: int, violations: list[dict], rid_list: list[str]) -> None:
+    """控制台 + 专用日志文件告警。日志写入失败不应中断修正循环。"""
+    ts = datetime.now().isoformat(timespec="seconds")
+    lines = [f"[StyleGuard] {ts} R{retry}/{total} violations={len(violations)} ids={rid_list}"]
+    for v in violations:
+        lines.append(f"  {v['rule_id']} {v['pattern_name']}: {v['sentence'][:80]}")
+    try:
+        with open(_ALERT_LOG, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        logger.warning("StyleGuard 告警日志写入失败: %s", _ALERT_LOG)
+
+
 async def apply_style_guard_loop(
     body: dict,
     call_upstream: Callable,
@@ -807,10 +958,12 @@ async def apply_style_guard_loop(
     每次重发时，将前一轮的 assistant 消息和风格反馈用户消息附加到
     body["messages"] 中，重新调用 call_upstream。
 
-    当 call_alt_upstream 提供时：原 provider 重发耗尽仍存在违规，
-    切换到异族模型重发一次；异族修正后仍违规则再切回原 provider 重发一次。
+    当 call_alt_upstream 提供时：每轮重发在 primary 与 alt（异族模型）间交替——
+    第 1 次重发用 primary，第 2 次用 alt，依此循环。同模型常对自身违规不敏感，
+    早早引入异族视角比"primary 全部耗尽后才换"更快收敛。单一 for 循环统一终止
+    上限（max_retries + 6）。
 
-    返回最终的 response dict（无违规时直接返回原 result）。
+    退出时返回**违规最少**的候选（含原始响应——原始响应可能优于所有重试）。
     """
     if rules is None:
         rules = RULES
@@ -818,11 +971,19 @@ async def apply_style_guard_loop(
     # 构建 provider 队列：原生重试用 primary，交替时插入 alt
     _providers: list[tuple[str, Callable]] = [("primary", call_upstream)]
     if call_alt_upstream is not None:
-        _providers = [("primary", call_upstream), ("alt", call_alt_upstream)]
-    _active_fn: Callable = _providers[0][1]
+        _providers.append(("alt", call_alt_upstream))
     _provider_idx = 0  # 当前活跃 provider 的索引
-    _best_result: dict | None = None
-    _best_violations = float('inf')
+    _active_fn: Callable = _providers[0][1]
+
+    # 最优结果跟踪：以原始响应为初始基线，避免重试反而更差时丢失原始最优。
+    # 度量为 None（空/故障响应）时以 +inf 作基线，使任何有内容的候选都能取代它。
+    _best_result: dict = result
+    _m0 = _measure_violations(result, rules)
+    _best_violations: float = float("inf") if _m0 is None else _m0
+
+    # 入口快照 body 长度，循环结束时回滚所有追加的修正轮消息（与流式路径对齐，
+    # 避免把重试对话残留在 body 中污染后续 fluency / 日志 / 复用）。
+    _msgs_entry = len(body.get("messages", []))
 
     _total_retries = max_retries + 6 if call_alt_upstream is not None else max_retries
     for _retry in range(_total_retries):
@@ -830,118 +991,77 @@ async def apply_style_guard_loop(
         choices = result.get("choices", [])
         if not choices:
             break
-        content = choices[0].get("message", {}).get("content") or ""
-        # 若 content 为空但存在 tool_calls，继续扫描 tool_call 参数
-        if not content and not (choices[0].get("message") or {}).get("tool_calls"):
+        message = choices[0].get("message") or {}
+        content = message.get("content") or ""
+        saved_tc = message.get("tool_calls")
+        # content 为空且无 tool_calls：无可扫描内容
+        if not content and not saved_tc:
             break
 
-        # 显式跳过标签：assistant 主动要求绕过风格扫描
+        # 显式跳过标签：assistant 主动要求绕过风格扫描。
+        # 当前（已剥离标签的）result 即为期望返回值——显式设为最优，避免返回到某个
+        # 更早、违规更多的候选（_best_result 默认可能停留在原始响应）。
         if _has_override_tag(content):
             choices[0]["message"]["content"] = _strip_override_tag(content)
+            _best_result = result
             break
 
         violations = scan_violations(content, rules)
-
-        # 扫描 tool_call 参数（Edit.new_string / Write.content）中的违规
-        import json as _json
-        _tc_args_violations: list[dict] = []
-        _saved_tc = (choices[0].get("message") or {}).get("tool_calls")
-        if _saved_tc:
-            for _tc in _saved_tc:
-                _fn = _tc.get("function") or {}
-                _fn_args = _fn.get("arguments", "")
-                if not _fn_args:
-                    continue
-                try:
-                    _parsed = _json.loads(_fn_args)
-                except (_json.JSONDecodeError, TypeError):
-                    continue
-                if _fn.get("name") == "Edit" and isinstance(_parsed.get("new_string"), str):
-                    _tc_args_violations.extend(scan_violations(_parsed["new_string"], rules))
-                elif _fn.get("name") == "Write" and isinstance(_parsed.get("content"), str):
-                    _tc_args_violations.extend(scan_violations(_parsed["content"], rules))
-
-        if not violations and not _tc_args_violations:
+        tc_args_violations = scan_tool_call_violations(saved_tc, rules)
+        if not violations and not tc_args_violations:
             break
 
         feedback = build_feedback_message(violations)
-        # 将 tool_call 参数违规追加到反馈中
-        if _tc_args_violations:
-            _tc_feedback = build_feedback_message(_tc_args_violations)
+        if tc_args_violations:
             feedback = (
                 feedback
                 + "\n\n**注意：你即将通过 tool_call 写入文件的内容中也有违规，请同时修正 tool_call 参数**\n"
-                + _tc_feedback
+                + build_feedback_message(tc_args_violations)
             )
-        rid_list = sorted(set(v["rule_id"] for v in violations + _tc_args_violations))
-
-        # 告警：控制台立即输出 + 持久化到专用日志
-        ts = datetime.now().isoformat(timespec="seconds")
-        header = f"[StyleGuard] {ts} R{_retry + 1}/4 violations={len(violations) + len(_tc_args_violations)} ids={rid_list}"
-        lines = [header]
-        for v in violations + _tc_args_violations:
-            lines.append(f"  {v['rule_id']} {v['pattern_name']}: {v['sentence'][:80]}")
-        alert = "\n".join(lines)
-        with open(_ALERT_LOG, "a", encoding="utf-8") as f:
-            f.write(alert + "\n")
-
+        all_violations = violations + tc_args_violations
+        rid_list = sorted({v["rule_id"] for v in all_violations})
+        _log_alert(_retry + 1, _total_retries, all_violations, rid_list)
         logger.info("style_guard retry=%d violations=%d tc_args_violations=%d rule_ids=%s",
-                     _retry + 1, len(violations), len(_tc_args_violations), rid_list)
+                     _retry + 1, len(violations), len(tc_args_violations), rid_list)
 
-        # 附加前一轮的 assistant 消息和反馈
-        _msg = choices[0]["message"]
-        # 若当前响应含 tool_calls，剥离 tool_calls 后再追加——避免 tool_calls
-        # 消息缺少对应 tool_result 导致 DeepSeek "insufficient tool messages" 400 错误。
-        # tool_calls 保留在 _saved_tc 中，修正完成后合并回最终结果。
-        _tc_args_violated = bool(_tc_args_violations)
-        if _saved_tc:
-            logger.info(
-                "style_guard retry=%d: 响应含 tool_calls，剥离后继续修正循环",
-                _retry + 1,
-            )
-            _stripped_msg = dict(_msg)
-            _stripped_msg["tool_calls"] = None
-            body["messages"].append(_stripped_msg)
+        # 附加前一轮的 assistant 消息和反馈。
+        # 若含 tool_calls，剥离后再追加——避免 tool_calls 消息缺少对应 tool_result 导致
+        # DeepSeek "insufficient tool messages" 400 错误。tool_calls 保留在 saved_tc 中。
+        if saved_tc:
+            logger.info("style_guard retry=%d: 响应含 tool_calls，剥离后继续修正循环", _retry + 1)
+            stripped_msg = dict(message)
+            stripped_msg["tool_calls"] = None
+            body["messages"].append(stripped_msg)
         else:
-            body["messages"].append(_msg)
-        body["messages"].append({
-            "role": "user",
-            "content": "请继续完成上文未完成的响应。下面检测到风格问题需要修正，同时参考下方的改进草稿，将修正融入你的下一次回复中。响应时不要重复反馈内容，不要以Changelog或修改列表的形式汇报你做了什么改动，直接输出修正后的全文。\n\n" + feedback,
-        })
+            body["messages"].append(message)
+        body["messages"].append({"role": "user", "content": _RETRY_INSTRUCTION + feedback})
 
         result = await _active_fn()
 
-        # 跟踪最优结果
-        _scan_result = result.get("choices", [])
-        if _scan_result:
-            _scan_content = _scan_result[0].get("message", {}).get("content") or ""
-            _scan_vns = scan_violations(_scan_content, rules)
-            if len(_scan_vns) < _best_violations:
-                _best_violations = len(_scan_vns)
-                _best_result = result
+        # 解析重发结果的 tool_calls，修复"prose 违规 + 干净 tool_calls"时工具调用丢失：
+        #   - 原 tool_calls 参数干净（仅 prose 违规）→ 始终回挂原始 tool_calls，无论重发
+        #     是否自带（重发被要求改 prose，不应改动/丢弃工具调用意图）。旧逻辑仅在重发
+        #     恰好自带 tool_calls 时才合并，重发改写成纯文本时静默丢失工具调用。
+        #   - 原 tool_calls 参数违规 → 保留重发重新生成的 tool_calls（可能为空）。
+        # `or [{}]` 同时兜底"键缺失"与"空 choices 列表"（上游故障返回 {"choices": []}）。
+        if saved_tc and not tc_args_violations:
+            _rc0 = (result.get("choices") or [{}])[0]
+            if isinstance(_rc0.get("message"), dict):
+                _rc0["message"]["tool_calls"] = saved_tc
 
-        # 若重发后的响应含 tool_calls，回滚 body，保留修正文本
-        # 并合并原始 tool_calls（避免工具调用丢失）
-        # 但若原 tool_call 参数内含违规，则不合并，保留 LLM 重新生成的 tool_calls
-        if (result.get("choices", [{}])[0].get("message", {}).get("tool_calls")):
-            logger.warning(
-                "style_guard retry=%d: 修正后响应含 tool_calls，保留文本并合并原始 tool_calls",
-                _retry + 1,
-            )
-            del body["messages"][-2:]  # 回滚本轮追加的 assistant+feedback
-            if _saved_tc and not _tc_args_violated:
-                result["choices"][0]["message"]["tool_calls"] = _saved_tc
-            # 切换 provider 继续修正
-            _provider_idx = (_provider_idx + 1) % len(_providers)
-            _active_fn = _providers[_provider_idx][1]
-            continue
+        # 跟踪最优结果——在 tool_calls 解析**之后**度量，使"最优"与实际返回形态一致；
+        # 度量为 None（空/故障响应）时跳过，不让其取代已有最优。
+        _vn = _measure_violations(result, rules)
+        if _vn is not None and _vn < _best_violations:
+            _best_violations = _vn
+            _best_result = result
 
-        # 本次重发后仍有违规：切换到下一个 provider 继续
+        # 切换到下一个 provider 继续
         _provider_idx = (_provider_idx + 1) % len(_providers)
         _active_fn = _providers[_provider_idx][1]
 
-    # 返回最优结果
-    if _best_result is not None:
-        result = _best_result
+    # 回滚循环内追加的所有修正轮消息，恢复 body 到入口状态（与流式路径一致）。
+    if "messages" in body and len(body["messages"]) > _msgs_entry:
+        del body["messages"][_msgs_entry:]
 
-    return result
+    return _best_result

@@ -437,6 +437,37 @@ class TestOpenAIStreamToClaude:
         assert msg_delta["delta"]["stop_reason"] == "end_turn"
         assert msg_delta["usage"]["output_tokens"] == 2
 
+    async def test_styleguard_rebuilt_frames_translate_cleanly(self):
+        """StyleGuard 修正后重建的帧（content+finish_reason 帧 + 尾部 usage-only 帧）
+        须翻成合法 Anthropic 流：完整生命周期、正确文本、usage 透传。"""
+        from deep_proxy.router import DeepProxyRouter
+        buffered = [
+            {"id": "up-1", "model": "deepseek-v4-flash",
+             "choices": [{"delta": {"role": "assistant", "content": "原始违规"},
+                          "index": 0, "finish_reason": "stop"}]},
+            {"id": "up-1", "model": "deepseek-v4-flash", "choices": [],
+             "usage": {"prompt_tokens": 5, "completion_tokens": 3}},
+        ]
+        frames = DeepProxyRouter._rebuild_stream_frames(
+            {"role": "assistant", "content": "修正后的全文"}, buffered,
+        )
+
+        async def gen():
+            for f in frames:
+                yield f
+
+        events = await _collect(openai_stream_to_claude(gen(), requested_model="x"))
+        names = [_parse_event(e)[0] for e in events]
+        assert names[0] == "message_start"
+        assert names[-1] == "message_stop"
+        assert "message_delta" in names
+        deltas = [_parse_event(e)[1] for e in events
+                  if _parse_event(e)[0] == "content_block_delta"]
+        assert "".join(d["delta"]["text"] for d in deltas) == "修正后的全文"
+        msg_delta = next(_parse_event(e)[1] for e in events
+                         if _parse_event(e)[0] == "message_delta")
+        assert msg_delta["usage"]["output_tokens"] == 3
+
     async def test_empty_stream_emits_minimal_message(self):
         async def fake():
             return

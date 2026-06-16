@@ -300,6 +300,9 @@ class ReasoningCache:
 # ---------------------------------------------------------------------------
 
 
+_UNSET = object()  # update_slot_content 中区分"不改动 tool_calls"与"显式置 None"
+
+
 class StreamingReasoningAccumulator:
     """逐 chunk 累加 content / reasoning_content / tool_calls。
 
@@ -350,6 +353,38 @@ class StreamingReasoningAccumulator:
                 if slot["tool_calls"] is None:
                     slot["tool_calls"] = []
                 slot["tool_calls"] = merge_tool_call_deltas(slot["tool_calls"], tcs)
+
+    def get_slot(self, idx: int = 0) -> Dict[str, Any]:
+        """返回指定 choice 槽的累加结果（content / reasoning_content / tool_calls）。
+
+        返回的是**活槽对象本身**（非副本）——调用方应只读；如需改写用
+        `update_slot_content`。槽不存在时返回一份临时空默认 dict（不写回 self._slots）。
+        供 StyleGuard 流式 post-stream 扫描读取已累加的完整响应。
+        """
+        slot = self._slots.get(idx)
+        if slot is None:
+            return {"content": "", "reasoning_content": "", "tool_calls": None}
+        return slot
+
+    def update_slot_content(
+        self,
+        idx: int,
+        content: str,
+        reasoning_content: str = "",
+        tool_calls: Any = _UNSET,
+    ) -> None:
+        """原地覆写指定槽的 content / reasoning_content（可选 tool_calls）。
+
+        供 StyleGuard 流式修正后回写累加结果，保证 flush_to_cache 缓存的是修正后文本，
+        而非上游原始（违规）文本。tool_calls 缺省时不改动，避免误清空。
+        """
+        slot = self._slots.setdefault(
+            idx, {"content": "", "reasoning_content": "", "tool_calls": None}
+        )
+        slot["content"] = content
+        slot["reasoning_content"] = reasoning_content
+        if tool_calls is not _UNSET:
+            slot["tool_calls"] = tool_calls
 
     def flush_to_cache(self, cache: ReasoningCache) -> None:
         fp = conversation_fingerprint(self._prefix)

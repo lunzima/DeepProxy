@@ -430,3 +430,39 @@ def test_port_binding_with_system_prompt():
 def test_port_binding_default_no_system_prompt():
     b = PortBinding(port=8000, provider="deepseek", sampling="precise")
     assert b.system_prompt is None
+
+
+def _dual_cfg_with_system_prompt():
+    return ProxyConfig.model_validate({
+        "providers": {
+            "deepseek": {"name": "deepseek", "api_base": "https://api.deepseek.com",
+                         "api_key": "sk-test", "litellm_prefix": "deepseek/",
+                         "flash_model": "deepseek-v4-flash", "pro_model": "deepseek-v4-pro"},
+            "mimo": {"name": "mimo", "api_base": "https://x/v1", "api_key": "tp-test",
+                     "litellm_prefix": "openai/", "flash_model": "mimo-v2.5",
+                     "pro_model": "mimo-v2.5-pro"},
+        },
+        "ports": [
+            {"port": 8000, "provider": "deepseek", "sampling": "precise"},
+            {"port": 8001, "provider": "mimo", "sampling": "creative",
+             "system_prompt": "你是余华。"},
+        ],
+        "deepseek": {"api_key": "sk-test"},
+    })
+
+
+def test_inject_port_system_prompt_prepends_system(monkeypatch):
+    import deep_proxy.main as main
+    monkeypatch.setattr(main, "config", _dual_cfg_with_system_prompt())
+    body = {"messages": [{"role": "user", "content": "写一段"}]}
+    main._inject_port_system_prompt(body, 8001)
+    assert body["messages"][0] == {"role": "system", "content": "你是余华。"}
+    assert body["messages"][1]["role"] == "user"
+
+
+def test_inject_port_system_prompt_noop_when_unset(monkeypatch):
+    import deep_proxy.main as main
+    monkeypatch.setattr(main, "config", _dual_cfg_with_system_prompt())
+    body = {"messages": [{"role": "user", "content": "算个题"}]}
+    main._inject_port_system_prompt(body, 8000)  # 8000 无 system_prompt
+    assert body["messages"][0]["role"] == "user"

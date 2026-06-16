@@ -13,9 +13,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 from typing import Any, AsyncGenerator, Callable
+from uuid import uuid4
 
 import httpx
 from fastapi import HTTPException
@@ -85,6 +88,56 @@ from .optimization.think_steering import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _message_to_chunk_frames(
+    message: dict[str, Any],
+    *,
+    frame_id: str | None = None,
+    model: str | None = None,
+    created: int | None = None,
+) -> list[dict[str, Any]]:
+    """把一条（StyleGuard 修正后的）assistant 消息转换为流式 chunk 帧序列。
+
+    用于流式路径在 post-stream 修正后，以修正消息为唯一真相重建待 yield 的缓冲帧——
+    避免保留与修正内容不一致的原始帧（如修正后 tool_calls 改变、原帧已过期）。
+
+    OpenAI 一致性：同一 completion 的所有 chunk **共享一个 id**（不再每帧新 uuid）；
+    `role:"assistant"` 仅落在首帧 delta；尽量沿用上游的 model/created。
+    finish_reason **由修正消息自身**派生（有 tool_calls → "tool_calls"，否则 "stop"），
+    不沿用上游原始 finish_reason——否则参数违规修正把 tool_call 改写成纯文本后，
+    仍带 finish_reason="tool_calls" 会误导客户端 SDK 等待并不存在的工具调用。
+    """
+    content = message.get("content") or ""
+    reasoning = message.get("reasoning_content") or ""
+    tool_calls = message.get("tool_calls")
+    finish_reason = "tool_calls" if tool_calls else "stop"
+    fid = frame_id or f"chatcmpl-{uuid4().hex[:29]}"
+
+    def _frame(delta: dict[str, Any]) -> dict[str, Any]:
+        f: dict[str, Any] = {"id": fid, "object": "chat.completion.chunk"}
+        if model is not None:
+            f["model"] = model
+        if created is not None:
+            f["created"] = created
+        f["choices"] = [{"index": 0, "delta": delta, "finish_reason": None}]
+        return f
+
+    frames: list[dict[str, Any]] = []
+    if content or reasoning:
+        delta: dict[str, Any] = {"content": content}
+        if reasoning:
+            delta["reasoning_content"] = reasoning
+        frames.append(_frame(delta))
+    if tool_calls:
+        frames.append(_frame({"tool_calls": tool_calls}))
+    if not frames:
+        frames.append(_frame({"content": ""}))  # 兜底：空内容也发一帧承载 finish_reason
+
+    # role 仅落首帧 delta；finish_reason 落末帧
+    frames[0]["choices"][0]["delta"]["role"] = "assistant"
+    frames[-1]["choices"][0]["finish_reason"] = finish_reason
+    return frames
 
 
 class DeepProxyRouter:
@@ -504,7 +557,18 @@ class DeepProxyRouter:
         共享于流式 (iter_chat_chunks) 与非流式 (chat_completions) 两条路径。
         返回处理后的 result（无违规时原值返回；违规修正后为新响应）。
         """
-        from .optimization.style_guard import apply_style_guard_loop, apply_fluency_fix, RULES
+        from .optimization.style_guard import (
+            apply_style_guard_loop, apply_fluency_fix, RULES,
+            _has_override_tag, _strip_override_tag,
+        )
+        # 显式跳过标签：清理后跳过 StyleGuard 与 fluency（与流式 _styleguard_scan_stream 一致）。
+        _ovc = result.get("choices") or []
+        if _ovc:
+            _ovm = _ovc[0].get("message") or {}
+            _ovtext = _ovm.get("content") or ""
+            if _has_override_tag(_ovtext):
+                _ovm["content"] = _strip_override_tag(_ovtext)
+                return self.process_response(result, provider=provider)
         async def _resend():
             return await call_litellm(self.config, body, provider=provider)
         # 异族模型调用：跨家族修正，解决同模型对自身违规不敏感的问题
@@ -543,6 +607,158 @@ class DeepProxyRouter:
             result=corrected,
         )
         return self.process_response(corrected, provider=provider)
+
+    @staticmethod
+    def _slot_message(
+        content: str, reasoning: str, tool_calls: Any = None,
+    ) -> dict[str, Any]:
+        """从累加槽构造一条 assistant 消息（供 StyleGuard 合成 result）。
+
+        tool_calls 必须随之传入——否则 apply_style_guard_loop 看不到 tool_calls，
+        会把纯 tool_call（无文本）响应当作空响应直接跳过，漏扫 Edit/Write 参数违规。
+        """
+        msg: dict[str, Any] = {"content": content, "role": "assistant"}
+        if reasoning:
+            msg["reasoning_content"] = reasoning
+        if tool_calls:
+            msg["tool_calls"] = tool_calls
+        return msg
+
+    @staticmethod
+    def _rebuild_stream_frames(
+        message: dict[str, Any], buffered: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """以修正消息重建缓冲帧，并携带原始流的 usage（若客户端请求 include_usage）。
+
+        非流式路径会保留 usage；流式修正若丢弃 usage 会让 include_usage 客户端收不到
+        用量。只提取原始 usage **对象**、重新封装为干净的 usage-only 帧（choices=[]、
+        无 finish_reason），而非转发原始 usage chunk——后者带自身 finish_reason 与
+        已被修正取代的 stale choices，会造成"两个终止帧 + 泄漏违规原文"。
+        """
+        # 沿用上游真实 id/model/created——同一 completion 全部 chunk 必须共享 id，
+        # 且重建帧补回 model/created 以满足严格客户端 SDK 的 schema。
+        frame_id = next((f.get("id") for f in buffered if f.get("id")), None) \
+            or f"chatcmpl-{uuid4().hex[:29]}"
+        model = next((f.get("model") for f in buffered if f.get("model")), None)
+        created = next((f.get("created") for f in buffered if f.get("created")), None)
+        frames = _message_to_chunk_frames(
+            message, frame_id=frame_id, model=model, created=created,
+        )
+        usage = next((f["usage"] for f in buffered if f.get("usage")), None)
+        if usage is not None:
+            usage_frame: dict[str, Any] = {
+                "id": frame_id, "object": "chat.completion.chunk",
+            }
+            if model is not None:
+                usage_frame["model"] = model
+            if created is not None:
+                usage_frame["created"] = created
+            usage_frame["choices"] = []
+            usage_frame["usage"] = usage
+            frames.append(usage_frame)
+        return frames
+
+    async def _styleguard_scan_stream(
+        self,
+        body: dict[str, Any],
+        provider: Provider | None,
+        accumulator: StreamingReasoningAccumulator,
+        buffered: list[dict[str, Any]],
+        finish_reason: str | None,
+    ) -> list[dict[str, Any]]:
+        """流式 post-stream StyleGuard：扫描累加结果，必要时修正并重建缓冲帧。
+
+        扫描 content + tool_call 参数（与非流式一致，含纯 tool_call 无文本场景）。
+        修正后以 `_message_to_chunk_frames` 从修正消息重建帧，避免保留与修正不一致的
+        原始帧。异常时回滚注入的反馈消息并回退到原始缓冲帧。
+        """
+        from .optimization.style_guard import (
+            RULES, apply_fluency_fix,
+            scan_tool_call_violations, scan_violations,
+            _has_override_tag, _strip_override_tag,
+        )
+
+        # 全程包在 try 内——扫描/正则/槽提取的任何异常都只降级回退到原始缓冲帧，
+        # 绝不让 post-stream 处理异常撕裂已完整生成的整条响应流。
+        msgs_before = len(body.get("messages", []))
+        try:
+            slot = accumulator.get_slot(0)
+            content = slot.get("content", "") or ""
+            reasoning = slot.get("reasoning_content", "") or ""
+            tool_calls = slot.get("tool_calls")
+            if not content and not tool_calls:
+                return buffered
+
+            # 显式跳过标签：清理后直通，跳过 StyleGuard 与 fluency（与非流式 _apply_style_guard
+            # 一致）。以修正消息重建帧——稳健处理标签被拆到多个 delta 帧的情形。
+            if content and _has_override_tag(content):
+                clean = _strip_override_tag(content)
+                accumulator.update_slot_content(0, clean, reasoning, tool_calls=tool_calls)
+                return self._rebuild_stream_frames(
+                    self._slot_message(clean, reasoning, tool_calls), buffered,
+                )
+
+            violations = scan_violations(content, RULES)
+            tc_violations = scan_tool_call_violations(tool_calls, RULES)
+            # 合成一条与上游响应等价的 result，供 StyleGuard / fluency 复用非流式逻辑
+            result = {"choices": [{
+                "index": 0,
+                "message": self._slot_message(content, reasoning, tool_calls),
+                "finish_reason": finish_reason or "stop",
+            }]}
+
+            if violations or tc_violations:
+                corrected = await self._apply_style_guard(body, provider, result)
+                choices = corrected.get("choices", [])
+                if not choices or "message" not in choices[0]:
+                    raise ValueError("StyleGuard 返回空 choices")
+                new_msg = choices[0]["message"]
+                new_content = new_msg.get("content", "") or ""
+                new_tc = new_msg.get("tool_calls")
+                # 内容或 tool_calls 发生变化 → 以修正消息重建缓冲帧
+                if new_content != content or new_tc != tool_calls:
+                    accumulator.update_slot_content(
+                        0, new_content, new_msg.get("reasoning_content", "") or "",
+                        tool_calls=new_tc,
+                    )
+                    return self._rebuild_stream_frames(new_msg, buffered)
+                return buffered
+
+            # 无违规：AI 通顺性审查（与非流式 _apply_style_guard 内的 fluency 一致）。
+            # apply_fluency_fix 内部就地审查工具写入正文 + 随附 prose，并保留 tool_calls；
+            # 故此处对含/不含 tool_calls 的响应统一处理，从修正后整条消息重建帧。
+            # tool_calls 参数是**就地**改写的，须在审查前快照序列化，否则改后比较同一对象
+            # 永远相等 → 漏判变化、返回过期原帧。
+            _pre_tc = json.dumps(tool_calls, ensure_ascii=False, sort_keys=True) \
+                if tool_calls else None
+            fluent = await apply_fluency_fix(
+                body=body,
+                call_upstream=lambda: call_litellm(self.config, body, provider=provider),
+                result=result,
+            )
+            fluent = self.process_response(fluent, provider=provider)
+            choices = fluent.get("choices", [])
+            if choices and "message" in choices[0]:
+                f_msg = choices[0]["message"]
+                f_content = f_msg.get("content", "") or ""
+                f_tc = f_msg.get("tool_calls")
+                _post_tc = json.dumps(f_tc, ensure_ascii=False, sort_keys=True) \
+                    if f_tc else None
+                if f_content != content or _post_tc != _pre_tc:
+                    accumulator.update_slot_content(
+                        0, f_content, f_msg.get("reasoning_content", "") or "",
+                        tool_calls=f_tc,
+                    )
+                    return self._rebuild_stream_frames(f_msg, buffered)
+            return buffered
+        except Exception:
+            # 回滚可能注入的反馈消息（loop/fluency 多已自恢复，此处兜底异常中途退出）
+            if "messages" in body and len(body["messages"]) > msgs_before:
+                del body["messages"][msgs_before:]
+            logger.warning(
+                "StyleGuard 流式扫描异常，回滚反馈消息，回退到原始响应", exc_info=True,
+            )
+            return buffered
 
     # ------------------------------------------------------------------
     # 端点方法（轻量封装，供 main.py 调用）
@@ -682,167 +898,62 @@ class DeepProxyRouter:
                             _last_finish_reason = _fr
                 else:
                     yield frame
-            completed_cleanly = True
 
             # ── StyleGuard 流式后置扫描 ──
-            # 始终扫描 _content（含 tool_calls 帧），修正仅限无 tool_calls 场景。
-            # tool_calls 帧中若含违规文本（如破折号），仍需捕获并记录。
+            # 扫描累加结果（content + tool_call 参数），必要时修正并以"修正消息"
+            # 为唯一真相重建缓冲帧。与非流式 chat_completions 共用 _apply_style_guard /
+            # apply_fluency_fix，保证两条路径行为一致。
+            # 扫描期间会做多次阻塞上游重发——其间发 SSE 心跳，防客户端 idle-read 超时
+            # （缓冲已延迟全部输出，retry 阶段若静默易触发断连）。
             if _sg_active and not saw_error_frame:
-                _slot0 = accumulator.get_slot(0)
-                _content = _slot0.get("content", "")
-                _tc = _slot0.get("tool_calls")
-                if _content:
-                    from .optimization.style_guard import (
-                        scan_violations, RULES, _has_override_tag, _strip_override_tag,
-                    )
-                    if _has_override_tag(_content):
-                        accumulator.update_slot_content(
-                            0, _strip_override_tag(_content),
-                            _slot0.get("reasoning_content", ""),
-                        )
-                        # 同步清理缓冲帧中的标签
-                        for _frame in _buffered:
-                            for _ch in _frame.get("choices", []):
-                                _dc = _ch.get("delta", {}).get("content", "")
-                                if _dc and "[style-override]" in _dc:
-                                    _ch["delta"]["content"] = _dc.replace("[style-override]", "")
-                    else:
-                        # 同时扫描 tool_call 参数（与 apply_style_guard_loop 行为一致）
-                        import json as _json
-                        _tc_args_violations: list = []
-                        if _tc:
-                            for _tcc in _tc:
-                                _fn = _tcc.get("function") or {}
-                                _fn_args = _fn.get("arguments", "")
-                                if not _fn_args:
-                                    continue
-                                try:
-                                    _parsed = _json.loads(_fn_args)
-                                except (_json.JSONDecodeError, TypeError):
-                                    continue
-                                if _fn.get("name") == "Edit" and isinstance(_parsed.get("new_string"), str):
-                                    _tc_args_violations.extend(scan_violations(_parsed["new_string"], RULES))
-                                elif _fn.get("name") == "Write" and isinstance(_parsed.get("content"), str):
-                                    _tc_args_violations.extend(scan_violations(_parsed["content"], RULES))
-
-                        _msgs_before = len(body["messages"])
+                _sc = self.config.streaming
+                _hb = float(_sc.heartbeat_seconds)
+                # 整体墙钟上限：扫描内部 call_litellm 重发本身无 idle 守护，封顶防上游
+                # 挂死时无限发心跳。预算 ≈ 每个可能重发各给一个 first_chunk 超时窗口。
+                _scan_budget = float(_sc.first_chunk_timeout_seconds) * (
+                    self.config.style_guard.max_retries + 8
+                )
+                _scan = asyncio.ensure_future(self._styleguard_scan_stream(
+                    body, provider, accumulator, _buffered, _last_finish_reason,
+                ))
+                _waited = 0.0
+                try:
+                    while True:
                         try:
-                            _violations = scan_violations(_content, RULES)
-                            if _violations or _tc_args_violations:
-                                _msg: dict[str, Any] = {"content": _content, "role": "assistant"}
-                                _rc = _slot0.get("reasoning_content", "")
-                                if _rc:
-                                    _msg["reasoning_content"] = _rc
-                                _result = {
-                                    "choices": [{"index": 0, "message": _msg,
-                                                 "finish_reason": _last_finish_reason or "stop"}],
-                                }
-                                _corrected = await self._apply_style_guard(body, provider, _result)
-                                _choices = _corrected.get("choices", [])
-                                if not _choices or "message" not in _choices[0]:
-                                    raise ValueError("StyleGuard 返回空 choices")
-                                _new_msg = _choices[0]["message"]
-                                _new_content = _new_msg.get("content", "")
-                                if _new_content and _new_content != _content:
-                                    # 违规被修正（含 tool_calls 场景）
-                                    del body["messages"][_msgs_before:]
-                                    if _tc:
-                                        # tool_calls 存在时：回写修正后的文本，
-                                        # 保留所有含 tool_calls 的 delta 帧（客户端需要它们执行工具），
-                                        # 过滤掉已替换的文本 content delta 帧。
-                                        from uuid import uuid4
-                                        _rc_new = _new_msg.get("reasoning_content", "")
-                                        accumulator.update_slot_content(0, _new_content, _rc_new)
-                                        # 构建修正后的内容帧
-                                        _corr_delta: dict[str, Any] = {"content": _new_content}
-                                        if _rc_new:
-                                            _corr_delta["reasoning_content"] = _rc_new
-                                        _corr_frame = {
-                                            "id": f"chatcmpl-{uuid4().hex[:29]}",
-                                            "object": "chat.completion.chunk",
-                                            "choices": [{
-                                                "index": 0,
-                                                "delta": _corr_delta,
-                                                "finish_reason": None,
-                                            }],
-                                        }
-                                        # 保留含 tool_calls 的 delta 帧，以及尾部 finish_reason 帧
-                                        _tc_frames = [
-                                            f for f in _buffered
-                                            if any(
-                                                c.get("delta", {}).get("tool_calls")
-                                                for c in f.get("choices", [])
-                                            )
-                                            or any(
-                                                c.get("finish_reason") in ("stop", "tool_calls")
-                                                for c in f.get("choices", [])
-                                            )
-                                        ]
-                                        # 替换后：修正内容帧 + tool_calls delta 帧
-                                        _buffered = [_corr_frame] + _tc_frames
-                                    else:
-                                        # 无 tool_calls：回写 accumulator + 替换缓冲帧
-                                        _rc_new = _new_msg.get("reasoning_content", "")
-                                        accumulator.update_slot_content(0, _new_content, _rc_new)
-                                        from uuid import uuid4
-                                        _delta: dict[str, Any] = {"content": _new_content}
-                                        if _rc_new:
-                                            _delta["reasoning_content"] = _rc_new
-                                        _buffered = [{
-                                            "id": f"chatcmpl-{uuid4().hex[:29]}",
-                                            "object": "chat.completion.chunk",
-                                            "choices": [{
-                                                "index": 0,
-                                                "delta": _delta,
-                                                "finish_reason": _last_finish_reason or "stop",
-                                            }],
-                                        }]
-                            elif not _tc_args_violations:
-                                # 无违规但含叙事锚点：执行 AI 通顺性审查
-                                _msg: dict[str, Any] = {"content": _content, "role": "assistant"}
-                                _rc = _slot0.get("reasoning_content", "")
-                                if _rc:
-                                    _msg["reasoning_content"] = _rc
-                                _result = {
-                                    "choices": [{"index": 0, "message": _msg,
-                                                 "finish_reason": _last_finish_reason or "stop"}],
-                                }
-                                from .optimization.style_guard import apply_fluency_fix
-                                _fluent = await apply_fluency_fix(
-                                    body=body,
-                                    call_upstream=lambda: call_litellm(self.config, body, provider=provider),
-                                    result=_result,
-                                )
-                                _f_choices = _fluent.get("choices", [])
-                                if _f_choices and "message" in _f_choices[0]:
-                                    _f_content = _f_choices[0]["message"].get("content", "")
-                                    if _f_content and _f_content != _content:
-                                        _rc_new = _f_choices[0]["message"].get("reasoning_content", "")
-                                        accumulator.update_slot_content(0, _f_content, _rc_new)
-                                        from uuid import uuid4
-                                        _delta: dict[str, Any] = {"content": _f_content}
-                                        if _rc_new:
-                                            _delta["reasoning_content"] = _rc_new
-                                        _buffered = [{
-                                            "id": f"chatcmpl-{uuid4().hex[:29]}",
-                                            "object": "chat.completion.chunk",
-                                            "choices": [{
-                                                "index": 0,
-                                                "delta": _delta,
-                                                "finish_reason": _last_finish_reason or "stop",
-                                            }],
-                                        }]
-                        except Exception:
-                            del body["messages"][_msgs_before:]
-                            logger.warning(
-                                "StyleGuard 流式扫描异常，回滚反馈消息，回退到原始响应",
-                                exc_info=True,
+                            # shield：超时只中断等待，不取消扫描任务（保留重发进度）
+                            _buffered = await asyncio.wait_for(
+                                asyncio.shield(_scan), timeout=_hb,
                             )
+                            break
+                        except asyncio.TimeoutError:
+                            _waited += _hb
+                            if _waited >= _scan_budget:
+                                # 扫描超总预算（上游疑似挂死）：取消并回退到原始缓冲帧
+                                logger.warning(
+                                    "StyleGuard 流式扫描超总预算 %.0fs，回退到原始响应",
+                                    _scan_budget,
+                                )
+                                _scan.cancel()
+                                with contextlib.suppress(BaseException):
+                                    await _scan  # drain：避免 "exception never retrieved"
+                                break
+                            yield {"_dp_heartbeat": True}
+                except BaseException:
+                    # 客户端断开 / 生成器被关闭：取消并 drain 游离的扫描任务，避免泄漏
+                    _scan.cancel()
+                    with contextlib.suppress(BaseException):
+                        await _scan
+                    raise
 
             # yield 缓冲帧（原始或修正后）
             if _sg_active:
                 for frame in _buffered:
                     yield frame
+
+            # 流 + post-stream 扫描 + 缓冲全部交付完成才算干净完成——
+            # 扫描期间客户端断开（BaseException）会跳过此处，finally 不提交升格记账，
+            # 与"原始流式途中断开不提交"保持一致。
+            completed_cleanly = True
 
         finally:
             accumulator.flush_to_cache(self._reasoning_cache)
