@@ -129,6 +129,50 @@ class TestScanViolations:
         assert len(fr5) == 2
 
 
+class TestDialogueExemption:
+    """§3.5.3 对话豁免：引号内（角色台词）不受叙事散文规则约束。
+
+    "对话" = 小说里角色的台词（引号内），不是 assistant 在 chat 里的整条回复。
+    与 _FLUENCY_SYSTEM_PROMPT「角色对话（引号内的文字）保持原样」一致。
+    """
+
+    def test_negation_inside_chinese_quotes_exempt(self):
+        """否定式描写出现在「」角色台词内时豁免，不报 fr5。"""
+        text = "他说：「我没有去过那里。」"
+        hits = scan_violations(text)
+        assert not any(h["rule_id"] == "fr5" for h in hits)
+
+    def test_dash_inside_chinese_quotes_exempt(self):
+        """破折号（语音中断）出现在「」台词内时豁免，不报 dash。"""
+        text = "他说：「等一下——你先听我说完。」"
+        hits = scan_violations(text)
+        assert not any(h["rule_id"] == "dash" for h in hits)
+
+    def test_negation_inside_curly_quotes_exempt(self):
+        """否定式出现在“”台词内时豁免。"""
+        text = "他开口：“我没有去过那里。”"
+        hits = scan_violations(text)
+        assert not any(h["rule_id"] == "fr5" for h in hits)
+
+    def test_negation_in_narrative_still_flagged(self):
+        """叙事段（引号外）的否定式仍照常拦截——豁免只针对台词。"""
+        text = "他站在那里，没有动。"
+        hits = scan_violations(text)
+        assert any(h["rule_id"] == "fr5" for h in hits)
+
+    def test_mixed_narrative_flagged_dialogue_exempt(self):
+        """同一文本：叙事否定式报 1 次，台词内否定式豁免。"""
+        text = "他没有回答。他说：「我没有去过那里。」"
+        fr5 = [h for h in scan_violations(text) if h["rule_id"] == "fr5"]
+        assert len(fr5) == 1
+        assert "回答" in fr5[0]["sentence"]
+
+    def test_quote_punctuation_rule_not_exempted(self):
+        """q_quote（引号字符结构规则）即便命中位于引号区间也不豁免。"""
+        from deep_proxy.optimization.style_guard import QUOTE_MISMATCH
+        assert QUOTE_MISMATCH.dialogue_exempt is False
+
+
 class TestBuildFeedbackMessage:
     def test_contains_pattern_name_and_example_fix(self):
         violations = [{
@@ -324,8 +368,13 @@ class TestStyleGuardLoop:
         assert final is result
 
     @pytest.mark.asyncio
-    async def test_tool_call_edit_args_with_violations_not_merged(self):
-        """Edit tool 参数含违规时，原 tool_call 不合并回修正结果。"""
+    async def test_tool_call_edit_args_violation_preserves_call_with_corrected_text(self):
+        """Edit tool 参数含违规：重发改写成纯散文（丢 tool_calls）时，
+        必须把修正文本回写进**保留的** tool_call 参数——绝不把工具调用降级成散文。
+
+        这是 agent 写文件场景的核心不变量：原响应是 tool_call → 返回也必须是 tool_call，
+        否则客户端收到一段"我来写文件"的文字但文件从未落盘。
+        """
         import json as _json
         first = {
             "choices": [{"message": {
@@ -340,6 +389,7 @@ class TestStyleGuardLoop:
                 }}],
             }}]
         }
+        # 重发遵循"直接输出全文"指令，返回修正后的纯散文，没有重新发工具调用
         second = {
             "choices": [{"message": {
                 "role": "assistant",
@@ -363,8 +413,14 @@ class TestStyleGuardLoop:
             max_retries=2,
         )
         assert call_count == 1
-        # 参数违规→不合并原 tool_calls，保留 LLM 修正后的无 tool_calls 响应
-        assert "tool_calls" not in final["choices"][0]["message"]
+        final_msg = final["choices"][0]["message"]
+        # 不变量：工具调用必须保留
+        assert final_msg.get("tool_calls"), "tool_call 不得被降级成散文"
+        assert final_msg["tool_calls"][0]["id"] == "tc1"
+        # 修正后的文本被回写进 tool_call 参数（文件会写入修正版）
+        args = _json.loads(final_msg["tool_calls"][0]["function"]["arguments"])
+        assert args["new_string"] == "他站在那里，双手放在身体两侧。"
+        assert args["file_path"] == "test.md"  # 其余参数不变
 
     @pytest.mark.asyncio
     async def test_tool_call_write_args_clean_merged_normally(self):

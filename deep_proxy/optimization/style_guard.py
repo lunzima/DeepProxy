@@ -45,6 +45,10 @@ class StyleRule:
     quote_violation: bool = True  # 反馈中是否引用违规原文。False 时仅使用 pattern_name，
     # 避免高频模式被引用后反而被 LLM 学习强化（"禁词表当提词器"效应）。
     # 高风险模式（归因句式、套路收尾、抽象词标签）设为 False。
+    dialogue_exempt: bool = True  # 命中落在角色台词（引号内）时是否豁免。
+    # §3.5.3「对话中不受限」——"对话"指小说里角色的台词（引号内），非 assistant 整条回复。
+    # 与 _FLUENCY_SYSTEM_PROMPT「角色对话（引号内的文字）保持原样」一致。
+    # 引号字符结构规则（QUOTE_MISMATCH）须设 False：它本就是检查引号本身，不能在引号内失效。
 
 
 def _compile(pattern: str) -> re.Pattern:
@@ -441,6 +445,7 @@ QUOTE_MISMATCH = StyleRule(
     _compile(r"”"),
     "所有冒号(:)后的左起位必须使用左引号U+201C，而非右引号U+201D。请在编辑时从原文已正确使用的对话中复制现成的左引号，再粘贴到目标位置。",
     quote_violation=False,
+    dialogue_exempt=False,  # 检查引号字符本身，不能在引号区间内失效
 )
 
 Q_TRANSLATIONESE_DE = StyleRule(
@@ -507,6 +512,21 @@ RULES: list[StyleRule] = [
 # ---------------------------------------------------------------------------
 # 扫描
 # ---------------------------------------------------------------------------
+
+
+# 角色台词（对话）引号区间。支持中文直角引号「」与弯引号“”（成对、非嵌套）。
+# 用于 §3.5.3 对话豁免：落在台词区间内的叙事散文规则命中予以跳过。
+_DIALOGUE_QUOTE_RE = re.compile(r"「[^」]*」|“[^”]*”")
+
+
+def _dialogue_spans(text: str) -> list[tuple[int, int]]:
+    """返回所有角色台词引号区间 [start, end)（含引号本身）。"""
+    return [(m.start(), m.end()) for m in _DIALOGUE_QUOTE_RE.finditer(text)]
+
+
+def _in_any_span(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
+    """判断 [start, end) 是否完整落在任一区间内。"""
+    return any(s <= start and end <= e for s, e in spans)
 
 
 def _sentence_span(text: str, match_start: int, match_end: int) -> tuple[int, int]:
@@ -667,8 +687,14 @@ def scan_violations(text: str, rules: list[StyleRule] | None = None) -> list[dic
     hits: list[dict] = []
     seen: set[tuple] = set()  # (rule_id, sentence_start) / (rule_id, sentence)
 
+    # §3.5.3 对话豁免：预计算台词引号区间，落在区间内的可豁免规则命中将被跳过。
+    dlg_spans = _dialogue_spans(text)
+
     for rule in rules:
         for m in rule.pattern.finditer(text):
+            # 命中完整落在角色台词（引号内）且该规则可豁免 → 跳过（"对话中不受限"）。
+            if rule.dialogue_exempt and _in_any_span(m.start(), m.end(), dlg_spans):
+                continue
             # 以**匹配位置**所在句子的起点去重，而非 text.find(sentence)——后者返回
             # 句子在全文的首次出现，会把不同位置的同形句子误判为同一处（漏报）。
             start, end = _sentence_span(text, m.start(), m.end())
@@ -729,6 +755,51 @@ def scan_tool_call_violations(
         if isinstance(value, str):
             out.extend(scan_violations(value, rules))
     return out
+
+
+def _extract_tool_text(tool_calls: list | None) -> str | None:
+    """从 tool_calls 中提取首个写文件工具的文本参数（Write.content / Edit.new_string）。
+
+    用于判断重发是否自带了重新生成的工具调用文本。无则返回 None。
+    """
+    if not tool_calls:
+        return None
+    for tc in tool_calls:
+        fn = (tc.get("function") if isinstance(tc, dict) else None) or {}
+        arg_key = _TOOL_TEXT_ARG_KEYS.get(fn.get("name"))
+        if arg_key is None:
+            continue
+        try:
+            parsed = json.loads(fn.get("arguments", "") or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get(arg_key), str):
+            return parsed[arg_key]
+    return None
+
+
+def _inject_text_into_tool_calls(tool_calls: list, corrected_text: str) -> list:
+    """返回 tool_calls 的深拷贝，把修正文本写回首个写文件工具的文本参数。
+
+    其余参数（file_path 等）保持不变。供 StyleGuard 循环在"参数违规 + 重发降级成散文"时
+    把修正后的散文回写进**保留的**工具调用，绝不让工具调用降级丢失。
+    """
+    new_calls = json.loads(json.dumps(tool_calls))  # 深拷贝，避免改动原始 saved_tc
+    for tc in new_calls:
+        fn = (tc.get("function") if isinstance(tc, dict) else None) or {}
+        arg_key = _TOOL_TEXT_ARG_KEYS.get(fn.get("name"))
+        if arg_key is None:
+            continue
+        try:
+            parsed = json.loads(fn.get("arguments", "") or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        parsed[arg_key] = corrected_text
+        fn["arguments"] = json.dumps(parsed, ensure_ascii=False)
+        break  # 仅回写首个写文件工具
+    return new_calls
 
 
 # ---------------------------------------------------------------------------
@@ -1038,16 +1109,28 @@ async def apply_style_guard_loop(
 
         result = await _active_fn()
 
-        # 解析重发结果的 tool_calls，修复"prose 违规 + 干净 tool_calls"时工具调用丢失：
-        #   - 原 tool_calls 参数干净（仅 prose 违规）→ 始终回挂原始 tool_calls，无论重发
-        #     是否自带（重发被要求改 prose，不应改动/丢弃工具调用意图）。旧逻辑仅在重发
-        #     恰好自带 tool_calls 时才合并，重发改写成纯文本时静默丢失工具调用。
-        #   - 原 tool_calls 参数违规 → 保留重发重新生成的 tool_calls（可能为空）。
-        # `or [{}]` 同时兜底"键缺失"与"空 choices 列表"（上游故障返回 {"choices": []}）。
-        if saved_tc and not tc_args_violations:
-            _rc0 = (result.get("choices") or [{}])[0]
-            if isinstance(_rc0.get("message"), dict):
-                _rc0["message"]["tool_calls"] = saved_tc
+        # tool_call 保留不变量：**原响应含 tool_calls → 重发结果也必须含 tool_calls**。
+        # 否则客户端收到一段"我来写文件"的散文、文件却从未落盘（agent 写文件场景的致命 bug）。
+        # 重发遵循 _RETRY_INSTRUCTION「直接输出全文」常返回纯散文、丢失工具调用，需在此回补。
+        _rc_choices = result.get("choices") or []
+        if saved_tc and _rc_choices and isinstance(_rc_choices[0].get("message"), dict):
+            _rmsg = _rc_choices[0]["message"]
+            if not tc_args_violations:
+                # 仅 prose 违规、工具参数本身干净 → 始终回挂原始 tool_calls（参数不动）。
+                _rmsg["tool_calls"] = saved_tc
+            else:
+                # 工具参数本身违规 → 需要修正后的文件正文，但仍须以工具调用形态返回。
+                #   1) 重发自带重新生成的写文件工具 → 直接采用其文本；
+                #   2) 否则取重发的散文 content 作为修正文本，回写进保留的原始工具调用；
+                #   3) 都没有 → 兜底回挂原始工具调用（文件仍会写入，至多保留瑕疵，绝不丢调用）。
+                _corrected = _extract_tool_text(_rmsg.get("tool_calls"))
+                if _corrected is None:
+                    _corrected = _rmsg.get("content") or ""
+                if _corrected:
+                    _rmsg["tool_calls"] = _inject_text_into_tool_calls(saved_tc, _corrected)
+                    _rmsg["content"] = ""  # 正文已并入工具参数，不再以散文重复
+                else:
+                    _rmsg["tool_calls"] = saved_tc
 
         # 跟踪最优结果——在 tool_calls 解析**之后**度量，使"最优"与实际返回形态一致；
         # 度量为 None（空/故障响应）时跳过，不让其取代已有最优。

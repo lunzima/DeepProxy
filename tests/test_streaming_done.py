@@ -250,7 +250,8 @@ class TestStreamingStyleGuard:
         assert args["content"] == narrative + "（已润色）"
 
     async def test_scan_stream_pure_toolcall_arg_violation(self, router, monkeypatch):
-        """纯 tool_call（无文本）+ Edit 参数违规：流式也须扫描并修正（修复 if _content 门控）。"""
+        """纯 tool_call（无文本）+ Edit 参数违规：流式扫描后须把修正文本回写进
+        **保留的** tool_call 参数——绝不把工具调用降级成散文（否则文件从不落盘）。"""
         import json as _json
         router.config.style_guard.enabled = True
         from deep_proxy.compatibility.reasoning_handler import StreamingReasoningAccumulator
@@ -271,15 +272,16 @@ class TestStreamingStyleGuard:
         body = {"model": "deepseek-v4-flash",
                 "messages": [{"role": "user", "content": "写"}]}
         frames = await router._styleguard_scan_stream(body, None, acc, [], "tool_calls")
-        text = "".join(
-            c.get("delta", {}).get("content", "")
-            for f in frames for c in f.get("choices", [])
-        )
-        assert "双手垂在身侧" in text  # 参数违规被修正并重新下发
-        # 修正把 tool_call 改写成纯文本 → finish_reason 必须降为 stop，不能仍是 tool_calls
+        # 不变量：tool_call 帧保留，修正文本写回 Edit 参数
+        tc_frames = [f for f in frames
+                     for c in f.get("choices", []) if c.get("delta", {}).get("tool_calls")]
+        assert tc_frames, "tool_call 帧不得被降级成散文"
+        args = _json.loads(tc_frames[0]["choices"][0]["delta"]["tool_calls"][0]
+                           ["function"]["arguments"])
+        assert args["new_string"] == "他站着，双手垂在身侧。"  # 参数违规被修正并回写
+        # 仍以工具调用形态返回 → finish_reason 保持 tool_calls
         finishes = [c.get("finish_reason") for f in frames for c in f.get("choices", [])]
-        assert "tool_calls" not in finishes
-        assert finishes[-1] == "stop"
+        assert finishes[-1] == "tool_calls"
 
 
 class TestApplyStyleGuardOverride:

@@ -105,8 +105,8 @@ def _message_to_chunk_frames(
     OpenAI 一致性：同一 completion 的所有 chunk **共享一个 id**（不再每帧新 uuid）；
     `role:"assistant"` 仅落在首帧 delta；尽量沿用上游的 model/created。
     finish_reason **由修正消息自身**派生（有 tool_calls → "tool_calls"，否则 "stop"），
-    不沿用上游原始 finish_reason——否则参数违规修正把 tool_call 改写成纯文本后，
-    仍带 finish_reason="tool_calls" 会误导客户端 SDK 等待并不存在的工具调用。
+    不沿用上游原始 finish_reason——使终止标记始终与修正后的实际消息形态一致
+    （纯文本修正 → "stop"；保留/回写了 tool_call → "tool_calls"），避免误导客户端 SDK。
     """
     content = message.get("content") or ""
     reasoning = message.get("reasoning_content") or ""
