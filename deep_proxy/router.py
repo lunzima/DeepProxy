@@ -556,6 +556,11 @@ class DeepProxyRouter:
 
         共享于流式 (iter_chat_chunks) 与非流式 (chat_completions) 两条路径。
         返回处理后的 result（无违规时原值返回；违规修正后为新响应）。
+
+        可用性：响应侧能进本方法即证明原始 provider 可用（legacy api_key="" 时
+        call_litellm 经环境变量回退跑通），不在入口按 api_key 预判。运行时重发失败
+        （429 配额耗尽 / 宕机）由 apply_style_guard_loop 的异常兜底回退最优结果。
+        异族 provider（cross_consult pair）作为 call_alt_upstream 传入，循环内交替重试。
         """
         from .optimization.style_guard import (
             apply_style_guard_loop, apply_fluency_fix, RULES,
@@ -573,12 +578,12 @@ class DeepProxyRouter:
             return await call_litellm(self.config, body, provider=provider)
         # 异族模型调用：跨家族修正，解决同模型对自身违规不敏感的问题
         call_alt: Callable | None = None
-        if (
-            self.config.cross_consult.enabled
-            and provider is not None
-            and self.config.cross_consult.pair_for(provider.name)
-        ):
-            _alt_name = self.config.cross_consult.pair_for(provider.name)
+        _alt_name = (
+            self.config.cross_consult.pair_for(provider.name)
+            if (self.config.cross_consult.enabled and provider is not None)
+            else None
+        )
+        if _alt_name:
             _alt_provider = self.config.providers.get(_alt_name)
             if _alt_provider and _alt_provider.api_key:
                 async def _resend_alt():
@@ -592,6 +597,13 @@ class DeepProxyRouter:
                     finally:
                         body["model"] = _saved_model
                 call_alt = _resend_alt
+
+        # 注意：不在入口按 provider.api_key 判可用性。_apply_style_guard 是响应侧——
+        # 原始请求已成功返回 result 即证明 provider 可用（legacy 配置 api_key="" 时
+        # call_litellm 经 DEEPSEEK_API_KEY 环境变量回退照样跑通）。入口预判
+        # bool(provider.api_key) 会对这类部署误判为不可用、静默跳过整个 StyleGuard。
+        # 运行时重发失败（429 配额耗尽 / 宕机）由 apply_style_guard_loop 的异常兜底
+        # 回退最优结果，不在此处短路。
         corrected = await apply_style_guard_loop(
             body=body,
             call_upstream=_resend,

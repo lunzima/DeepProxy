@@ -733,6 +733,8 @@ def scan_tool_call_violations(
 
     解析失败、参数非 JSON 对象、或非目标工具时跳过。
     返回命中列表（与 scan_violations 同结构）。流式与非流式路径共用，避免逻辑漂移。
+    含任一叙事锚点的参数走全规则扫描；纯代码参数（0 锚点）跳过叙事专用规则，
+    避免把代码文件当叙事"修正"。
     """
     if not tool_calls:
         return []
@@ -753,7 +755,14 @@ def scan_tool_call_violations(
             continue
         value = parsed.get(arg_key)
         if isinstance(value, str):
-            out.extend(scan_violations(value, rules))
+            # 纯代码参数跳过叙事专用规则（破折号/否定式/抽象词等会在代码中误命中）；
+            # 含任一叙事锚点的参数走全规则扫描（单句「他…没有动。」也需 fr5 检测）。
+            if _looks_like_code(value):
+                tc_rules = [r for r in (rules or RULES)
+                            if r.id not in _NARRATIVE_ONLY_RULE_IDS]
+            else:
+                tc_rules = rules
+            out.extend(scan_violations(value, tc_rules))
     return out
 
 
@@ -778,13 +787,43 @@ def _extract_tool_text(tool_calls: list | None) -> str | None:
     return None
 
 
-def _inject_text_into_tool_calls(tool_calls: list, corrected_text: str) -> list:
-    """返回 tool_calls 的深拷贝，把修正文本写回首个写文件工具的文本参数。
+_META_SIGNAL_WORDS = re.compile(
+    # 元过程描述散文的信号词——重发改写时模型常把"修改说明"塞进 tool_call 正文栏。
+    # 命中任一即判为元描述、拒绝注入文件参数。词表只收"显然是元指令"的表述，
+    # 避开"重新组织/修正后"等也属合法叙事动作的歧义词（曾误拒「她重新组织了语言」）。
+    # `style\.guard` 转义点号（否则匹配任意字符）；冒号兼容半角/全角。
+    r"修复了|改写为|修改了|修改后|替换为|改为[：:]|修改方案|修改内容如下"
+    r"|style\.guard|反复循环|停下话头|以下是修正|改进草稿",
+    re.IGNORECASE,
+)
 
-    其余参数（file_path 等）保持不变。供 StyleGuard 循环在"参数违规 + 重发降级成散文"时
-    把修正后的散文回写进**保留的**工具调用，绝不让工具调用降级丢失。
+
+def _is_valid_file_content(text: str) -> bool:
+    """检查文本是否为有效文件内容，排除元过程描述的散文。
+
+    返回 True 表示文本通过校验。调用方据此决定将文本注入工具参数或回退到原始值。
+    含元过程信号词（修复了/修改方案/改写为/反复循环…）一律判为元描述散文、拒绝注入，
+    不分长短——生产日志显示模型会输出长篇修改说明（>500 字），长度上界反而让长篇元描述
+    绕过保护被当文件正文写盘。阈值写在长度之外正是这个 bug 的根因。
     """
-    new_calls = json.loads(json.dumps(tool_calls))  # 深拷贝，避免改动原始 saved_tc
+    if not text:
+        return False
+    if _META_SIGNAL_WORDS.search(text):
+        return False
+    return True
+
+
+def _inject_text_into_tool_calls(tool_calls: list, corrected_text: str) -> tuple[list, bool]:
+    """将修正文本写入首个写文件工具的文本参数，返回 (新 tool_calls, 是否注入)。
+
+    其余参数（file_path 等）保持原样。写入前通过 _is_valid_file_content 校验：
+      - 通过 → 返回深拷贝（已写入修正文本），ok=True
+      - 不通过（空/元过程散文）→ 返回原始 tool_calls（不动），ok=False
+    用显式 bool 取代"返回值有时是原对象有时是拷贝"的隐式同一性判定，调用方意图自解释。
+    """
+    if not _is_valid_file_content(corrected_text):
+        return tool_calls, False
+    new_calls = json.loads(json.dumps(tool_calls))  # 深拷贝
     for tc in new_calls:
         fn = (tc.get("function") if isinstance(tc, dict) else None) or {}
         arg_key = _TOOL_TEXT_ARG_KEYS.get(fn.get("name"))
@@ -799,7 +838,7 @@ def _inject_text_into_tool_calls(tool_calls: list, corrected_text: str) -> list:
         parsed[arg_key] = corrected_text
         fn["arguments"] = json.dumps(parsed, ensure_ascii=False)
         break  # 仅回写首个写文件工具
-    return new_calls
+    return new_calls, True
 
 
 # ---------------------------------------------------------------------------
@@ -820,10 +859,40 @@ _NARRATIVE_ANCHOR_MIN = 5  # 判定为叙事文本所需的锚点命中数
 
 
 def _has_narrative_anchors(text: str) -> bool:
-    """检测文本是否含有足够多的叙事锚点词以判定为叙事文本。"""
+    """检测文本是否含有足够多的叙事锚点词以判定为叙事文本。
+
+    阈值 _NARRATIVE_ANCHOR_MIN=5 用于 fluency 审查的"是否值得花一次上游调用改写"
+    判定（够叙事才值得改）。**勿**复用于 violation 扫描的"是否叙事"判定——
+    典型 tool_call 单句参数（如「他站在那里，没有动。」）仅 1 个锚点，用本阈值会
+    误判为纯代码、漏扫 fr5/dash。见 _looks_like_code / scan_tool_call_violations。
+    """
     if not isinstance(text, str) or not text:
         return False
     return len(_NARRATIVE_ANCHORS.findall(text)) >= _NARRATIVE_ANCHOR_MIN
+
+
+# 叙事专用规则 id 集合：这些规则的模式在纯代码/技术文本中出现是合法的，不应误报。
+# scan_tool_call_violations 对纯代码参数（无叙事锚点）跳过此集合，避免把代码文件
+# 当叙事反复"修正"。集合保守——只收显然仅适用于小说叙事的规则（破折号、否定式、
+# 抽象词、情感标签、微表情、停顿、冻结帧、叙事者总结、翻译腔从句、形式主语等）。
+# 新增叙事专用规则记得加入此集合——实测 clic/rp11/q_narrator/q_de/q_it/i2 会命中
+# 代码注释（「心中一紧」「之所以…是因为」「这意味着」「在…的情况下」）。
+_NARRATIVE_ONLY_RULE_IDS = frozenset({
+    "fr5", "dash", "attr_a", "attr_b", "emo", "abst",
+    "tm1", "se1", "inv1", "rp5", "rp10", "rp11",
+    "clic", "q_narrator", "q_de", "q_it", "i2",
+})
+
+
+def _looks_like_code(text: str) -> bool:
+    """判断 tool_call 写入的正文是否更像代码而非叙事（0 个叙事锚点）。
+
+    用"任一叙事锚点"而非 _has_narrative_anchors 的 ≥5 阈值：单句叙事（「他…没有动。」）
+    只命中 1 个代词锚点，仍应视为叙事走全规则扫描。0 锚点才判为代码。
+    """
+    if not isinstance(text, str) or not text:
+        return False
+    return len(_NARRATIVE_ANCHORS.findall(text)) == 0
 
 
 _FLUENCY_SYSTEM_PROMPT = """\
@@ -983,6 +1052,18 @@ _RETRY_INSTRUCTION = (
 )
 
 
+def _is_quota_exhausted(exc: Exception) -> bool:
+    """判断异常是否为配额耗尽类（429 / RateLimitError / BudgetExceededError）。
+
+    按异常类名与 status_code 双重判定，避免本模块硬依赖 litellm（测试环境可能未装）。
+    配额耗尽是账户级的——切到同账户的备用 provider 无意义，应直接回退而非重试放大。
+    BudgetExceededError（litellm max_budget 预算上限）无 status_code，按类名识别。
+    """
+    if getattr(exc, "status_code", None) == 429:
+        return True
+    return type(exc).__name__ in {"RateLimitError", "BudgetExceededError"}
+
+
 def _measure_violations(result: dict, rules: list[StyleRule]) -> int | None:
     """统计一个响应的总违规数（content + tool_call 参数），用于"最优结果"比较。
 
@@ -1052,6 +1133,12 @@ async def apply_style_guard_loop(
     _m0 = _measure_violations(result, rules)
     _best_violations: float = float("inf") if _m0 is None else _m0
 
+    # 无进展退出：连续 _NO_IMPROVE_LIMIT 轮违规数不降即 break，阻断死循环。
+    # 生产日志显示 fr5 等"模型不会改"的违规会触发 R1/8→R8/8 全跑满、违规数恒定，
+    # 海量重发改写既烧光配额（429 级联）又落盘原始违规正文。及早退出止损。
+    _NO_IMPROVE_LIMIT = 2
+    _no_improve_streak = 0
+
     # 入口快照 body 长度，循环结束时回滚所有追加的修正轮消息（与流式路径对齐，
     # 避免把重试对话残留在 body 中污染后续 fluency / 日志 / 复用）。
     _msgs_entry = len(body.get("messages", []))
@@ -1086,7 +1173,9 @@ async def apply_style_guard_loop(
         if tc_args_violations:
             feedback = (
                 feedback
-                + "\n\n**注意：你即将通过 tool_call 写入文件的内容中也有违规，请同时修正 tool_call 参数**\n"
+                + "\n\n**注意：你通过 tool_call 写入文件的内容中也检测到违规。**\n"
+                + "**`Edit.new_string` 和 `Write.content` 中只写入目标文件的正文。**\n"
+                + "**元指令文字（如\"修复了\"\"修改方案\"\"替换为\"）保留在 assistant 文本中，tool_call 参数的正文栏只放文件内容。**\n"
                 + build_feedback_message(tc_args_violations)
             )
         all_violations = violations + tc_args_violations
@@ -1098,6 +1187,7 @@ async def apply_style_guard_loop(
         # 附加前一轮的 assistant 消息和反馈。
         # 若含 tool_calls，剥离后再追加——避免 tool_calls 消息缺少对应 tool_result 导致
         # DeepSeek "insufficient tool messages" 400 错误。tool_calls 保留在 saved_tc 中。
+        _msgs_before_append = len(body.get("messages", []))
         if saved_tc:
             logger.info("style_guard retry=%d: 响应含 tool_calls，剥离后继续修正循环", _retry + 1)
             stripped_msg = dict(message)
@@ -1107,7 +1197,38 @@ async def apply_style_guard_loop(
             body["messages"].append(message)
         body["messages"].append({"role": "user", "content": _RETRY_INSTRUCTION + feedback})
 
-        result = await _active_fn()
+        # 重发上游——带运行时异常兜底：
+        # provider 已配置 api_key 但实际不可用（429 配额耗尽、服务宕机、网络故障）时，
+        # 自动切换到下一 provider 重试一次；全部不可用或无下一 provider 时回退最优结果。
+        try:
+            result = await _active_fn()
+        except Exception as _exc:
+            _pname = _providers[_provider_idx][0]
+            _is_quota = _is_quota_exhausted(_exc)
+            # 回滚本轮追加的反馈消息（异常路径下消息仍在 body 中，会污染后续调用）
+            if "messages" in body and len(body["messages"]) > _msgs_before_append:
+                del body["messages"][_msgs_before_append:]
+            # 配额耗尽（账户级）或仅一个 provider 时：切 provider 无意义，直接回退最优结果。
+            # 死循环海量重发会烧光配额引发 429 级联——此处及早止血，避免重试放大。
+            if _is_quota or len(_providers) <= 1:
+                logger.warning(
+                    "style_guard retry=%d: provider '%s' 调用失败（%s），回退到当前最优结果",
+                    _retry + 1, _pname, "配额耗尽" if _is_quota else "无备用 provider",
+                    exc_info=True,
+                )
+                break
+            # 切换到下一 provider 重试一次
+            _provider_idx = (_provider_idx + 1) % len(_providers)
+            _active_fn = _providers[_provider_idx][1]
+            try:
+                result = await _active_fn()
+            except Exception:
+                _pname2 = _providers[_provider_idx][0]
+                logger.warning(
+                    "style_guard retry=%d: provider '%s' 也调用失败，回退到当前最优结果",
+                    _retry + 1, _pname2, exc_info=True,
+                )
+                break
 
         # tool_call 保留不变量：**原响应含 tool_calls → 重发结果也必须含 tool_calls**。
         # 否则客户端收到一段"我来写文件"的散文、文件却从未落盘（agent 写文件场景的致命 bug）。
@@ -1119,18 +1240,24 @@ async def apply_style_guard_loop(
                 # 仅 prose 违规、工具参数本身干净 → 始终回挂原始 tool_calls（参数不动）。
                 _rmsg["tool_calls"] = saved_tc
             else:
-                # 工具参数本身违规 → 需要修正后的文件正文，但仍须以工具调用形态返回。
-                #   1) 重发自带重新生成的写文件工具 → 直接采用其文本；
-                #   2) 否则取重发的散文 content 作为修正文本，回写进保留的原始工具调用；
-                #   3) 都没有 → 兜底回挂原始工具调用（文件仍会写入，至多保留瑕疵，绝不丢调用）。
+                # 工具参数本身违规 → 需要修正后的文件正文，仍须以工具调用形态返回。
+                # 修正文本来源（按优先级）：
+                #   1) 重发自带的写文件 tool_call 文本——但须 _is_valid_file_content 校验，
+                #      排除元过程散文（"修复了…"），否则会遮蔽下面更优的 content；
+                #   2) 重发改写出的散文 content（同样校验）——重发常按 _RETRY_INSTRUCTION
+                #      返回纯散文，这是把修正成果写回文件的关键路径；
+                #   3) 都无效 → 兜底回挂原始 tool_calls（参数保留原样，始终以工具形态返回）。
                 _corrected = _extract_tool_text(_rmsg.get("tool_calls"))
-                if _corrected is None:
+                if not _corrected or not _is_valid_file_content(_corrected):
                     _corrected = _rmsg.get("content") or ""
-                if _corrected:
-                    _rmsg["tool_calls"] = _inject_text_into_tool_calls(saved_tc, _corrected)
-                    _rmsg["content"] = ""  # 正文已并入工具参数，不再以散文重复
-                else:
-                    _rmsg["tool_calls"] = saved_tc
+                _injected, _ok = (
+                    _inject_text_into_tool_calls(saved_tc, _corrected)
+                    if _corrected else (saved_tc, False)
+                )
+                _rmsg["tool_calls"] = _injected
+                # 重发改写的散文不应作为文件正文写盘，也不应与工具调用并存返回
+                # （避免客户端既收到散文又收到写旧内容的调用）——始终清空。
+                _rmsg["content"] = ""
 
         # 跟踪最优结果——在 tool_calls 解析**之后**度量，使"最优"与实际返回形态一致；
         # 度量为 None（空/故障响应）时跳过，不让其取代已有最优。
@@ -1138,6 +1265,17 @@ async def apply_style_guard_loop(
         if _vn is not None and _vn < _best_violations:
             _best_violations = _vn
             _best_result = result
+            _no_improve_streak = 0
+        elif _vn is not None:
+            # 有内容但违规数未降（含相等）→ 累计无进展。重发可能改了措辞但没消除违规，
+            # 模型若坚持不改则连续多轮恒定，再重发只是浪费上游调用。
+            _no_improve_streak += 1
+            if _no_improve_streak >= _NO_IMPROVE_LIMIT:
+                logger.info(
+                    "style_guard retry=%d: 连续 %d 轮违规数未降（%d→%d），退出修正循环",
+                    _retry + 1, _no_improve_streak, _best_violations, _vn,
+                )
+                break
 
         # 切换到下一个 provider 继续
         _provider_idx = (_provider_idx + 1) % len(_providers)

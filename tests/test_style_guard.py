@@ -414,13 +414,57 @@ class TestStyleGuardLoop:
         )
         assert call_count == 1
         final_msg = final["choices"][0]["message"]
-        # 不变量：工具调用必须保留
+        # 不变量：工具调用必须保留，绝不降级成散文
         assert final_msg.get("tool_calls"), "tool_call 不得被降级成散文"
         assert final_msg["tool_calls"][0]["id"] == "tc1"
-        # 修正后的文本被回写进 tool_call 参数（文件会写入修正版）
+        # 修正文本回写进保留的 tool_call 参数（文件会写入修正版）
         args = _json.loads(final_msg["tool_calls"][0]["function"]["arguments"])
         assert args["new_string"] == "他站在那里，双手放在身体两侧。"
         assert args["file_path"] == "test.md"  # 其余参数不变
+        # 正文已并入工具参数，不再以散文重复
+        assert final_msg.get("content", "") == ""
+
+    @pytest.mark.asyncio
+    async def test_meta_text_tool_call_falls_back_to_prose_content(self):
+        """重发同时返回元文本 tool_call + 有效 prose content 时，必须跳过元文本、
+        采用 content 作为修正文本——避免元描述（"修复了…"）遮蔽有效修正成果。"""
+        import json as _json
+        first = {
+            "choices": [{"message": {
+                "role": "assistant", "content": "修正如下。",
+                "tool_calls": [{"id": "tc1", "type": "function", "function": {
+                    "name": "Edit",
+                    "arguments": _json.dumps({"file_path": "t.md",
+                                              "new_string": "他站着，没有动。"})
+                }}],
+            }}]
+        }
+        # 重发：元文本 tool_call（"修复了…"，应被判为元过程散文）+ 干净 prose content
+        second = {
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "他站着，双手垂在身侧。",
+                "tool_calls": [{"id": "tc2", "type": "function", "function": {
+                    "name": "Edit",
+                    "arguments": _json.dumps({"file_path": "t.md",
+                                              "new_string": "修复了：将否定式改为肯定"})
+                }}],
+            }}]
+        }
+
+        async def fake_upstream():
+            return second
+
+        final = await apply_style_guard_loop(
+            body={"messages": [{"role": "user", "content": "写"}]},
+            call_upstream=fake_upstream, result=first, rules=RULES, max_retries=2,
+        )
+        final_msg = final["choices"][0]["message"]
+        assert final_msg.get("tool_calls"), "tool_call 必须保留"
+        args = _json.loads(final_msg["tool_calls"][0]["function"]["arguments"])
+        # 元文本被跳过，有效 content 被注入——而非落盘"修复了…"
+        assert args["new_string"] == "他站着，双手垂在身侧。"
+        assert final_msg.get("content", "") == ""
 
     @pytest.mark.asyncio
     async def test_tool_call_write_args_clean_merged_normally(self):
@@ -562,6 +606,71 @@ class TestStyleGuardLoop:
         )
         # 原始违规数 < 重试违规数 → 返回原始
         assert final is original
+
+    @pytest.mark.asyncio
+    async def test_no_improvement_breaks_loop_early(self):
+        """连续无进展（违规数不降）应及早退出，不跑满 max_retries。
+
+        生产日志显示 fr5 等"模型不会改"的违规会触发 R1/8→R8/8 全跑满、违规数恒定，
+        烧光配额。无进展退出应在上游调用远少于上限时止损。
+        """
+        original = {
+            "choices": [{"message": {"role": "assistant", "content": "他坐在那里，没有动。"}}]
+        }  # fr5 = 1 违规
+        # 模型每轮都不改——返回与原始等价的违规（fr5 仍在）
+        same = {
+            "choices": [{"message": {"role": "assistant", "content": "他坐在那里，没有动。"}}]
+        }
+
+        call_count = 0
+
+        async def fake_upstream():
+            nonlocal call_count
+            call_count += 1
+            return same
+
+        final = await apply_style_guard_loop(
+            body={"messages": [{"role": "user", "content": "写"}]},
+            call_upstream=fake_upstream,
+            result=original,
+            rules=RULES,
+            max_retries=10,  # 远大于无进展上限
+        )
+        # 连续 2 轮无进展即退出 → call_count 应远小于 max_retries（最多 2）
+        assert call_count <= 2, f"无进展应及早退出，但重发了 {call_count} 次"
+        assert final is original  # 最优仍是原始（重发未改善）
+
+    @pytest.mark.asyncio
+    async def test_quota_exhausted_breaks_without_retry_amplification(self):
+        """429 配额耗尽应直接回退最优结果，不切 provider 白打、不重试放大。
+
+        配额是账户级——切到同账户备用 provider 无意义；call_litellm 内部已对 429
+        退避重试过，StyleGuard 再 try 只会放大消耗、拖垮服务可用性。
+        """
+
+        class _RateLimitError(Exception):
+            status_code = 429
+
+        original = {
+            "choices": [{"message": {"role": "assistant", "content": "他坐在那里，没有动。"}}]
+        }
+        call_count = 0
+
+        async def failing_upstream():
+            nonlocal call_count
+            call_count += 1
+            raise _RateLimitError("quota exhausted")
+
+        final = await apply_style_guard_loop(
+            body={"messages": [{"role": "user", "content": "写"}]},
+            call_upstream=failing_upstream,
+            result=original,
+            rules=RULES,
+            max_retries=5,
+        )
+        # 配额耗尽应只调一次（不切 provider 重试）即回退
+        assert call_count == 1, f"429 应直接回退，但调用了 {call_count} 次"
+        assert final is original  # 回退到原始最优
 
 
 class TestScanToolCallViolations:

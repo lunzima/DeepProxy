@@ -662,6 +662,14 @@ class ProxyConfig(BaseModel):
                         f"必须是 provider '{entry.provider}' 的 flash_model "
                         f"({prov.flash_model}) 或 pro_model ({prov.pro_model})"
                     )
+            # 全部 weight=0 会让 select_pool_target 的 random.choices 抛
+            # ValueError（权重和必须 > 0）→ 端点 500。weight=0 是合法的"软禁用单条目"，
+            # 但全 0 等于禁用整个 pool，加载期 fail-fast 比运行时崩溃友好。
+            if all(e.weight == 0 for e in pool):
+                raise ValueError(
+                    f"port {binding.port} 的 model_pool 全部条目 weight=0，"
+                    f"加权随机无法选择（权重和为 0）；至少需一个条目 weight>0"
+                )
         return self
 
     def bound_ports(self) -> list[int]:

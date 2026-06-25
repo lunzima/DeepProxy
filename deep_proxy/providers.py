@@ -52,7 +52,7 @@ class PoolEntry(BaseModel):
 
     provider: str = Field(description="必须匹配 providers 字典中的某个 key")
     model: str = Field(description="必须等于该 provider 的 flash_model 或 pro_model")
-    weight: float = Field(default=1.0, gt=0, description="加权随机的相对权重（> 0）")
+    weight: float = Field(default=1.0, ge=0, description="加权随机的相对权重（≥ 0，设为 0 等于软禁用该条目）")
 
 
 class PortBinding(BaseModel):

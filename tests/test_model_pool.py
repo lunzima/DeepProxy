@@ -63,10 +63,35 @@ def test_pool_rejects_model_not_flash_or_pro():
         _cfg_with_pool(bad)
 
 
-def test_pool_rejects_nonpositive_weight():
-    bad = [{"provider": "deepseek", "model": "deepseek-v4-flash", "weight": 0}]
+def test_pool_rejects_negative_weight():
+    bad = [{"provider": "deepseek", "model": "deepseek-v4-flash", "weight": -1}]
     with pytest.raises(ValidationError):
         _cfg_with_pool(bad)
+
+
+def test_pool_accepts_zero_weight():
+    """weight=0 合法——等于软禁用该条目，select_pool_target 跳过该条目。"""
+    pool = [
+        {"provider": "deepseek", "model": "deepseek-v4-flash", "weight": 0},
+        {"provider": "deepseek", "model": "deepseek-v4-pro", "weight": 1},
+    ]
+    cfg = _cfg_with_pool(pool)
+    binding = next(b for b in cfg.ports if b.port == 8001)
+    rng = random.Random(99)
+    for _ in range(100):
+        provider, model = select_pool_target(binding, cfg, rng=rng)
+        assert model == "deepseek-v4-pro"  # weight=0 的条目不会命中
+
+
+def test_pool_rejects_all_zero_weights():
+    """全 0 权重在加载期 fail-fast——否则 select_pool_target 的 random.choices
+    会抛 ValueError（权重和必须 > 0）导致端点 500。"""
+    pool = [
+        {"provider": "deepseek", "model": "deepseek-v4-flash", "weight": 0},
+        {"provider": "deepseek", "model": "deepseek-v4-pro", "weight": 0},
+    ]
+    with pytest.raises(ValidationError):
+        _cfg_with_pool(pool)
 
 
 def test_select_resolves_provider_and_model():

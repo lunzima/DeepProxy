@@ -65,6 +65,11 @@ ports:
     # 加权模型桶（默认启用）：逐请求加权随机选 (provider, model)，跨 provider 家族轮询。
     # flash 起始 → BERT/启发式可升格；pro 起始 → pin 在 pro。每个条目的 model 必须是
     # 该 provider 的 flash_model 或 pro_model。如需退回单一 provider 路由，删除整个 model_pool 块。
+    #
+    # 某 provider quota 耗尽时软禁用：把该 provider 的条目 weight 设 0（select_pool_target
+    # 跳过 0 权重条目），并同步把 cross_consult.enabled 置 false（否则 consult / StyleGuard
+    # call_alt 仍会调该 provider 的 pro 触发 429）。至少保留一个条目 weight>0，否则加载期
+    # 校验会 fail-fast（全 0 权重无法加权选择）。quota 恢复后 weight 改回 1 即可。
     model_pool:
       - { provider: deepseek, model: deepseek-v4-flash, weight: 1 }
       - { provider: mimo,     model: mimo-v2.5,         weight: 1 }
@@ -86,6 +91,9 @@ ports:
 #      flash_upgrade 分级路由选档），窗口耗尽后自然回到源 provider。
 # 详见 docs/mimo_integration.md §12 / §12.11。
 cross_consult:
+  # enabled: false    # 某 provider quota 耗尽时置 false，避免 consult / StyleGuard call_alt
+                       # 调该 provider 的 pro 触发 429（须同时把 model_pool 中该 provider
+                       # 条目 weight 设 0）。双 provider 都可用时保持 true。
   enabled: true
   tool_name: cross_consult              # 暴露给 agent 的工具名
   pairs:                                # 异家族配对（symmetric，无主副层级）
